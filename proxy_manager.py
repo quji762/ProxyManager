@@ -25,6 +25,54 @@ except ImportError:
 import pystray
 from PIL import Image, ImageDraw
 
+# ── Patch customtkinter _root() crash ─────────────────────────────────────────
+# customtkinter 6.0.0 has a bug where, under PyInstaller (and occasionally under
+# the interpreter), a widget's _root attribute gets overwritten with the root
+# CTk instance instead of staying a bound method. When an event binding fires,
+# tkinter's _substitute() calls nametowidget() -> w._root(), which then raises
+# TypeError("'CTk' object is not callable"). Because _substitute only catches
+# KeyError, the exception propagates into CallWrapper.__call__ ->
+# _report_exception, which *also* calls self._root() and fails the same way,
+# taking the whole app down.
+#
+# We harden both failure points so a bad _root is tolerated gracefully.
+import tkinter
+
+def _safe_nametowidget(self, name):
+    """nametowidget that tolerates a corrupt _root attribute."""
+    name = str(name).split('.')
+    w = self
+    if not name[0]:
+        root = w._root
+        if callable(root):
+            w = root()
+        else:
+            # _root was overwritten with the root widget instance itself.
+            w = root if root is not None else w
+        name = name[1:]
+    for n in name:
+        if not n:
+            break
+        w = w.children[n]
+    return w
+
+def _safe_report_exception(self):
+    """_report_exception that tolerates a corrupt _root attribute."""
+    import sys, traceback
+    exc, val, tb = sys.exc_info()
+    try:
+        root = self._root
+        if callable(root):
+            root = root()
+        root.report_callback_exception(exc, val, tb)
+    except Exception:
+        # Last resort: dump to stderr so the process doesn't die silently.
+        traceback.print_exception(exc, val, tb)
+
+tkinter.Misc._nametowidget = _safe_nametowidget
+tkinter.Misc.nametowidget = _safe_nametowidget
+tkinter.Misc._report_exception = _safe_report_exception
+
 user32 = ctypes.WinDLL("user32")
 
 # Explicit prototype for SendMessageTimeoutW — without this, 64-bit Python
@@ -432,6 +480,14 @@ class App:
         self._tray_icon = None
         self._tray_thread = None
 
+        # Rebuild generation — incremented each time _build() tears down and
+        # recreates the content tree. Callbacks scheduled via self._after() embed
+        # the generation at creation time and no-op if a rebuild has since
+        # happened, avoiding "CTk object is not callable" crashes that occur when
+        # a stale after(0, …) fires against a destroyed widget (common with
+        # customtkinter + PyInstaller).
+        self._generation = 0
+
         self._build()
 
         # Apply persisted topmost state.
@@ -455,12 +511,27 @@ class App:
         # Closing the window hides to the tray instead of quitting.
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ── Safe after() ─────────────────────────────────────────────────────────────
+    def _after(self, delay_ms, func):
+        """Schedule func on the main loop, but only run it if no rebuild has
+        happened since scheduling. Prevents stale callbacks from touching
+        destroyed widgets."""
+        gen = self._generation
+        def wrapper():
+            if gen == self._generation:
+                func()
+        self.root.after(delay_ms, wrapper)
+
     # ── Build UI (two-column landscape) ──
     def _build(self):
         # Tear down previous content if rebuilding for a theme switch.
         for w in self.root.winfo_children():
             if getattr(w, "_is_content", False):
                 w.destroy()
+
+        # Bump generation so any pending callbacks from the previous UI tree
+        # become no-ops instead of operating on destroyed widgets.
+        self._generation += 1
 
         content = ctk.CTkFrame(self.root, fg_color="transparent")
         content._is_content = True
@@ -675,7 +746,7 @@ class App:
             mo  = get_wsl_network_mode()
             psp = get_ps_proxy_vars()
             wsp = get_wsl_proxy_vars()
-            self.root.after(0, lambda: self._update(ps, ws, li, wi, mo, psp, wsp))
+            self._after(0, lambda: self._update(ps, ws, li, wi, mo, psp, wsp))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -771,7 +842,7 @@ class App:
 
         def do():
             ret = restart_wsl()
-            self.root.after(0, lambda: self._rst_done(ret))
+            self._after(0, lambda: self._rst_done(ret))
 
         threading.Thread(target=do, daemon=True).start()
 
