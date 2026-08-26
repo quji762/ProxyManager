@@ -217,7 +217,13 @@ def get_wsl_ip():
         return "WSL 未运行"
 
 
+_wsl_network_mode_cache: Optional[str] = None
+
+
 def get_wsl_network_mode():
+    global _wsl_network_mode_cache
+    if _wsl_network_mode_cache is not None:
+        return _wsl_network_mode_cache
     try:
         p = os.path.expanduser(r"~\.wslconfig")
         if os.path.exists(p):
@@ -235,8 +241,10 @@ def get_wsl_network_mode():
                 if in_wsl2:
                     m = re.match(r"^networkingMode\s*=\s*(\S+)\s*$", line, re.IGNORECASE)
                     if m:
-                        return m.group(1).capitalize()
-        return "默认(NAT)"
+                        _wsl_network_mode_cache = m.group(1).capitalize()
+                        return _wsl_network_mode_cache
+        _wsl_network_mode_cache = "默认(NAT)"
+        return _wsl_network_mode_cache
     except Exception:
         return "未知"
 
@@ -381,10 +389,13 @@ def _parse_export(block: str, name: str):
     return m.group(1).strip() if m else None
 
 
-def get_wsl_proxy_vars():
-    """Read HTTP_PROXY and HTTPS_PROXY produced by this tool from WSL."""
+def get_wsl_proxy_vars(block: Optional[str] = None):
+    """Read HTTP_PROXY and HTTPS_PROXY produced by this tool from WSL.
+    Pass an existing block (from _read_wsl_block) to avoid a redundant WSL
+    subprocess call."""
     result = {"HTTP_PROXY": "未设置", "HTTPS_PROXY": "未设置"}
-    block = _read_wsl_block()
+    if block is None:
+        block = _read_wsl_block()
     if not block:
         return result
     for name in ("HTTP_PROXY", "HTTPS_PROXY"):
@@ -394,8 +405,9 @@ def get_wsl_proxy_vars():
     return result
 
 
-def get_wsl_status():
-    block = _read_wsl_block()
+def get_wsl_status(block: Optional[str] = None):
+    if block is None:
+        block = _read_wsl_block()
     if not block:
         return None
     url = _parse_export(block, "HTTP_PROXY")
@@ -798,13 +810,26 @@ class App:
         self._dot.configure(text_color="#CCC")
 
         def work():
-            ps  = get_ps_status()
-            ws  = get_wsl_status()
-            li  = get_local_ip()
-            wi  = get_wsl_ip()
-            mo  = get_wsl_network_mode()
-            psp = get_ps_proxy_vars()
-            wsp = get_wsl_proxy_vars()
+            # Run independent I/O-bound checks in parallel. The three WSL
+            # subprocess calls used to run serially (1.5-6s); now they overlap
+            # and the total is bounded by the slowest single call (~0.5-2s).
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                f_ps  = pool.submit(get_ps_status)
+                f_li  = pool.submit(get_local_ip)
+                f_wi  = pool.submit(get_wsl_ip)
+                f_mo  = pool.submit(get_wsl_network_mode)
+                f_psp = pool.submit(get_ps_proxy_vars)
+                # Single WSL read shared by both status and proxy-var parsing.
+                f_block = pool.submit(_read_wsl_block)
+                ps  = f_ps.result()
+                li  = f_li.result()
+                wi  = f_wi.result()
+                mo  = f_mo.result()
+                psp = f_psp.result()
+                block = f_block.result()
+            ws  = get_wsl_status(block)
+            wsp = get_wsl_proxy_vars(block)
             self._after(0, lambda: self._update(ps, ws, li, wi, mo, psp, wsp))
 
         threading.Thread(target=work, daemon=True).start()
@@ -940,7 +965,56 @@ class App:
         self.root.configure(fg_color=C["bg"])
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
                     self.ps_var.get(), self.wsl_var.get(), self.pin_var.get(), self._mode)
-        self._build()
+        # Re-tint the existing widget tree in place — no destroy/rebuild, so the
+        # switch is instant with no visible flicker.
+        for w in self.root.winfo_children():
+            if getattr(w, "_is_content", False):
+                self._apply_colors(w)
+        self._sync_pin_btn()
+
+    def _apply_colors(self, widget):
+        """Recursively restyle an existing widget tree to the active palette
+        without destroying any widgets. customtkinter supports dynamic color
+        updates via .configure()."""
+        if isinstance(widget, ctk.CTkButton):
+            # Distinguish the three button styles by their role.
+            text = widget.cget("text")
+            if text == "启用代理":
+                widget.configure(fg_color=C["accent"], hover_color=C["accent_h"],
+                                 text_color="#FFFFFF", border_color=C["border"])
+            elif text == "关闭代理":
+                widget.configure(fg_color="transparent", border_color=C["red"],
+                                 text_color=C["red"], hover_color=C["danger_hover"])
+            elif text == "重启 WSL":
+                widget.configure(fg_color=C["secondary"], hover_color=C["secondary_h"],
+                                 text_color="#FFFFFF", border_color=C["border"])
+            else:
+                # Icon buttons (theme / pin / refresh).
+                widget.configure(fg_color=C["input_bg"], hover_color=C["border"],
+                                 text_color=C["text2"], border_color=C["border"])
+        elif isinstance(widget, ctk.CTkLabel):
+            # Section headers (bold, C["text"]) vs info labels (C["text2"]).
+            weight = widget.cget("font").cget("weight") if hasattr(widget.cget("font"), "cget") else None
+            if weight == "bold":
+                widget.configure(text_color=C["text"])
+            else:
+                widget.configure(text_color=C["text2"])
+        elif isinstance(widget, ctk.CTkFrame):
+            fg = widget.cget("fg_color")
+            if fg in ("transparent", ""):
+                widget.configure(fg_color="transparent", border_color=C["border"])
+            else:
+                widget.configure(fg_color=C["card"], border_color=C["border"])
+        elif isinstance(widget, ctk.CTkEntry):
+            widget.configure(fg_color=C["input_bg"], border_color=C["border"],
+                             text_color=C["text"])
+        elif isinstance(widget, ctk.CTkCheckBox):
+            widget.configure(fg_color=C["accent"], hover_color=C["accent_h"],
+                             border_color=C["border"], text_color=C["text"])
+        elif isinstance(widget, ctk.CTkScrollableFrame):
+            widget.configure(fg_color="transparent", border_color=C["border"])
+        for child in widget.winfo_children():
+            self._apply_colors(child)
 
     # ── Live Speed Sampler ──
     _MAX_DELTA = 100 * 1024 * 1024  # 100 MB/s sanity cap per sample
