@@ -594,7 +594,12 @@ class App:
         def wrapper():
             if gen == self._generation:
                 func()
-        self.root.after(delay_ms, wrapper)
+        try:
+            self.root.after(delay_ms, wrapper)
+        except RuntimeError:
+            # mainloop already terminated (window closed mid-refresh); drop
+            # the callback silently instead of crashing the worker thread.
+            pass
 
     # ── Build UI (two-column landscape) ──
     def _build(self):
@@ -674,7 +679,7 @@ class App:
         si = ctk.CTkFrame(sc, fg_color="transparent")
         si.pack(fill="x", padx=16, pady=14)
         self._dot = ctk.CTkLabel(si, text="●", font=ctk.CTkFont(size=26),
-                                 text_color="#CCC", width=36)
+                                 text_color=C["text2"], width=36)
         self._dot.pack(side="left")
         stf = ctk.CTkFrame(si, fg_color="transparent")
         stf.pack(side="left", fill="x", expand=True)
@@ -790,6 +795,7 @@ class App:
             font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
             corner_radius=12, fg_color=C["accent"], hover_color=C["accent_h"],
             text_color="#FFFFFF", command=self._enable)
+        self._en._role = "primary"  # stable identifier for theme restyling
         self._en.grid(row=0, column=0, padx=(0, 6), sticky="ew")
 
         self._dis = ctk.CTkButton(
@@ -798,6 +804,7 @@ class App:
             corner_radius=12, fg_color="transparent", border_width=2,
             border_color=C["red"], text_color=C["red"],
             hover_color=C["danger_hover"], command=self._disable)
+        self._dis._role = "danger"
         self._dis.grid(row=0, column=1, padx=6, sticky="ew")
 
         self._rst = ctk.CTkButton(
@@ -805,13 +812,14 @@ class App:
             font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
             corner_radius=12, fg_color=C["secondary"], hover_color=C["secondary_h"],
             text_color="#FFFFFF", command=self._restart)
+        self._rst._role = "secondary"
         self._rst.grid(row=0, column=2, padx=(6, 0), sticky="ew")
 
     # ── Async Refresh ──
     def _async_refresh(self):
         self._refresh.configure(state="disabled")
         self._status.configure(text="检测中…")
-        self._dot.configure(text_color="#CCC")
+        self._dot.configure(text_color=C["text2"])
 
         def work():
             # Run independent I/O-bound checks in parallel. The three WSL
@@ -843,7 +851,7 @@ class App:
             self._dot.configure(text_color=C["green"])
             self._status.configure(text="已启用")
         else:
-            self._dot.configure(text_color="#CCC")
+            self._dot.configure(text_color=C["text2"])
             self._status.configure(text="未启用")
         self._lip.set_value(li)
         self._wip.set_value(wi)
@@ -863,6 +871,23 @@ class App:
             return None
         if any(c.isspace() for c in h):
             messagebox.showwarning("提示", "代理地址不能包含空格")
+            return None
+        # Reject shell metacharacters that could break the export line written
+        # to ~/.bashrc (quotes, semicolons, dollar, backtick, pipe, ampersand).
+        _ALLOWED = set(
+            "abcdefghijklmnopqrstuvwxyz"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "0123456789.-_:"
+        )
+        if not all(c in _ALLOWED for c in h):
+            messagebox.showwarning("提示", "地址含非法字符（仅允许字母、数字、. - _ :）")
+            return None
+        # Warn if the user pasted a full URL or included a port.
+        if "://" in h:
+            messagebox.showwarning("提示", "只需填写地址，不含协议头（如 http://）")
+            return None
+        if ":" in h and p and p != "0":
+            messagebox.showwarning("提示", "地址中已包含端口，请留空端口字段或移除地址中的 :端口")
             return None
         if not p.isdigit() or not (1 <= int(p) <= 65535):
             messagebox.showwarning("提示", "端口须为 1-65535 的整数")
@@ -981,15 +1006,16 @@ class App:
         without destroying any widgets. customtkinter supports dynamic color
         updates via .configure()."""
         if isinstance(widget, ctk.CTkButton):
-            # Distinguish the three button styles by their role.
-            text = widget.cget("text")
-            if text == "启用代理":
+            # Use the stable _role attribute (set at build time) rather than
+            # matching on text, because button text can change (e.g. "重启中…").
+            role = getattr(widget, "_role", None)
+            if role == "primary":
                 widget.configure(fg_color=C["accent"], hover_color=C["accent_h"],
                                  text_color="#FFFFFF", border_color=C["border"])
-            elif text == "关闭代理":
+            elif role == "danger":
                 widget.configure(fg_color="transparent", border_color=C["red"],
                                  text_color=C["red"], hover_color=C["danger_hover"])
-            elif text == "重启 WSL":
+            elif role == "secondary":
                 widget.configure(fg_color=C["secondary"], hover_color=C["secondary_h"],
                                  text_color="#FFFFFF", border_color=C["border"])
             else:
