@@ -571,7 +571,11 @@ class App:
         x = (self.root.winfo_screenwidth() - APP_WIDTH) // 2
         y = (self.root.winfo_screenheight() - final_h) // 2
         self.root.geometry(f"{APP_WIDTH}x{final_h}+{x}+{y}")
-        self.root.minsize(APP_WIDTH, 400)
+        # Fixed size: width is constant and height auto-fits content, so there's
+        # nothing to gain from resizing — and freeing the window from resize
+        # eliminates the customtkinter <Configure> scaling overhead (which
+        # fires minsize/maxsize/geometry on every pixel of drag).
+        self.root.resizable(False, False)
 
         self._async_refresh()
         self._speed_prev = get_net_counters()
