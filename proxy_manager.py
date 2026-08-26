@@ -1,6 +1,6 @@
 """
 Proxy Manager - One-click proxy injection for PowerShell & WSL
-Modern light UI with customtkinter
+Landscape layout, light/dark themes, system tray.
 """
 
 import customtkinter as ctk
@@ -15,33 +15,88 @@ import socket
 import threading
 import ctypes
 
+# ── Optional dependencies ─────────────────────────────────────────────────────
+try:
+    import psutil
+    HAVE_PSUTIL = True
+except ImportError:
+    HAVE_PSUTIL = False
+
+import pystray
+from PIL import Image, ImageDraw
+
 user32 = ctypes.WinDLL("user32")
 
 # Explicit prototype for SendMessageTimeoutW — without this, 64-bit Python
 # truncates pointer-sized args (lParam string pointer) and the WM_SETTINGCHANGE
 # broadcast silently fails, so new terminals don't pick up the env change.
 user32.SendMessageTimeoutW.argtypes = [
-    ctypes.c_void_p,  # HWND       (HWND_BROADCAST = 0xFFFF)
-    ctypes.c_uint,    # Msg        (WM_SETTINGCHANGE = 0x001A)
-    ctypes.c_size_t,  # wParam     (0)
-    ctypes.c_wchar_p, # lParam     ("Environment")
-    ctypes.c_uint,    # fuFlags    (SMTO_ABORTIFUSED = 0x0002)
-    ctypes.c_uint,    # uTimeout   (ms)
-    ctypes.POINTER(ctypes.c_long),  # lpdwResult
+    ctypes.c_void_p,                   # HWND       (HWND_BROADCAST = 0xFFFF)
+    ctypes.c_uint,                     # Msg        (WM_SETTINGCHANGE = 0x001A)
+    ctypes.c_size_t,                   # wParam     (0)
+    ctypes.c_wchar_p,                  # lParam     ("Environment")
+    ctypes.c_uint,                     # fuFlags    (SMTO_ABORTIFHUNG = 0x0002)
+    ctypes.c_uint,                     # uTimeout   (ms)
+    ctypes.POINTER(ctypes.c_long),     # lpdwResult
 ]
 user32.SendMessageTimeoutW.restype = ctypes.c_long  # LPARAM
 
 HWND_BROADCAST   = 0xFFFF
 WM_SETTINGCHANGE = 0x001A
 
-# ─── Theme ───────────────────────────────────────────────────────────────────
-ctk.set_appearance_mode("light")
-ctk.set_default_color_theme("blue")
+# ─── Theme palettes ───────────────────────────────────────────────────────────
+# Two full color sets; C is the active one, swapped by apply_theme().
+PALETTES = {
+    "light": {
+        "bg":       "#F2F1F6",   # lavender-tinted background
+        "card":     "#FFFFFF",
+        "accent":   "#5B7BE8",   # periwinkle blue
+        "accent_h": "#4A6AD8",
+        "green":    "#34C759",   # iOS-style green (status dot / copy feedback)
+        "green_h":  "#28A745",
+        "red":      "#D9605B",   # soft coral
+        "red_h":    "#C2504B",
+        "text":     "#2A2A2E",
+        "text2":    "#9A9AA0",
+        "border":   "#E4E4E8",
+        "input_bg": "#F6F6F9",
+        "secondary":    "#8A8A92",  # restart button
+        "secondary_h":  "#6E6E76",
+        "danger_hover": "#FCEDEA",  # outline disable button hover
+    },
+    "dark": {
+        "bg":       "#16161A",
+        "card":     "#222228",
+        "accent":   "#5B7BE8",
+        "accent_h": "#4A6AD8",
+        "green":    "#34C759",
+        "green_h":  "#28A745",
+        "red":      "#D9605B",
+        "red_h":    "#C2504B",
+        "text":     "#E4E4EC",
+        "text2":    "#888892",
+        "border":   "#33333C",
+        "input_bg": "#1B1B22",
+        "secondary":    "#6E6E78",
+        "secondary_h":  "#5A5A64",
+        "danger_hover": "#2A1E1F",
+    },
+}
 
-# ─── Constants ───────────────────────────────────────────────────────────────
+C = PALETTES["light"].copy()
+
+
+def apply_theme(mode: str):
+    """Swap the active palette and inform customtkinter."""
+    global C
+    C = PALETTES.get(mode, PALETTES["light"]).copy()
+    ctk.set_appearance_mode(mode)
+
+
+# ─── Constants ────────────────────────────────────────────────────────────────
 APP_TITLE  = "代理管理器"
-APP_WIDTH  = 400
-APP_HEIGHT = 680
+APP_WIDTH  = 760
+APP_HEIGHT = 480
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = "7897"
 
@@ -55,52 +110,41 @@ def _config_dir() -> str:
 
 CONFIG_FILE = os.path.join(_config_dir(), "config.json")
 
-# Colors — soft, warm, harmonious
-C_BG       = "#F0EFF4"   # lavender-tinted background
-C_CARD     = "#FFFFFF"
-C_ACCENT   = "#6E8EFB"   # soft periwinkle blue
-C_ACCENT_H = "#5A7BF0"
-C_GREEN    = "#4CD964"   # iOS-style green
-C_GREEN_H  = "#3CC054"
-C_RED      = "#FF6B6B"   # soft coral red
-C_RED_H    = "#E85D5D"
-C_TEXT     = "#2D2D2D"
-C_TEXT2    = "#9999A0"
-C_BORDER   = "#E8E8ED"
-C_INPUT_BG = "#F7F7FA"
-
-# Fonts
 FONT_CN = "Microsoft YaHei UI"
-FONT_EN = "Arial"
+FONT_EN = "Segoe UI"
 
-# WSL markers
 WSL_PROXY_BEGIN = "# >>> proxy-manager begin >>>"
 WSL_PROXY_END   = "# <<< proxy-manager end <<<"
 ENV_REG_PATH    = r"Environment"
 
 
-# ─── Config ──────────────────────────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────────────
 def load_config():
+    defaults = {"host": DEFAULT_HOST, "port": DEFAULT_PORT,
+                "powershell": True, "wsl": True, "pin": False, "mode": "light"}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cfg = json.load(f)
+            defaults.update(cfg)          # backfill any new keys
+            return defaults
         except Exception:
             pass
-    return {"host": DEFAULT_HOST, "port": DEFAULT_PORT, "powershell": True, "wsl": True}
+    return defaults
 
 
-def save_config(host, port, powershell, wsl):
+def save_config(host, port, powershell, wsl, pin=False, mode="light"):
     try:
         os.makedirs(_config_dir(), exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"host": host, "port": port, "powershell": powershell, "wsl": wsl},
+            json.dump({"host": host, "port": port, "powershell": powershell,
+                       "wsl": wsl, "pin": pin, "mode": mode},
                       f, indent=2, ensure_ascii=False)
     except OSError:
         pass
 
 
-# ─── Network Info ────────────────────────────────────────────────────────────
+# ─── Network Info ─────────────────────────────────────────────────────────────
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -143,13 +187,39 @@ def get_wsl_network_mode():
                     m = re.match(r"^networkingMode\s*=\s*(\S+)\s*$", line, re.IGNORECASE)
                     if m:
                         return m.group(1).capitalize()
-            return "默认(NAT)"
         return "默认(NAT)"
     except Exception:
         return "未知"
 
 
-# ─── Proxy Logic ─────────────────────────────────────────────────────────────
+# ─── Network Speed (optional, psutil) ─────────────────────────────────────────
+def get_net_counters():
+    """Return (bytes_sent, bytes_recv) snapshot, or None if unavailable."""
+    if not HAVE_PSUTIL:
+        return None
+    try:
+        io = psutil.net_io_counters()
+        return (io.bytes_sent, io.bytes_recv)
+    except Exception:
+        return None
+
+
+def format_speed(bytes_per_sec: float) -> str:
+    """Human-readable rate, e.g. 1.2 MB/s."""
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.0f} B/s"
+    val = bytes_per_sec
+    for label, factor in (("KB", 1024), ("MB", 1024 ** 2), ("GB", 1024 ** 3)):
+        if bytes_per_sec >= factor:
+            val = bytes_per_sec / factor
+        else:
+            break
+    else:
+        label = "GB"
+    return f"{val:.1f} {label}/s"
+
+
+# ─── Proxy Logic ──────────────────────────────────────────────────────────────
 def get_ps_status():
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
@@ -241,8 +311,7 @@ def set_ps_proxy(host, port, enable=True):
                 except FileNotFoundError:
                     pass
         winreg.CloseKey(key)
-        # Broadcast env change so already-running processes (and new terminals)
-        # pick up the updated values.
+        # Broadcast env change so already-running processes pick it up.
         ret = ctypes.c_long()
         user32.SendMessageTimeoutW(
             HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
@@ -288,42 +357,87 @@ def restart_wsl():
         return str(e)
 
 
-# ─── Info Row Widget ─────────────────────────────────────────────────────────
+# ─── Tray icon ────────────────────────────────────────────────────────────────
+def _make_tray_image():
+    """Draw a simple 64x64 ring icon (accent-colored ring, white center)."""
+    hex_color = C["accent"].lstrip("#")
+    rgb = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([4, 4, 60, 60], fill=rgb + (255,))          # outer ring
+    d.ellipse([22, 22, 42, 42], fill=(255, 255, 255, 255))  # inner disc
+    return img
+
+
+# ─── Info Row Widget ──────────────────────────────────────────────────────────
 class InfoRow(ctk.CTkFrame):
-    def __init__(self, master, label, value="", **kw):
+    def __init__(self, master, label, value="", copyable=False, **kw):
         super().__init__(master, fg_color="transparent", **kw)
+        self._copyable = copyable
+        self._root = self.winfo_toplevel()
         ctk.CTkLabel(self, text=label,
                      font=ctk.CTkFont(family=FONT_CN, size=11),
-                     text_color=C_TEXT2, width=85, anchor="w"
+                     text_color=C["text2"], width=85, anchor="w"
                      ).pack(side="left")
         self._val = ctk.CTkLabel(self, text=value,
                                  font=ctk.CTkFont(family=FONT_EN, size=11, weight="bold"),
-                                 text_color=C_TEXT, anchor="w")
+                                 text_color=C["text"], anchor="w")
         self._val.pack(side="left", fill="x", expand=True)
+        if copyable:
+            self._val.configure(cursor="hand2")
+            self._orig_text = None
+            for w in (self, self._val):
+                w.bind("<Button-1>", self._on_copy)
 
     def set_value(self, t):
         self._val.configure(text=t)
 
+    def _on_copy(self, _event=None):
+        if not self._copyable:
+            return
+        text = self._val.cget("text")
+        # Skip placeholders / failure strings — only copy things that look
+        # like an address (contains a digit, no spaces).
+        if not text or any(c.isspace() for c in text) or not any(c.isdigit() for c in text):
+            return
+        try:
+            self._root.clipboard_clear()
+            self._root.clipboard_append(text)
+        except Exception:
+            return
+        # Brief visual confirmation.
+        self._val.configure(text=f"{text}  ✓ 已复制", text_color=C["green"])
+        self._val.after(1200, lambda: self._val.configure(text=text, text_color=C["text"]))
 
-# ─── Main App ────────────────────────────────────────────────────────────────
+
+# ─── Main App ─────────────────────────────────────────────────────────────────
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.configure(fg_color=C_BG)
-
-        # Make window resizable vertically
-        self.root.resizable(False, True)
 
         cfg = load_config()
         self.host_var = ctk.StringVar(value=cfg["host"])
         self.port_var = ctk.StringVar(value=cfg["port"])
         self.ps_var   = ctk.BooleanVar(value=cfg["powershell"])
         self.wsl_var  = ctk.BooleanVar(value=cfg["wsl"])
+        self.pin_var  = ctk.BooleanVar(value=cfg.get("pin", False))
+
+        # Apply persisted theme before building any widgets.
+        self._mode = cfg.get("mode", "light")
+        apply_theme(self._mode)
+        self.root.configure(fg_color=C["bg"])
+
+        # Tray state.
+        self._tray_icon = None
+        self._tray_thread = None
 
         self._build()
 
-        # Auto-size: fit content, cap at 85% screen height
+        # Apply persisted topmost state.
+        self.root.attributes("-topmost", self.pin_var.get())
+
+        # Auto-size height to fit content, cap at 85% screen height.
         self.root.update_idletasks()
         req_h = self.root.winfo_reqheight()
         max_h = int(self.root.winfo_screenheight() * 0.85)
@@ -334,168 +448,218 @@ class App:
         self.root.minsize(APP_WIDTH, 400)
 
         self._async_refresh()
+        self._speed_prev = get_net_counters()
+        if HAVE_PSUTIL:
+            self._tick_speed()
 
-    # ── Build UI ──
+        # Closing the window hides to the tray instead of quitting.
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ── Build UI (two-column landscape) ──
     def _build(self):
-        S = {"padx": 20, "pady": (0, 10)}
+        # Tear down previous content if rebuilding for a theme switch.
+        for w in self.root.winfo_children():
+            if getattr(w, "_is_content", False):
+                w.destroy()
 
-        # Scrollable container
-        scroll = ctk.CTkScrollableFrame(
-            self.root, fg_color="transparent",
-            scrollbar_button_color=C_BORDER, scrollbar_button_hover_color=C_TEXT2
-        )
-        scroll.pack(fill="both", expand=True)
+        content = ctk.CTkFrame(self.root, fg_color="transparent")
+        content._is_content = True
+        content.pack(fill="both", expand=True, padx=0, pady=0)
+        content.grid_columnconfigure(0, weight=1, uniform="col")
+        content.grid_columnconfigure(1, weight=1, uniform="col")
+        content.grid_rowconfigure(1, weight=1)
 
-        # ── Title ──
-        tf = ctk.CTkFrame(scroll, fg_color="transparent")
-        tf.pack(fill="x", padx=4, pady=(10, 4))
-        ctk.CTkLabel(tf, text="代理管理器",
-                     font=ctk.CTkFont(family=FONT_CN, size=20, weight="bold"),
-                     text_color=C_TEXT).pack(anchor="w")
-        ctk.CTkLabel(tf, text="PowerShell & WSL 一键代理切换",
+        self._build_title(content)
+        self._build_columns(content)
+        self._build_buttons(content)
+
+    def _build_title(self, parent):
+        tf = ctk.CTkFrame(parent, fg_color="transparent")
+        tf.grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(12, 4))
+        tf.grid_columnconfigure(0, weight=1)
+
+        # Left: app name + subtitle.
+        left = ctk.CTkFrame(tf, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(left, text="代理管理器",
+                     font=ctk.CTkFont(family=FONT_CN, size=19, weight="bold"),
+                     text_color=C["text"]).pack(anchor="w")
+        ctk.CTkLabel(left, text="PowerShell & WSL 一键代理切换",
                      font=ctk.CTkFont(family=FONT_CN, size=11),
-                     text_color=C_TEXT2).pack(anchor="w", pady=(2, 0))
+                     text_color=C["text2"]).pack(anchor="w")
 
-        # ── Status ──
-        sc = ctk.CTkFrame(scroll, corner_radius=14, fg_color=C_CARD,
-                          border_width=1, border_color=C_BORDER)
+        # Right: theme toggle, pin, refresh.
+        right = ctk.CTkFrame(tf, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="e")
+
+        self._theme_btn = ctk.CTkButton(
+            right, text=self._theme_icon(), width=34, height=34,
+            font=ctk.CTkFont(size=15), corner_radius=17,
+            fg_color=C["input_bg"], hover_color=C["border"],
+            text_color=C["text2"], command=self._toggle_theme)
+        self._theme_btn.pack(side="left", padx=(0, 6))
+
+        self._pin_btn = ctk.CTkButton(
+            right, text="📌", width=34, height=34,
+            font=ctk.CTkFont(size=14), corner_radius=17,
+            fg_color=C["input_bg"], hover_color=C["border"],
+            text_color=C["text2"], command=self._toggle_pin)
+        self._pin_btn.pack(side="left", padx=(0, 6))
+        self._sync_pin_btn()
+
+        self._refresh = ctk.CTkButton(
+            right, text="⟳", width=34, height=34,
+            font=ctk.CTkFont(size=16), corner_radius=17,
+            fg_color=C["input_bg"], hover_color=C["border"],
+            text_color=C["text2"], command=self._async_refresh)
+        self._refresh.pack(side="left")
+
+    def _build_columns(self, parent):
+        # Shared padding dict for cards.
+        S = {"padx": 16, "pady": (0, 10)}
+
+        # ── Left column: status + network info ──
+        left = ctk.CTkFrame(parent, fg_color="transparent")
+        left.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=4)
+
+        # Status card.
+        sc = ctk.CTkFrame(left, corner_radius=14, fg_color=C["card"],
+                          border_width=1, border_color=C["border"])
         sc.pack(fill="x", **S)
-
         si = ctk.CTkFrame(sc, fg_color="transparent")
         si.pack(fill="x", padx=16, pady=14)
-
         self._dot = ctk.CTkLabel(si, text="●", font=ctk.CTkFont(size=26),
                                  text_color="#CCC", width=36)
         self._dot.pack(side="left")
-
         stf = ctk.CTkFrame(si, fg_color="transparent")
         stf.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(stf, text="代理状态",
                      font=ctk.CTkFont(family=FONT_CN, size=10),
-                     text_color=C_TEXT2).pack(anchor="w")
+                     text_color=C["text2"]).pack(anchor="w")
         self._status = ctk.CTkLabel(stf, text="检测中…",
                                     font=ctk.CTkFont(family=FONT_CN, size=15, weight="bold"),
-                                    text_color=C_TEXT)
+                                    text_color=C["text"])
         self._status.pack(anchor="w")
 
-        self._refresh = ctk.CTkButton(
-            si, text="⟳", width=34, height=34,
-            font=ctk.CTkFont(size=16), corner_radius=17,
-            fg_color=C_INPUT_BG, hover_color=C_BORDER,
-            text_color=C_TEXT2, command=self._async_refresh)
-        self._refresh.pack(side="right")
-
-        # ── Network Info ──
-        nc = ctk.CTkFrame(scroll, corner_radius=14, fg_color=C_CARD,
-                          border_width=1, border_color=C_BORDER)
+        # Network info card.
+        nc = ctk.CTkFrame(left, corner_radius=14, fg_color=C["card"],
+                          border_width=1, border_color=C["border"])
         nc.pack(fill="x", **S)
-
         ctk.CTkLabel(nc, text="网络信息",
                      font=ctk.CTkFont(family=FONT_CN, size=12, weight="bold"),
-                     text_color=C_TEXT).pack(anchor="w", padx=16, pady=(12, 6))
-
-        self._lip = InfoRow(nc, "本机 IP")
+                     text_color=C["text"]).pack(anchor="w", padx=16, pady=(12, 6))
+        self._lip = InfoRow(nc, "本机 IP", copyable=True)
         self._lip.pack(fill="x", padx=16, pady=(0, 2))
-        self._wip = InfoRow(nc, "WSL IP")
+        self._wip = InfoRow(nc, "WSL IP", copyable=True)
         self._wip.pack(fill="x", padx=16, pady=(0, 2))
         self._wmode = InfoRow(nc, "WSL 网络模式")
-        self._wmode.pack(fill="x", padx=16, pady=(0, 12))
+        self._wmode.pack(fill="x", padx=16, pady=(0, 2))
 
-        # ── Proxy Variables ──
-        pc = ctk.CTkFrame(scroll, corner_radius=14, fg_color=C_CARD,
-                          border_width=1, border_color=C_BORDER)
+        # Live speed (only when psutil is available).
+        self._speed_up = self._speed_dn = None
+        if HAVE_PSUTIL:
+            ctk.CTkLabel(nc, text="实时网速",
+                         font=ctk.CTkFont(family=FONT_CN, size=11, weight="bold"),
+                         text_color=C["text2"]).pack(anchor="w", padx=16, pady=(6, 2))
+            self._speed_up = InfoRow(nc, "↑ 上传", "0 B/s")
+            self._speed_up.pack(fill="x", padx=16, pady=(0, 2))
+            self._speed_dn = InfoRow(nc, "↓ 下载", "0 B/s")
+            self._speed_dn.pack(fill="x", padx=16, pady=(0, 12))
+        else:
+            # Keep card bottom spacing consistent.
+            ctk.CTkLabel(nc, text="", height=12).pack()
+
+        # ── Right column: proxy variables + config ──
+        right = ctk.CTkFrame(parent, fg_color="transparent")
+        right.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=4)
+
+        # Proxy variables card.
+        pc = ctk.CTkFrame(right, corner_radius=14, fg_color=C["card"],
+                          border_width=1, border_color=C["border"])
         pc.pack(fill="x", **S)
-
         ctk.CTkLabel(pc, text="代理变量",
                      font=ctk.CTkFont(family=FONT_CN, size=12, weight="bold"),
-                     text_color=C_TEXT).pack(anchor="w", padx=16, pady=(12, 6))
-
-        # PowerShell section
+                     text_color=C["text"]).pack(anchor="w", padx=16, pady=(12, 6))
         ctk.CTkLabel(pc, text="PowerShell",
                      font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
-                     text_color=C_TEXT2).pack(anchor="w", padx=16, pady=(0, 2))
+                     text_color=C["text2"]).pack(anchor="w", padx=16, pady=(0, 2))
         self._ps_http = InfoRow(pc, "HTTP_PROXY")
         self._ps_http.pack(fill="x", padx=16, pady=(0, 2))
         self._ps_https = InfoRow(pc, "HTTPS_PROXY")
         self._ps_https.pack(fill="x", padx=16, pady=(0, 8))
-
-        # WSL section
         ctk.CTkLabel(pc, text="WSL",
                      font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
-                     text_color=C_TEXT2).pack(anchor="w", padx=16, pady=(0, 2))
+                     text_color=C["text2"]).pack(anchor="w", padx=16, pady=(0, 2))
         self._wsl_http = InfoRow(pc, "HTTP_PROXY")
         self._wsl_http.pack(fill="x", padx=16, pady=(0, 2))
         self._wsl_https = InfoRow(pc, "HTTPS_PROXY")
         self._wsl_https.pack(fill="x", padx=16, pady=(0, 12))
 
-        # ── Config ──
-        cc = ctk.CTkFrame(scroll, corner_radius=14, fg_color=C_CARD,
-                          border_width=1, border_color=C_BORDER)
+        # Config card.
+        cc = ctk.CTkFrame(right, corner_radius=14, fg_color=C["card"],
+                          border_width=1, border_color=C["border"])
         cc.pack(fill="x", **S)
-
         ctk.CTkLabel(cc, text="代理配置",
                      font=ctk.CTkFont(family=FONT_CN, size=12, weight="bold"),
-                     text_color=C_TEXT).pack(anchor="w", padx=16, pady=(12, 6))
+                     text_color=C["text"]).pack(anchor="w", padx=16, pady=(12, 6))
 
-        # Host
         hf = ctk.CTkFrame(cc, fg_color="transparent")
         hf.pack(fill="x", padx=16, pady=(0, 6))
         ctk.CTkLabel(hf, text="地址", font=ctk.CTkFont(family=FONT_CN, size=11),
-                     text_color=C_TEXT2, width=36).pack(side="left")
+                     text_color=C["text2"], width=36).pack(side="left")
         self._host = ctk.CTkEntry(hf, textvariable=self.host_var,
                                   font=ctk.CTkFont(family=FONT_EN, size=13),
                                   corner_radius=10, height=36, border_width=1,
-                                  border_color=C_BORDER, fg_color=C_INPUT_BG)
+                                  border_color=C["border"], fg_color=C["input_bg"])
         self._host.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
-        # Port
         pf = ctk.CTkFrame(cc, fg_color="transparent")
         pf.pack(fill="x", padx=16, pady=(0, 10))
         ctk.CTkLabel(pf, text="端口", font=ctk.CTkFont(family=FONT_CN, size=11),
-                     text_color=C_TEXT2, width=36).pack(side="left")
+                     text_color=C["text2"], width=36).pack(side="left")
         self._port = ctk.CTkEntry(pf, textvariable=self.port_var,
                                   font=ctk.CTkFont(family=FONT_EN, size=13),
                                   corner_radius=10, height=36, border_width=1,
-                                  border_color=C_BORDER, fg_color=C_INPUT_BG, width=110)
+                                  border_color=C["border"], fg_color=C["input_bg"], width=110)
         self._port.pack(side="left", padx=(8, 0))
 
-        # Checkboxes
         chk = ctk.CTkFrame(cc, fg_color="transparent")
         chk.pack(fill="x", padx=16, pady=(0, 14))
         ctk.CTkCheckBox(chk, text="PowerShell", variable=self.ps_var,
                         font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
-                        border_color=C_BORDER, fg_color=C_ACCENT,
-                        hover_color=C_ACCENT_H).pack(side="left")
+                        border_color=C["border"], fg_color=C["accent"],
+                        hover_color=C["accent_h"]).pack(side="left")
         ctk.CTkCheckBox(chk, text="WSL", variable=self.wsl_var,
                         font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
-                        border_color=C_BORDER, fg_color=C_ACCENT,
-                        hover_color=C_ACCENT_H).pack(side="left", padx=(18, 0))
+                        border_color=C["border"], fg_color=C["accent"],
+                        hover_color=C["accent_h"]).pack(side="left", padx=(18, 0))
 
-        # ── Buttons ──
-        bf = ctk.CTkFrame(scroll, fg_color="transparent")
-        bf.pack(fill="x", padx=20, pady=(0, 8))
+    def _build_buttons(self, parent):
+        bf = ctk.CTkFrame(parent, fg_color="transparent")
+        bf.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 12))
+        bf.grid_columnconfigure((0, 1, 2), weight=1)
 
         self._en = ctk.CTkButton(
             bf, text="启用代理", height=42,
             font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
-            corner_radius=12, fg_color=C_GREEN, hover_color=C_GREEN_H,
-            command=self._enable)
-        self._en.pack(side="left", fill="x", expand=True, padx=(0, 5))
+            corner_radius=12, fg_color=C["accent"], hover_color=C["accent_h"],
+            text_color="#FFFFFF", command=self._enable)
+        self._en.grid(row=0, column=0, padx=(0, 6), sticky="ew")
 
         self._dis = ctk.CTkButton(
             bf, text="关闭代理", height=42,
             font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
-            corner_radius=12, fg_color=C_RED, hover_color=C_RED_H,
-            command=self._disable)
-        self._dis.pack(side="left", fill="x", expand=True, padx=(5, 0))
+            corner_radius=12, fg_color="transparent", border_width=2,
+            border_color=C["red"], text_color=C["red"],
+            hover_color=C["danger_hover"], command=self._disable)
+        self._dis.grid(row=0, column=1, padx=6, sticky="ew")
 
-        # Restart
         self._rst = ctk.CTkButton(
-            scroll, text="重启 WSL", height=38,
-            font=ctk.CTkFont(family=FONT_CN, size=12),
-            corner_radius=12, fg_color=C_ACCENT, hover_color=C_ACCENT_H,
-            command=self._restart)
-        self._rst.pack(fill="x", padx=20, pady=(0, 20))
+            bf, text="重启 WSL", height=42,
+            font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
+            corner_radius=12, fg_color=C["secondary"], hover_color=C["secondary_h"],
+            text_color="#FFFFFF", command=self._restart)
+        self._rst.grid(row=0, column=2, padx=(6, 0), sticky="ew")
 
     # ── Async Refresh ──
     def _async_refresh(self):
@@ -517,7 +681,7 @@ class App:
 
     def _update(self, ps, ws, li, wi, mo, psp, wsp):
         if ps or ws:
-            self._dot.configure(text_color=C_GREEN)
+            self._dot.configure(text_color=C["green"])
             self._status.configure(text="已启用")
         else:
             self._dot.configure(text_color="#CCC")
@@ -536,16 +700,17 @@ class App:
         h = self.host_var.get().strip()
         p = self.port_var.get().strip()
         if not h:
-            messagebox.showwarning("提示", "请填写代理地址"); return None
-        # Host: reject whitespace/control chars that would break URLs.
+            messagebox.showwarning("提示", "请填写代理地址")
+            return None
         if any(c.isspace() for c in h):
-            messagebox.showwarning("提示", "代理地址不能包含空格"); return None
-        # Port: accept decimal digits only and normalize away leading zeros /
-        # signs so we don't emit URLs like "http://h:+8080" or "http://h:0070".
+            messagebox.showwarning("提示", "代理地址不能包含空格")
+            return None
         if not p.isdigit() or not (1 <= int(p) <= 65535):
-            messagebox.showwarning("提示", "端口须为 1-65535 的整数"); return None
+            messagebox.showwarning("提示", "端口须为 1-65535 的整数")
+            return None
         if not self.ps_var.get() and not self.wsl_var.get():
-            messagebox.showwarning("提示", "请至少选择一个目标"); return None
+            messagebox.showwarning("提示", "请至少选择一个目标")
+            return None
         return h, str(int(p))
 
     # ── Enable ──
@@ -554,7 +719,8 @@ class App:
         if not r:
             return
         h, p = r
-        save_config(h, p, self.ps_var.get(), self.wsl_var.get())
+        save_config(h, p, self.ps_var.get(), self.wsl_var.get(),
+                    self.pin_var.get(), self._mode)
         errs = []
         if self.ps_var.get():
             ret = set_ps_proxy(h, p, True)
@@ -564,20 +730,15 @@ class App:
             ret = set_wsl_proxy(h, p, True)
             if ret is not True:
                 errs.append(f"WSL: {ret}")
-        # Stop on errors before any refresh/restart so the UI reflects the
-        # failure rather than racing with a half-applied state.
         if errs:
             self._async_refresh()
             messagebox.showerror("错误", "\n".join(errs))
             return
-        # Ask about WSL restart first; if declined, refresh once at the end.
-        # This ordering avoids overlapping _async_refresh calls (which caused
-        # status flicker / reading WSL mid-shutdown).
         if (self.wsl_var.get()
                 and messagebox.askyesno(
                     "WSL 重启",
                     "代理已注入，WSL 需重启生效。\n\n立即重启？\n（会终止 WSL 中所有进程）")):
-            self._restart()  # _restart triggers _async_refresh on completion
+            self._restart()
         else:
             self._async_refresh()
 
@@ -621,12 +782,99 @@ class App:
         else:
             messagebox.showerror("错误", f"重启失败: {ret}")
 
+    # ── Pin / Topmost ──
+    def _sync_pin_btn(self):
+        if self.pin_var.get():
+            self._pin_btn.configure(fg_color=C["accent"], hover_color=C["accent_h"],
+                                     text_color="#FFFFFF")
+        else:
+            self._pin_btn.configure(fg_color=C["input_bg"], hover_color=C["border"],
+                                     text_color=C["text2"])
 
-# ─── Entry ───────────────────────────────────────────────────────────────────
+    def _toggle_pin(self):
+        new = not self.pin_var.get()
+        self.pin_var.set(new)
+        self.root.attributes("-topmost", new)
+        self._sync_pin_btn()
+        save_config(self.host_var.get().strip(), self.port_var.get().strip(),
+                    self.ps_var.get(), self.wsl_var.get(), new, self._mode)
+
+    # ── Theme toggle ──
+    def _theme_icon(self):
+        # Show the mode you'll switch TO.
+        return "☀️" if self._mode == "dark" else "🌙"
+
+    def _toggle_theme(self):
+        self._mode = "dark" if self._mode == "light" else "light"
+        apply_theme(self._mode)
+        self.root.configure(fg_color=C["bg"])
+        save_config(self.host_var.get().strip(), self.port_var.get().strip(),
+                    self.ps_var.get(), self.wsl_var.get(), self.pin_var.get(), self._mode)
+        self._build()
+
+    # ── Live Speed Sampler ──
+    def _tick_speed(self):
+        """Sample net counters every 1s and update the speed card."""
+        cur = get_net_counters()
+        prev = self._speed_prev
+        if cur is not None and prev is not None and self._speed_up is not None:
+            up = max(0, cur[0] - prev[0])
+            dn = max(0, cur[1] - prev[1])
+            self._speed_up.set_value(format_speed(up))
+            self._speed_dn.set_value(format_speed(dn))
+        self._speed_prev = cur if cur is not None else prev
+        self.root.after(1000, self._tick_speed)
+
+    # ── System Tray ──
+    def _on_close(self):
+        """Hide to tray instead of quitting."""
+        self.root.withdraw()
+        self._start_tray()
+
+    def _start_tray(self):
+        if self._tray_thread is not None:
+            return
+        try:
+            menu = pystray.Menu(
+                pystray.MenuItem("显示主窗口", self._tray_show),
+                pystray.MenuItem("退出", self._tray_quit),
+            )
+            self._tray_icon = pystray.Icon(
+                "proxy_manager", _make_tray_image(), "代理管理器", menu
+            )
+            self._tray_thread = threading.Thread(target=self._tray_icon.run, daemon=True)
+            self._tray_thread.start()
+        except Exception:
+            # If tray can't start (e.g. headless), just quit.
+            self.root.destroy()
+
+    def _tray_show(self, icon=None, item=None):
+        self.root.after(0, self._show_window)
+
+    def _tray_quit(self, icon=None, item=None):
+        self.root.after(0, self._quit)
+
+    def _show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _quit(self):
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+        self.root.destroy()
+
+
+# ─── Entry ────────────────────────────────────────────────────────────────────
 def main():
     root = ctk.CTk()
     App(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
