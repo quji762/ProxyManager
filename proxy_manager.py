@@ -14,6 +14,7 @@ import sys
 import socket
 import threading
 import ctypes
+from typing import Optional
 
 # ── Optional dependencies ─────────────────────────────────────────────────────
 try:
@@ -241,12 +242,69 @@ def get_wsl_network_mode():
 
 
 # ─── Network Speed (optional, psutil) ─────────────────────────────────────────
-def get_net_counters():
-    """Return (bytes_sent, bytes_recv) snapshot, or None if unavailable."""
+# We track a single "primary" physical interface rather than the system-wide
+# total, so virtual adapters (WSL, Docker, Tailscale, VPN loops) don't inflate
+# the reading with background chatter the user never notices.
+_primary_iface = None  # cached name of the interface we decided to track
+
+
+def _pick_primary_iface() -> Optional[str]:
+    """Choose the best interface to monitor: the one that is up, carries an
+    IP, and is not a obvious virtual/loopback adapter. Returns None if psutil
+    is unavailable or no suitable interface exists."""
     if not HAVE_PSUTIL:
         return None
     try:
-        io = psutil.net_io_counters()
+        stats = psutil.net_if_stats()
+        addrs = psutil.net_if_addrs()
+    except Exception:
+        return None
+
+    def is_virtual(name: str) -> bool:
+        n = name.lower()
+        return any(kw in n for kw in ("loopback", "tap-", "tun-", "veth",
+                                        "docker", "hyper-v", "virtual",
+                                        "pseudo", "tailscale", "zerotier",
+                                        "wireguard", "vpn"))
+
+    candidates = []
+    for name, st in stats.items():
+        if not st.isup:
+            continue
+        if is_virtual(name):
+            continue
+        # Require at least one IPv4 address (skip purely link-local / disconnected).
+        iface_addrs = addrs.get(name, [])
+        has_ip = any(a.family == socket.AF_INET for a in iface_addrs)
+        if has_ip:
+            candidates.append((name, st.speed))
+
+    if not candidates:
+        return None
+    # Prefer the fastest interface (wired > wireless); fall back to first.
+    candidates.sort(key=lambda c: c[1], reverse=True)
+    return candidates[0][0]
+
+
+def get_net_counters():
+    """Return (bytes_sent, bytes_recv) snapshot for the primary interface,
+    or None if unavailable. On the first call the interface is auto-selected."""
+    global _primary_iface
+    if not HAVE_PSUTIL:
+        return None
+    try:
+        if _primary_iface is None:
+            _primary_iface = _pick_primary_iface()
+        if _primary_iface is None:
+            # No suitable interface; fall back to system-wide counters.
+            io = psutil.net_io_counters()
+        else:
+            per = psutil.net_io_counters(pernic=True)
+            io = per.get(_primary_iface)
+            if io is None:
+                # Interface disappeared; re-pick next time.
+                _primary_iface = None
+                return None
         return (io.bytes_sent, io.bytes_recv)
     except Exception:
         return None
@@ -257,13 +315,13 @@ def format_speed(bytes_per_sec: float) -> str:
     if bytes_per_sec < 1024:
         return f"{bytes_per_sec:.0f} B/s"
     val = bytes_per_sec
-    for label, factor in (("KB", 1024), ("MB", 1024 ** 2), ("GB", 1024 ** 3)):
+    label = "KB"
+    for lbl, factor in (("KB", 1024), ("MB", 1024 ** 2), ("GB", 1024 ** 3)):
         if bytes_per_sec >= factor:
             val = bytes_per_sec / factor
+            label = lbl
         else:
             break
-    else:
-        label = "GB"
     return f"{val:.1f} {label}/s"
 
 
@@ -629,7 +687,8 @@ class App:
         # Live speed (only when psutil is available).
         self._speed_up = self._speed_dn = None
         if HAVE_PSUTIL:
-            ctk.CTkLabel(nc, text="实时网速",
+            iface = _primary_iface or "—"
+            ctk.CTkLabel(nc, text=f"实时网速 ({iface})",
                          font=ctk.CTkFont(family=FONT_CN, size=11, weight="bold"),
                          text_color=C["text2"]).pack(anchor="w", padx=16, pady=(6, 2))
             self._speed_up = InfoRow(nc, "↑ 上传", "0 B/s")
@@ -884,15 +943,23 @@ class App:
         self._build()
 
     # ── Live Speed Sampler ──
+    _MAX_DELTA = 100 * 1024 * 1024  # 100 MB/s sanity cap per sample
+
     def _tick_speed(self):
         """Sample net counters every 1s and update the speed card."""
         cur = get_net_counters()
         prev = self._speed_prev
         if cur is not None and prev is not None and self._speed_up is not None:
-            up = max(0, cur[0] - prev[0])
-            dn = max(0, cur[1] - prev[1])
-            self._speed_up.set_value(format_speed(up))
-            self._speed_dn.set_value(format_speed(dn))
+            up = cur[0] - prev[0]
+            dn = cur[1] - prev[1]
+            # Guard against counter resets/overflows: a negative delta or an
+            # implausibly large jump (>100 MB in one second) means the
+            # underlying counter wrapped or the interface was re-enumerated;
+            # skip this sample rather than showing a bogus spike.
+            if 0 <= up <= self._MAX_DELTA:
+                self._speed_up.set_value(format_speed(up))
+            if 0 <= dn <= self._MAX_DELTA:
+                self._speed_dn.set_value(format_speed(dn))
         self._speed_prev = cur if cur is not None else prev
         self.root.after(1000, self._tick_speed)
 
