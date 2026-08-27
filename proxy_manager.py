@@ -592,15 +592,23 @@ def restart_wsl():
 
 
 # ─── Tray icon ────────────────────────────────────────────────────────────────
+_TRAY_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "tray.png")
+
+
 def _make_tray_image():
-    """Draw a simple 64x64 ring icon (accent-colored ring, white center)."""
+    """Load the tray icon from assets/tray.png, falling back to a programmatic
+    icon if the file is missing (e.g. when running from a PyInstaller bundle
+    where the file wasn't bundled)."""
     from PIL import Image, ImageDraw
-    hex_color = C["accent"].lstrip("#")
-    rgb = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    if os.path.isfile(_TRAY_ICON_PATH):
+        return Image.open(_TRAY_ICON_PATH).convert("RGBA")
+    # Fallback: draw a simple blue rounded-rect with white arrows.
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse([4, 4, 60, 60], fill=rgb + (255,))          # outer ring
-    d.ellipse([22, 22, 42, 42], fill=(255, 255, 255, 255))  # inner disc
+    d.rounded_rectangle([0, 0, 63, 63], radius=13, fill=(91, 123, 232, 255))
+    d.arc([10, 10, 54, 54], start=-30, end=150, fill=(255, 255, 255, 255), width=5)
+    d.arc([10, 10, 54, 54], start=150, end=330, fill=(255, 255, 255, 255), width=5)
     return img
 
 
@@ -723,6 +731,9 @@ class App:
 
         # Closing the window hides to the tray instead of quitting.
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Show tray icon immediately on startup (not just when window is closed).
+        self._start_tray()
 
     # ── Safe after() ─────────────────────────────────────────────────────────────
     def _after(self, delay_ms, func):
@@ -1353,7 +1364,7 @@ class App:
         self._start_tray()
 
     def _start_tray(self):
-        if self._tray_thread is not None:
+        if self._tray_icon is not None:
             return
         try:
             import pystray
@@ -1370,6 +1381,15 @@ class App:
             # If tray can't start (e.g. headless), just quit.
             self.root.destroy()
 
+    def _stop_tray(self):
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+            self._tray_thread = None
+
     def _tray_show(self, icon=None, item=None):
         self.root.after(0, self._show_window)
 
@@ -1377,6 +1397,7 @@ class App:
         self.root.after(0, self._quit)
 
     def _show_window(self):
+        self._stop_tray()
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()

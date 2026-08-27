@@ -7,6 +7,7 @@ REM pystray / PIL are imported lazily inside functions (deferred to tray use),
 REM so PyInstaller's static analysis can't see them. --hidden-import keeps them
 REM bundled; dropping them here will crash the app the moment it hides to tray.
 pyinstaller --onefile --windowed --name ProxyManager --clean ^
+  --icon assets\icon.ico ^
   --hidden-import pystray ^
   --hidden-import PIL ^
   --hidden-import PIL.Image ^
