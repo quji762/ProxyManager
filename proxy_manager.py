@@ -13,7 +13,9 @@ import os
 import socket
 import threading
 import ctypes
+import uuid
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 
 # ── Optional dependencies ─────────────────────────────────────────────────────
 try:
@@ -22,8 +24,32 @@ try:
 except ImportError:
     HAVE_PSUTIL = False
 
-import pystray
-from PIL import Image, ImageDraw
+# pystray / PIL are only needed when the user hides to the tray, so we defer
+# their import to _start_tray() to shave ~20ms off cold start.
+
+# ── Crash logging ─────────────────────────────────────────────────────────────
+# A --windowed PyInstaller build has no console, so unhandled exceptions in the
+# UI thread would vanish silently. We funnel every crash path (the interpreter
+# excepthook AND tkinter's _report_exception for callback failures) through one
+# writer that appends a timestamped traceback to %APPDATA%\ProxyManager\crash.log.
+_CRASH_LOG = os.path.join(
+    os.environ.get("APPDATA") or os.path.expanduser("~"),
+    "ProxyManager", "crash.log",
+)
+
+
+def _log_crash(exc_type, exc_val, exc_tb):
+    """Append a timestamped traceback to crash.log. Best-effort: never raises."""
+    import traceback, datetime
+    try:
+        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now()}] {exc_type.__name__}: {exc_val}\n")
+            traceback.print_tb(exc_tb, file=f)
+            f.write("\n")
+    except Exception:
+        pass
+
 
 # ── Patch customtkinter _root() crash ─────────────────────────────────────────
 # customtkinter 6.0.0 has a bug where, under PyInstaller (and occasionally under
@@ -60,6 +86,10 @@ def _safe_report_exception(self):
     """_report_exception that tolerates a corrupt _root attribute."""
     import sys, traceback
     exc, val, tb = sys.exc_info()
+    # Persist UI-thread callback crashes (the stock path never reaches the
+    # interpreter's sys.excepthook, so without this they'd be lost in a
+    # --windowed build).
+    _log_crash(exc, val, tb)
     try:
         root = self._root
         if callable(root):
@@ -89,8 +119,14 @@ user32.SendMessageTimeoutW.argtypes = [
 ]
 user32.SendMessageTimeoutW.restype = ctypes.c_long  # LPARAM
 
+# Lightweight SendMessageW with integer wParam/lParam for WM_SETREDRAW.
+user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                 ctypes.c_size_t, ctypes.c_size_t]
+user32.SendMessageW.restype = ctypes.c_long
+
 HWND_BROADCAST   = 0xFFFF
 WM_SETTINGCHANGE = 0x001A
+WM_SETREDRAW     = 0x000B
 
 # ─── Theme palettes ───────────────────────────────────────────────────────────
 # Two full color sets; C is the active one, swapped by apply_theme().
@@ -237,15 +273,65 @@ def get_wsl_ip():
         return "WSL 未运行"
 
 
-_wsl_network_mode_cache: Optional[str] = None
+def get_wsl_ip_and_block():
+    """Fetch WSL IP and the proxy-manager bashrc block in a single wsl.exe call.
+
+    Each wsl.exe invocation costs ~5s of process-startup overhead on a cold
+    WSL instance, so merging the two commands halves the WSL cost per refresh.
+    Returns (ip_str, block_str)."""
+    try:
+        # Generate a random separator per call so it can never collide with
+        # user content in ~/.bashrc (unlike a fixed string like "<<PM_SEP>>").
+        sep = uuid.uuid4().hex
+        cmd = (
+            "hostname -I 2>/dev/null | awk '{print $1}';"
+            f"echo '{sep}';"
+            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null"
+        )
+        r = subprocess.run(
+            ["wsl", "-e", "bash", "-c", cmd],
+            capture_output=True, text=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        out = r.stdout
+        if sep in out:
+            ip_part, block_part = out.split(sep, 1)
+            # strip() removes the trailing newline that `echo` appends, so an
+            # empty bashrc block stays empty (falsy) - matching the semantics of
+            # the original _read_wsl_block and keeping get_wsl_status's
+            # `if not block: return None` guard working correctly.
+            block_part = block_part.strip()
+        else:
+            ip_part, block_part = out, ""
+        ip = ip_part.strip()
+        ip = ip if ip else "未获取到"
+        return (ip, block_part)
+    except Exception:
+        return ("WSL 未运行", "")
+
+
+# Cache is keyed by .wslconfig's mtime so editing networkingMode and clicking
+# refresh picks up the new value instead of returning a stale, never-expiring
+# result (the original version cached indefinitely once first computed).
+_wsl_network_mode_cache: Optional[tuple] = None  # (mtime, mode_str)
+
+
+def _invalidate_wsl_network_mode_cache():
+    """Drop the cached networkingMode so the next read re-parses .wslconfig.
+    Called after a WSL restart, which is when a config change takes effect."""
+    global _wsl_network_mode_cache
+    _wsl_network_mode_cache = None
 
 
 def get_wsl_network_mode():
     global _wsl_network_mode_cache
-    if _wsl_network_mode_cache is not None:
-        return _wsl_network_mode_cache
     try:
         p = os.path.expanduser(r"~\.wslconfig")
+        mtime = os.path.getmtime(p) if os.path.exists(p) else None
+        if _wsl_network_mode_cache is not None:
+            cached_mtime, cached_mode = _wsl_network_mode_cache
+            # Cache hit only if .wslconfig is unchanged since we parsed it.
+            if cached_mtime == mtime:
+                return cached_mode
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 lines = f.read().splitlines()
@@ -261,10 +347,11 @@ def get_wsl_network_mode():
                 if in_wsl2:
                     m = re.match(r"^networkingMode\s*=\s*(\S+)\s*$", line, re.IGNORECASE)
                     if m:
-                        _wsl_network_mode_cache = m.group(1).capitalize()
-                        return _wsl_network_mode_cache
-        _wsl_network_mode_cache = "默认(NAT)"
-        return _wsl_network_mode_cache
+                        mode = m.group(1).capitalize()
+                        _wsl_network_mode_cache = (mtime, mode)
+                        return mode
+        _wsl_network_mode_cache = (mtime, "默认(NAT)")
+        return _wsl_network_mode_cache[1]
     except Exception:
         return "未知"
 
@@ -503,6 +590,7 @@ def restart_wsl():
 # ─── Tray icon ────────────────────────────────────────────────────────────────
 def _make_tray_image():
     """Draw a simple 64x64 ring icon (accent-colored ring, white center)."""
+    from PIL import Image, ImageDraw
     hex_color = C["accent"].lstrip("#")
     rgb = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
@@ -539,7 +627,12 @@ class InfoRow(ctk.CTkFrame):
         if not self._copyable:
             return
         text = self._val.cget("text")
-        # Skip placeholders / failure strings — only copy things that look
+        # If we're showing the "✓ 已复制" feedback, use the cached original
+        # value so the user can re-copy by clicking again during the 1200ms
+        # feedback window instead of being silently ignored.
+        if self._orig_text is not None and "已复制" in text:
+            text = self._orig_text
+        # Skip placeholders / failure strings - only copy things that look
         # like an address (contains a digit, no spaces).
         if not text or any(c.isspace() for c in text) or not any(c.isdigit() for c in text):
             return
@@ -548,9 +641,19 @@ class InfoRow(ctk.CTkFrame):
             self._root.clipboard_append(text)
         except Exception:
             return
+        self._orig_text = text
         # Brief visual confirmation.
         self._val.configure(text=f"{text}  ✓ 已复制", text_color=C["green"])
-        self._val.after(1200, lambda: self._val.configure(text=text, text_color=C["text"]))
+        # Use the root-level after (not _val.after) so the callback is on the
+        # top-level widget and survives InfoRow destruction in a rebuild.
+        def restore():
+            # Only restore if the feedback is still on screen - a concurrent
+            # refresh (set_value) may have already updated the value, and
+            # overwriting that fresh data with the copied text would show a
+            # stale address.
+            if "已复制" in self._val.cget("text"):
+                self._val.configure(text=text, text_color=C["text"])
+        self._root.after(1200, restore)
 
 
 # ─── Main App ─────────────────────────────────────────────────────────────────
@@ -578,8 +681,11 @@ class App:
         # Last-known proxy on/off; lets a theme switch re-tint the status dot,
         # which the recursive restyle would otherwise reset to idle gray.
         self._proxy_on = False
+        self._ps_on = False
+        self._wsl_on = False
+        self._refresh_token = None
 
-        # Rebuild generation — incremented each time _build() tears down and
+        # Rebuild generation - incremented each time _build() tears down and
         # recreates the content tree. Callbacks scheduled via self._after() embed
         # the generation at creation time and no-op if a rebuild has since
         # happened, avoiding "CTk object is not callable" crashes that occur when
@@ -852,50 +958,113 @@ class App:
     # ── Async Refresh ──
     def _async_refresh(self):
         self._refresh.configure(state="disabled")
+        self._theme_btn.configure(state="disabled")
+        # Lock action buttons too: an _enable/_disable mid-refresh would
+        # stack a second _async_refresh via _jobs_done, wasting a ~5s WSL call.
+        self._lock_actions(True)
         self._status.configure(text="检测中…")
         self._dot.configure(text_color=C["text2"])
 
+        # Token guards UI callbacks against stale refreshes: if a second
+        # _async_refresh starts before the first's futures all settle, the old
+        # callbacks see a mismatched token and no-op instead of overwriting the
+        # new refresh's _ps_on/_wsl_on with stale data.
+        token = object()
+        self._refresh_token = token
+
+        # Incremental refresh: each future updates its UI row as soon as it
+        # completes, so the user sees local info (~1ms) immediately instead of
+        # staring at "检测中…" for 5-6s while WSL spins up. The refresh button
+        # is re-enabled only after every future has settled.
+        pending = {"n": 5}  # one per future (ps, li, mo, psp, wsl)
+
+        def on_done(_future):
+            # Decrement in the main thread to avoid races on pending["n"].
+            self._after(0, _finish)
+
+        def _finish():
+            pending["n"] -= 1
+            if pending["n"] <= 0:
+                self._refresh.configure(state="normal")
+                self._theme_btn.configure(state="normal")
+                self._lock_actions(False)
+
+        # Track PS and WSL proxy states independently so that whichever future
+        # completes first cannot clobber the other's contribution. Both callbacks
+        # funnel through _sync_status which ORs the two into _proxy_on.
+        self._ps_on = False
+        self._wsl_on = False
+
+        def _sync_status():
+            self._proxy_on = bool(self._ps_on or self._wsl_on)
+            if self._proxy_on:
+                self._dot.configure(text_color=C["green"])
+                self._status.configure(text="已启用")
+            else:
+                self._dot.configure(text_color=C["text2"])
+                self._status.configure(text="未启用")
+
+        def ui_ps(ps):
+            if self._refresh_token is not token:
+                return
+            self._ps_on = bool(ps)
+            _sync_status()
+
+        def ui_ps_vars(psp):
+            if self._refresh_token is not token:
+                return
+            self._ps_http.set_value(psp.get("HTTP_PROXY", "未设置"))
+            self._ps_https.set_value(psp.get("HTTPS_PROXY", "未设置"))
+
+        def ui_li(li):
+            if self._refresh_token is not token:
+                return
+            self._lip.set_value(li)
+
+        def ui_mo(mo):
+            if self._refresh_token is not token:
+                return
+            self._wmode.set_value(mo)
+
+        def ui_wsl(ip, ws, wsp):
+            """Update WSL rows. Parsing (get_wsl_status/get_wsl_proxy_vars) is
+            done in the callback so the regex runs on the pool thread, not the
+            UI thread."""
+            if self._refresh_token is not token:
+                return
+            self._wip.set_value(ip)
+            self._wsl_http.set_value(wsp.get("HTTP_PROXY", "未设置"))
+            self._wsl_https.set_value(wsp.get("HTTPS_PROXY", "未设置"))
+            self._wsl_on = bool(ws)
+            _sync_status()
+
         def work():
-            # Run independent I/O-bound checks in parallel. The three WSL
-            # subprocess calls used to run serially (1.5-6s); now they overlap
-            # and the total is bounded by the slowest single call (~0.5-2s).
-            from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=5) as pool:
                 f_ps  = pool.submit(get_ps_status)
                 f_li  = pool.submit(get_local_ip)
-                f_wi  = pool.submit(get_wsl_ip)
                 f_mo  = pool.submit(get_wsl_network_mode)
                 f_psp = pool.submit(get_ps_proxy_vars)
-                # Single WSL read shared by both status and proxy-var parsing.
-                f_block = pool.submit(_read_wsl_block)
-                ps  = f_ps.result()
-                li  = f_li.result()
-                wi  = f_wi.result()
-                mo  = f_mo.result()
-                psp = f_psp.result()
-                block = f_block.result()
-            ws  = get_wsl_status(block)
-            wsp = get_wsl_proxy_vars(block)
-            self._after(0, lambda: self._update(ps, ws, li, wi, mo, psp, wsp))
+                # Merge two WSL calls (get_wsl_ip + _read_wsl_block) into one
+                # wsl.exe invocation to save ~5s of process-startup overhead.
+                f_wsl = pool.submit(get_wsl_ip_and_block)
+
+                f_ps.add_done_callback(lambda f: self._after(0, lambda: ui_ps(f.result())))
+                f_li.add_done_callback(lambda f: self._after(0, lambda: ui_li(f.result())))
+                f_mo.add_done_callback(lambda f: self._after(0, lambda: ui_mo(f.result())))
+                f_psp.add_done_callback(lambda f: self._after(0, lambda: ui_ps_vars(f.result())))
+                # Parse the block on the pool thread, then marshal only the
+                # pre-computed values to the UI thread.
+                def wsl_cb(f):
+                    ip, block = f.result()
+                    ws = get_wsl_status(block)
+                    wsp = get_wsl_proxy_vars(block)
+                    self._after(0, lambda: ui_wsl(ip, ws, wsp))
+                f_wsl.add_done_callback(wsl_cb)
+
+                for f in (f_ps, f_li, f_mo, f_psp, f_wsl):
+                    f.add_done_callback(on_done)
 
         threading.Thread(target=work, daemon=True).start()
-
-    def _update(self, ps, ws, li, wi, mo, psp, wsp):
-        self._proxy_on = bool(ps or ws)
-        if self._proxy_on:
-            self._dot.configure(text_color=C["green"])
-            self._status.configure(text="已启用")
-        else:
-            self._dot.configure(text_color=C["text2"])
-            self._status.configure(text="未启用")
-        self._lip.set_value(li)
-        self._wip.set_value(wi)
-        self._wmode.set_value(mo)
-        self._ps_http.set_value(psp.get("HTTP_PROXY", "未设置"))
-        self._ps_https.set_value(psp.get("HTTPS_PROXY", "未设置"))
-        self._wsl_http.set_value(wsp.get("HTTP_PROXY", "未设置"))
-        self._wsl_https.set_value(wsp.get("HTTPS_PROXY", "未设置"))
-        self._refresh.configure(state="normal")
 
     # ── Validate ──
     def _validate(self):
@@ -909,20 +1078,23 @@ class App:
             return None
         # Reject shell metacharacters that could break the export line written
         # to ~/.bashrc (quotes, semicolons, dollar, backtick, pipe, ampersand).
+        # ':' is excluded too: the proxy URL is assembled as http://host:port,
+        # so a colon in host almost always means the user pasted "host:port"
+        # here by mistake instead of using the dedicated port field.
         _ALLOWED = set(
             "abcdefghijklmnopqrstuvwxyz"
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            "0123456789.-_:"
+            "0123456789.-_"
         )
         if not all(c in _ALLOWED for c in h):
-            messagebox.showwarning("提示", "地址含非法字符（仅允许字母、数字、. - _ :）")
+            if ":" in h:
+                messagebox.showwarning("提示", "地址中不应包含端口或冒号。\n端口请填入下方的“端口”字段。")
+            else:
+                messagebox.showwarning("提示", "地址含非法字符（仅允许字母、数字、. - _）")
             return None
-        # Warn if the user pasted a full URL or included a port.
+        # Warn if the user pasted a full URL.
         if "://" in h:
             messagebox.showwarning("提示", "只需填写地址，不含协议头（如 http://）")
-            return None
-        if ":" in h and p and p != "0":
-            messagebox.showwarning("提示", "地址中已包含端口，请留空端口字段或移除地址中的 :端口")
             return None
         if not _is_valid_port(p):
             messagebox.showwarning("提示", "端口须为 1-65535 的整数")
@@ -960,8 +1132,11 @@ class App:
     def _jobs_done(self, errs, hit_wsl, wsl_prompt):
         self._lock_actions(False)
         if errs:
-            self._async_refresh()
+            # Show the error first, then refresh. If we kick off the refresh
+            # before the modal messagebox, the background _update callback can
+            # fire mid-dialog and visibly flicker the status dot / refresh button.
             messagebox.showerror("错误", "\n".join(errs))
+            self._async_refresh()
             return
         if hit_wsl and messagebox.askyesno("WSL 重启", wsl_prompt):
             self._restart()
@@ -1009,6 +1184,9 @@ class App:
 
     def _rst_done(self, ret):
         self._lock_actions(False)
+        # A WSL restart is the moment a changed networkingMode takes effect,
+        # so drop the cached value before the refresh re-reads it.
+        _invalidate_wsl_network_mode_cache()
         if ret is True:
             self._async_refresh()
         else:
@@ -1039,18 +1217,25 @@ class App:
     def _toggle_theme(self):
         self._mode = "dark" if self._mode == "light" else "light"
         apply_theme(self._mode)
-        self.root.configure(fg_color=C["bg"])
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
                     self.ps_var.get(), self.wsl_var.get(), self.pin_var.get(), self._mode)
-        # Re-tint the existing widget tree in place — no destroy/rebuild, so the
-        # switch is instant with no visible flicker.
-        for w in self.root.winfo_children():
-            if getattr(w, "_is_content", False):
-                self._apply_colors(w)
-        # The recursive restyle resets every label to palette defaults — put the
-        # status dot back on its stored state color.
-        self._dot.configure(text_color=C["green"] if self._proxy_on else C["text2"])
-        self._sync_pin_btn()
+        # Freeze window repainting during the bulk color update so the user
+        # sees an instant snap instead of 200+ configure() calls repainting one
+        # by one over ~180ms. WM_SETREDRAW tells the window to stop processing
+        # paint messages; we flush all configures, then thaw and refresh once.
+        hwnd = self.root.winfo_id()
+        user32.SendMessageW(hwnd, WM_SETREDRAW, 0, 0)
+        try:
+            self.root.configure(fg_color=C["bg"])
+            for w in self.root.winfo_children():
+                if getattr(w, "_is_content", False):
+                    self._apply_colors(w)
+            self._dot.configure(text_color=C["green"] if self._proxy_on else C["text2"])
+            self._sync_pin_btn()
+        finally:
+            user32.SendMessageW(hwnd, WM_SETREDRAW, 1, 0)
+            # Force a single repaint now that all colors are set.
+            self.root.update_idletasks()
 
     def _apply_colors(self, widget):
         """Recursively restyle an existing widget tree to the active palette
@@ -1106,29 +1291,56 @@ class App:
     def _speed_title():
         """Card caption. The tracked interface is chosen asynchronously and can
         change after startup, so this is refreshed each tick, not baked in."""
-        return f"实时网速 ({_primary_iface or '—'})"
+        return f"实时网速 ({_primary_iface or '-'})"
 
     def _tick_speed(self):
-        """Sample net counters every 1s and update the speed card."""
-        cur = get_net_counters()
-        if self._speed_hdr is not None:
-            t = self._speed_title()
-            if self._speed_hdr.cget("text") != t:
-                self._speed_hdr.configure(text=t)
-        prev = self._speed_prev
-        if cur is not None and prev is not None and self._speed_up is not None:
-            up = cur[0] - prev[0]
-            dn = cur[1] - prev[1]
-            # Guard against counter resets/overflows: a negative delta or an
-            # implausibly large jump (>100 MB in one second) means the
-            # underlying counter wrapped or the interface was re-enumerated;
-            # skip this sample rather than showing a bogus spike.
-            if 0 <= up <= self._MAX_DELTA:
-                self._speed_up.set_value(format_speed(up))
-            if 0 <= dn <= self._MAX_DELTA:
-                self._speed_dn.set_value(format_speed(dn))
-        self._speed_prev = cur if cur is not None else prev
-        self.root.after(1000, self._tick_speed)
+        """Sample net counters on a background thread every 1s.
+
+        psutil.net_io_counters(pernic=True) takes ~10ms, which blocks the UI
+        thread if called directly in the main loop. By running the sampling on
+        a daemon thread and marshalling only the pre-formatted strings back via
+        root.after(0, ...), the main-thread cost drops to ~0.1ms per tick."""
+        self._speed_thread_stop = threading.Event()
+
+        def sampler():
+            prev = self._speed_prev
+            while not self._speed_thread_stop.is_set():
+                cur = get_net_counters()
+                up_str = dn_str = None
+                title = self._speed_title()
+                if cur is not None and prev is not None:
+                    up = cur[0] - prev[0]
+                    dn = cur[1] - prev[1]
+                    # Guard against counter resets/overflows: a negative delta
+                    # or an implausibly large jump (>100 MB in one second)
+                    # means the underlying counter wrapped or the interface was
+                    # re-enumerated; skip this sample rather than showing a
+                    # bogus spike.
+                    if 0 <= up <= self._MAX_DELTA:
+                        up_str = format_speed(up)
+                    if 0 <= dn <= self._MAX_DELTA:
+                        dn_str = format_speed(dn)
+                prev = cur if cur is not None else prev
+
+                def apply(u, d, t):
+                    # Use _after for its generation guard: if a rebuild has
+                    # happened since scheduling, the widget references may be
+                    # stale and this callback safely no-ops. _after also
+                    # swallows RuntimeError if the mainloop has terminated.
+                    def do():
+                        if self._speed_hdr is not None:
+                            if self._speed_hdr.cget("text") != t:
+                                self._speed_hdr.configure(text=t)
+                        if u is not None and self._speed_up is not None:
+                            self._speed_up.set_value(u)
+                        if d is not None and self._speed_dn is not None:
+                            self._speed_dn.set_value(d)
+                    self._after(0, do)
+
+                apply(up_str, dn_str, title)
+                self._speed_thread_stop.wait(1.0)
+
+        threading.Thread(target=sampler, daemon=True).start()
 
     # ── System Tray ──
     def _on_close(self):
@@ -1140,6 +1352,7 @@ class App:
         if self._tray_thread is not None:
             return
         try:
+            import pystray
             menu = pystray.Menu(
                 pystray.MenuItem("显示主窗口", self._tray_show),
                 pystray.MenuItem("退出", self._tray_quit),
@@ -1165,6 +1378,11 @@ class App:
         self.root.focus_force()
 
     def _quit(self):
+        # Bump generation so any pending _after callbacks (e.g. from the speed
+        # sampler thread) become no-ops instead of touching destroyed widgets.
+        self._generation += 1
+        if hasattr(self, "_speed_thread_stop"):
+            self._speed_thread_stop.set()
         if self._tray_icon is not None:
             try:
                 self._tray_icon.stop()
@@ -1176,8 +1394,24 @@ class App:
 
 # ─── Entry ────────────────────────────────────────────────────────────────────
 def main():
+    import sys
+    # Catch uncaught exceptions in non-UI threads. UI-thread callback failures
+    # are handled separately by _safe_report_exception above; both paths write
+    # to the same crash.log via _log_crash.
+    sys.excepthook = _log_crash
+
     root = ctk.CTk()
-    App(root)
+    # Build the UI hidden so that on a successful construction the window
+    # appears exactly once, already sized and centered by App.__init__.
+    root.withdraw()
+    try:
+        App(root)
+    except Exception:
+        # Surface the window so the user sees something instead of a silent
+        # quit, then re-raise so sys.excepthook logs the full traceback.
+        root.deiconify()
+        raise
+    root.deiconify()
     root.mainloop()
 
 

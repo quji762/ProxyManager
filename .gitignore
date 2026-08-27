@@ -8,10 +8,15 @@ __pycache__/
 # Config (contains user preferences, not secrets)
 config.json
 
+# Crash / trace logs written by the app at runtime
+*.log
+
 # IDE
 .vscode/
 .idea/
+.zcode/
 
 # OS
 Thumbs.db
 Desktop.ini
+*.lnk
