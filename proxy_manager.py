@@ -32,10 +32,14 @@ except ImportError:
 # UI thread would vanish silently. We funnel every crash path (the interpreter
 # excepthook AND tkinter's _report_exception for callback failures) through one
 # writer that appends a timestamped traceback to %APPDATA%\ProxyManager\crash.log.
-_CRASH_LOG = os.path.join(
-    os.environ.get("APPDATA") or os.path.expanduser("~"),
-    "ProxyManager", "crash.log",
-)
+_APPDATA = os.environ.get("APPDATA") or os.path.expanduser("~")
+_CRASH_LOG = os.path.join(_APPDATA, "ProxyManager", "crash.log")
+
+# ── Single-instance guard ─────────────────────────────────────────────────────
+# A second launch writes a "show" signal and exits; the running instance polls
+# for it and brings its window back.  This avoids invisible zombie processes
+# that the user sees in Task Manager but can't interact with.
+_SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
 
 
 def _log_crash(exc_type, exc_val, exc_tb):
@@ -1393,6 +1397,29 @@ class App:
 
 
 # ─── Entry ────────────────────────────────────────────────────────────────────
+
+# Win32 constants for ShowWindow / SetForegroundWindow.
+_SW_RESTORE = 9
+_SW_SHOW = 5
+
+
+def _try_activate_window():
+    """Best-effort: find an existing ProxyManager window by title and bring it
+    to the foreground.  Works even if the running instance was built from old
+    code that doesn't poll for wake.signal."""
+    try:
+        hwnd = ctypes.windll.user32.FindWindowW(None, APP_TITLE)
+        if not hwnd:
+            return
+        # If the window is minimized or hidden, restore it first.
+        ctypes.windll.user32.ShowWindow(hwnd, _SW_RESTORE)
+        # AllowSetForegroundWindow lets us steal focus from the tray.
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 def main():
     import sys
     # Catch uncaught exceptions in non-UI threads. UI-thread callback failures
@@ -1400,19 +1427,69 @@ def main():
     # to the same crash.log via _log_crash.
     sys.excepthook = _log_crash
 
-    root = ctk.CTk()
-    # Build the UI hidden so that on a successful construction the window
-    # appears exactly once, already sized and centered by App.__init__.
-    root.withdraw()
+    # ── Single-instance guard ──
+    # Use a named mutex so only one ProxyManager process lives at a time.
+    # If a second launch is attempted, it writes a wake.signal file and exits;
+    # the running instance polls for that file and brings its window back.
+    mutex_name = "Local\\ProxyManagerSingleInstance"
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, True, mutex_name)
+    already_running = ctypes.windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+
+    if already_running:
+        # Two-pronged wake-up:
+        # 1) Write a signal file that new-code instances poll for.
+        # 2) Use Win32 FindWindow + ShowWindow to directly revive old-code
+        #    instances that don't have the polling loop.
+        try:
+            os.makedirs(os.path.dirname(_SIGNAL_FILE), exist_ok=True)
+            with open(_SIGNAL_FILE, "w") as f:
+                f.write("show")
+        except OSError:
+            pass
+        _try_activate_window()
+        ctypes.windll.kernel32.CloseHandle(mutex)
+        return
+
+    # Clean up any stale signal file from a previous second-launch attempt.
     try:
-        App(root)
+        os.remove(_SIGNAL_FILE)
+    except OSError:
+        pass
+
+    root = ctk.CTk()
+
+    app = None
+    try:
+        app = App(root)
     except Exception:
-        # Surface the window so the user sees something instead of a silent
-        # quit, then re-raise so sys.excepthook logs the full traceback.
-        root.deiconify()
-        raise
+        _log_crash(*sys.exc_info())
+        # Fall through — the window is already visible; user can see it.
+
+    # Ensure the window is visible, restored, and on-screen.  Customtkinter /
+    # PyInstaller can leave the window in an iconic or off-screen state;
+    # deiconify + lift + focus_force is the reliable triple to bring it back.
     root.deiconify()
+    root.state("normal")
+    root.lift()
+    root.focus_force()
+
+    if app is not None:
+        # Poll for the wake.signal so a second launch brings us back.
+        def _check_wake():
+            if os.path.exists(_SIGNAL_FILE):
+                try:
+                    os.remove(_SIGNAL_FILE)
+                except OSError:
+                    pass
+                app._show_window()
+            root.after(1500, _check_wake)
+
+        root.after(1500, _check_wake)
+
     root.mainloop()
+
+    # Release the mutex on exit.
+    ctypes.windll.kernel32.CloseHandle(mutex)
 
 
 if __name__ == "__main__":
