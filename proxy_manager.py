@@ -10,7 +10,6 @@ import subprocess
 import re
 import json
 import os
-import sys
 import socket
 import threading
 import ctypes
@@ -145,7 +144,6 @@ def apply_theme(mode: str):
 # ─── Constants ────────────────────────────────────────────────────────────────
 APP_TITLE  = "代理管理器"
 APP_WIDTH  = 760
-APP_HEIGHT = 480
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = "7897"
 
@@ -168,17 +166,39 @@ ENV_REG_PATH    = r"Environment"
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
+def _is_valid_port(p: str) -> bool:
+    """ASCII digits only — str.isdigit() also accepts superscripts etc. that
+    int() then rejects."""
+    return p.isascii() and p.isdigit() and 1 <= int(p) <= 65535
+
+
 def load_config():
+    """Read config.json defensively: on-disk values are never trusted, since a
+    hand-edited or partially written file crashed startup (StringVar(int))."""
     defaults = {"host": DEFAULT_HOST, "port": DEFAULT_PORT,
                 "powershell": True, "wsl": True, "pin": False, "mode": "light"}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            defaults.update(cfg)          # backfill any new keys
-            return defaults
         except Exception:
-            pass
+            return defaults
+        if isinstance(cfg, dict):
+            for k, dv in defaults.items():
+                v = cfg.get(k, dv)
+                if k == "host":
+                    v = ("" if v is None else str(v)).strip() or dv
+                elif k == "port":
+                    v = str(v).strip()
+                    if not _is_valid_port(v):
+                        v = dv
+                elif k == "mode":
+                    v = str(v).lower()
+                    if v not in PALETTES:
+                        v = dv
+                else:
+                    v = bool(v)
+                defaults[k] = v
     return defaults
 
 
@@ -456,7 +476,12 @@ export https_proxy="{url}"
         if enable:
             # Feed the block via stdin so no shell interpolation touches it —
             # avoids quoting/escaping pitfalls with arbitrary host strings.
-            subprocess.run(["wsl", "-e", "bash", "-c", "cat >> ~/.bashrc"],
+            # Guard first: if ~/.bashrc lacks a trailing newline, the appended
+            # marker glues onto the last user line and the later range-delete
+            # would remove that user line along with the block.
+            append = ("[ -s ~/.bashrc ] && [ -n \"$(tail -c1 ~/.bashrc)\" ]"
+                      " && printf '\\n' >> ~/.bashrc; cat >> ~/.bashrc")
+            subprocess.run(["wsl", "-e", "bash", "-c", append],
                            input=block + "\n", text=True,
                            capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
         return True
@@ -549,6 +574,10 @@ class App:
         # Tray state.
         self._tray_icon = None
         self._tray_thread = None
+
+        # Last-known proxy on/off; lets a theme switch re-tint the status dot,
+        # which the recursive restyle would otherwise reset to idle gray.
+        self._proxy_on = False
 
         # Rebuild generation — incremented each time _build() tears down and
         # recreates the content tree. Callbacks scheduled via self._after() embed
@@ -706,12 +735,13 @@ class App:
         self._wmode.pack(fill="x", padx=16, pady=(0, 2))
 
         # Live speed (only when psutil is available).
-        self._speed_up = self._speed_dn = None
+        self._speed_up = self._speed_dn = self._speed_hdr = None
         if HAVE_PSUTIL:
-            iface = _primary_iface or "—"
-            ctk.CTkLabel(nc, text=f"实时网速 ({iface})",
-                         font=ctk.CTkFont(family=FONT_CN, size=11, weight="bold"),
-                         text_color=C["text2"]).pack(anchor="w", padx=16, pady=(6, 2))
+            self._speed_hdr = ctk.CTkLabel(nc, text=self._speed_title(),
+                                           font=ctk.CTkFont(family=FONT_CN, size=11, weight="bold"),
+                                           text_color=C["text2"])
+            self._speed_hdr._tint = "text2"
+            self._speed_hdr.pack(anchor="w", padx=16, pady=(6, 2))
             self._speed_up = InfoRow(nc, "↑ 上传", "0 B/s")
             self._speed_up.pack(fill="x", padx=16, pady=(0, 2))
             self._speed_dn = InfoRow(nc, "↓ 下载", "0 B/s")
@@ -731,16 +761,20 @@ class App:
         ctk.CTkLabel(pc, text="代理变量",
                      font=ctk.CTkFont(family=FONT_CN, size=12, weight="bold"),
                      text_color=C["text"]).pack(anchor="w", padx=16, pady=(12, 6))
-        ctk.CTkLabel(pc, text="PowerShell",
-                     font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
-                     text_color=C["text2"]).pack(anchor="w", padx=16, pady=(0, 2))
+        ps_hd = ctk.CTkLabel(pc, text="PowerShell",
+                             font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
+                             text_color=C["text2"])
+        ps_hd._tint = "text2"  # pinned secondary color across theme switches
+        ps_hd.pack(anchor="w", padx=16, pady=(0, 2))
         self._ps_http = InfoRow(pc, "HTTP_PROXY")
         self._ps_http.pack(fill="x", padx=16, pady=(0, 2))
         self._ps_https = InfoRow(pc, "HTTPS_PROXY")
         self._ps_https.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(pc, text="WSL",
-                     font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
-                     text_color=C["text2"]).pack(anchor="w", padx=16, pady=(0, 2))
+        wsl_hd = ctk.CTkLabel(pc, text="WSL",
+                              font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
+                              text_color=C["text2"])
+        wsl_hd._tint = "text2"
+        wsl_hd.pack(anchor="w", padx=16, pady=(0, 2))
         self._wsl_http = InfoRow(pc, "HTTP_PROXY")
         self._wsl_http.pack(fill="x", padx=16, pady=(0, 2))
         self._wsl_https = InfoRow(pc, "HTTPS_PROXY")
@@ -847,7 +881,8 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def _update(self, ps, ws, li, wi, mo, psp, wsp):
-        if ps or ws:
+        self._proxy_on = bool(ps or ws)
+        if self._proxy_on:
             self._dot.configure(text_color=C["green"])
             self._status.configure(text="已启用")
         else:
@@ -889,13 +924,49 @@ class App:
         if ":" in h and p and p != "0":
             messagebox.showwarning("提示", "地址中已包含端口，请留空端口字段或移除地址中的 :端口")
             return None
-        if not p.isdigit() or not (1 <= int(p) <= 65535):
+        if not _is_valid_port(p):
             messagebox.showwarning("提示", "端口须为 1-65535 的整数")
             return None
         if not self.ps_var.get() and not self.wsl_var.get():
             messagebox.showwarning("提示", "请至少选择一个目标")
             return None
         return h, str(int(p))
+
+    # ── Action locking (shared by enable/disable/restart) ──
+    def _lock_actions(self, locked: bool, busy_btn=None, busy_label: str = ""):
+        """Freeze the three action buttons during background work so nothing
+        re-enters mid-operation; busy_btn doubles as the progress indicator."""
+        for btn, idle in ((self._en, "启用代理"), (self._dis, "关闭代理"),
+                          (self._rst, "重启 WSL")):
+            text = busy_label if (locked and btn is busy_btn) else idle
+            btn.configure(state="disabled" if locked else "normal", text=text)
+
+    def _run_jobs(self, jobs, busy_btn, busy_label, wsl_prompt):
+        """Apply proxy mutations off the UI thread. Each job is a
+        (label, fn, args) triple whose fn returns True on success."""
+        self._lock_actions(True, busy_btn, busy_label)
+
+        def work():
+            errs = []
+            for label, fn, args in jobs:
+                ret = fn(*args)
+                if ret is not True:
+                    errs.append(f"{label}: {ret}")
+            hit_wsl = any(label == "WSL" for label, _, _ in jobs)
+            self._after(0, lambda: self._jobs_done(errs, hit_wsl, wsl_prompt))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _jobs_done(self, errs, hit_wsl, wsl_prompt):
+        self._lock_actions(False)
+        if errs:
+            self._async_refresh()
+            messagebox.showerror("错误", "\n".join(errs))
+            return
+        if hit_wsl and messagebox.askyesno("WSL 重启", wsl_prompt):
+            self._restart()
+        else:
+            self._async_refresh()
 
     # ── Enable ──
     def _enable(self):
@@ -905,53 +976,30 @@ class App:
         h, p = r
         save_config(h, p, self.ps_var.get(), self.wsl_var.get(),
                     self.pin_var.get(), self._mode)
-        errs = []
+        jobs = []
         if self.ps_var.get():
-            ret = set_ps_proxy(h, p, True)
-            if ret is not True:
-                errs.append(f"PowerShell: {ret}")
+            jobs.append(("PowerShell", set_ps_proxy, (h, p, True)))
         if self.wsl_var.get():
-            ret = set_wsl_proxy(h, p, True)
-            if ret is not True:
-                errs.append(f"WSL: {ret}")
-        if errs:
-            self._async_refresh()
-            messagebox.showerror("错误", "\n".join(errs))
-            return
-        if (self.wsl_var.get()
-                and messagebox.askyesno(
-                    "WSL 重启",
-                    "代理已注入，WSL 需重启生效。\n\n立即重启？\n（会终止 WSL 中所有进程）")):
-            self._restart()
-        else:
-            self._async_refresh()
+            jobs.append(("WSL", set_wsl_proxy, (h, p, True)))
+        if jobs:
+            self._run_jobs(jobs, self._en, "启用中…",
+                           "代理已注入，WSL 需重启生效。\n\n立即重启？\n（会终止 WSL 中所有进程）")
 
     # ── Disable ──
     def _disable(self):
-        errs = []
+        jobs = []
         if self.ps_var.get():
-            ret = set_ps_proxy(DEFAULT_HOST, DEFAULT_PORT, False)
-            if ret is not True:
-                errs.append(f"PowerShell: {ret}")
+            jobs.append(("PowerShell", set_ps_proxy, (DEFAULT_HOST, DEFAULT_PORT, False)))
         if self.wsl_var.get():
-            ret = set_wsl_proxy(DEFAULT_HOST, DEFAULT_PORT, False)
-            if ret is not True:
-                errs.append(f"WSL: {ret}")
-        if errs:
-            self._async_refresh()
-            messagebox.showerror("错误", "\n".join(errs))
+            jobs.append(("WSL", set_wsl_proxy, (DEFAULT_HOST, DEFAULT_PORT, False)))
+        if not jobs:
             return
-        if (self.wsl_var.get()
-                and messagebox.askyesno(
-                    "WSL 重启",
-                    "代理已移除，WSL 需重启生效。\n\n立即重启？")):
-            self._restart()
-        else:
-            self._async_refresh()
+        self._run_jobs(jobs, self._dis, "关闭中…",
+                       "代理已移除，WSL 需重启生效。\n\n立即重启？")
 
     # ── Restart WSL ──
     def _restart(self):
-        self._rst.configure(state="disabled", text="重启中…")
+        self._lock_actions(True, self._rst, "重启中…")
 
         def do():
             ret = restart_wsl()
@@ -960,7 +1008,7 @@ class App:
         threading.Thread(target=do, daemon=True).start()
 
     def _rst_done(self, ret):
-        self._rst.configure(state="normal", text="重启 WSL")
+        self._lock_actions(False)
         if ret is True:
             self._async_refresh()
         else:
@@ -999,6 +1047,9 @@ class App:
         for w in self.root.winfo_children():
             if getattr(w, "_is_content", False):
                 self._apply_colors(w)
+        # The recursive restyle resets every label to palette defaults — put the
+        # status dot back on its stored state color.
+        self._dot.configure(text_color=C["green"] if self._proxy_on else C["text2"])
         self._sync_pin_btn()
 
     def _apply_colors(self, widget):
@@ -1023,12 +1074,14 @@ class App:
                 widget.configure(fg_color=C["input_bg"], hover_color=C["border"],
                                  text_color=C["text2"], border_color=C["border"])
         elif isinstance(widget, ctk.CTkLabel):
-            # Section headers (bold, C["text"]) vs info labels (C["text2"]).
-            weight = widget.cget("font").cget("weight") if hasattr(widget.cget("font"), "cget") else None
-            if weight == "bold":
-                widget.configure(text_color=C["text"])
-            else:
+            # An explicit _tint wins (secondary headers that are bold yet
+            # styled with text2); otherwise infer: bold -> text, regular -> text2.
+            tint = getattr(widget, "_tint", None)
+            if tint == "text2":
                 widget.configure(text_color=C["text2"])
+            else:
+                weight = widget.cget("font").cget("weight") if hasattr(widget.cget("font"), "cget") else None
+                widget.configure(text_color=C["text"] if weight == "bold" else C["text2"])
         elif isinstance(widget, ctk.CTkFrame):
             fg = widget.cget("fg_color")
             if fg in ("transparent", ""):
@@ -1049,9 +1102,19 @@ class App:
     # ── Live Speed Sampler ──
     _MAX_DELTA = 100 * 1024 * 1024  # 100 MB/s sanity cap per sample
 
+    @staticmethod
+    def _speed_title():
+        """Card caption. The tracked interface is chosen asynchronously and can
+        change after startup, so this is refreshed each tick, not baked in."""
+        return f"实时网速 ({_primary_iface or '—'})"
+
     def _tick_speed(self):
         """Sample net counters every 1s and update the speed card."""
         cur = get_net_counters()
+        if self._speed_hdr is not None:
+            t = self._speed_title()
+            if self._speed_hdr.cget("text") != t:
+                self._speed_hdr.configure(text=t)
         prev = self._speed_prev
         if cur is not None and prev is not None and self._speed_up is not None:
             up = cur[0] - prev[0]
