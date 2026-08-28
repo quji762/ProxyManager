@@ -409,12 +409,19 @@ def get_wsl_ip_and_block():
             f"echo '{sep1}';"
             f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null;"
             f"echo '{sep2}';"
-            "git config --global --get http.proxy 2>/dev/null"
+            "git config --global --get http.proxy 2>/dev/null;"
+            # git --get exits 1 when the key is unset, so the raw exit code can't
+            # distinguish "works" from "fails"; `true` normalizes it to 0 iff
+            # bash actually ran. A non-zero code means wsl.exe itself failed
+            # (feature disabled / no distro installed).
+            "true"
         )
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c", cmd],
             capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
+        if r.returncode != 0:
+            return ("WSL 不可用", "", "未设置")
         out = r.stdout
         git_part = ""
         if sep2 in out:
@@ -678,6 +685,19 @@ def set_ps_proxy(host, port, enable=True):
         return str(e)
 
 
+def wsl_available():
+    """True iff `wsl -e` can actually run bash (feature enabled + a distro
+    installed). wsl.exe itself always exists in System32 on Win10/11, so its
+    mere presence proves nothing."""
+    try:
+        r = subprocess.run(["wsl", "-e", "echo", "ok"],
+                           capture_output=True, timeout=15,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _get_wsl_gateway_ip():
     """Return the WSL default gateway (= the Windows host as seen from WSL2
     NAT mode), or None if it cannot be determined (WSL down, WSL1, etc.)."""
@@ -729,9 +749,12 @@ export no_proxy="$NO_PROXY"
             # Send raw UTF-8 bytes: text=True would translate \n to \r\n on
             # Windows, leaving a literal \r in every bashrc line and polluting
             # the exported proxy values.
-            subprocess.run(["wsl", "-e", "bash", "-c", append],
-                           input=(block + "\n").encode("utf-8"),
-                           capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+            r = subprocess.run(["wsl", "-e", "bash", "-c", append],
+                               input=(block + "\n").encode("utf-8"),
+                               capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode != 0:
+                # bash never ran: WSL feature disabled or no distro installed.
+                return "未检测到可用的 WSL 发行版，无法写入 ~/.bashrc"
         return True
     except Exception as e:
         # Disabling is best-effort cleanup: a missing/broken WSL has nothing
@@ -762,9 +785,13 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
                                capture_output=True, text=True, timeout=15,
                                creationflags=subprocess.CREATE_NO_WINDOW)
             if enable and r.returncode != 0:
-                if "command not found" in (r.stderr or "") or r.returncode == 127:
+                # Avoid echoing wsl's own messages: redirected console output
+                # may be UTF-16 and would decode as mojibake.
+                if not wsl_available():
+                    return "未检测到可用的 WSL 发行版"
+                if r.returncode == 127:
                     return "WSL 内未找到 git"
-                return (r.stderr or f"exit {r.returncode}").strip() or f"exit {r.returncode}"
+                return f"WSL 内 git 配置失败（exit {r.returncode}）"
         else:
             if enable:
                 for key in ("http.proxy", "https.proxy"):
@@ -807,8 +834,10 @@ def restart_wsl():
     try:
         subprocess.run(["wsl", "--shutdown"],
                        capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
-        subprocess.run(["wsl", "-e", "echo", "ok"],
-                       capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+        r = subprocess.run(["wsl", "-e", "echo", "ok"],
+                           capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            return "未检测到可用的 WSL 发行版"
         return True
     except Exception as e:
         return str(e)
@@ -1517,11 +1546,30 @@ class App:
 
         def work():
             errs = []
-            for use_wsl in (False, True):
-                ret = set_git_proxy(h, p, on, use_wsl=use_wsl)
-                if ret is not True:
-                    errs.append(str(ret))
-            self._after(0, lambda: self._toggle_done(errs, "Git"))
+            note = None
+            if on:
+                if not wsl_available():
+                    # Degrade to Windows-only instead of a half-applied both-
+                    # ends toggle that bounces back while one side stays set.
+                    note = "未检测到可用的 WSL，已仅配置 Windows 端 git。"
+                    targets = (False,)
+                else:
+                    # WSL side first: on failure stop, so nothing is applied
+                    # and the switch bounces back with both sides untouched.
+                    targets = (True, False)
+                for use_wsl in targets:
+                    ret = set_git_proxy(h, p, on, use_wsl=use_wsl)
+                    if ret is not True:
+                        errs.append(str(ret))
+                        break
+            else:
+                # Best-effort cleanup: the setters treat missing WSL/git as
+                # "nothing to clean" when disabling.
+                for use_wsl in (True, False):
+                    ret = set_git_proxy(h, p, on, use_wsl=use_wsl)
+                    if ret is not True:
+                        errs.append(str(ret))
+            self._after(0, lambda: self._toggle_done(errs, "Git", note))
 
         threading.Thread(target=work, daemon=True).start()
 
