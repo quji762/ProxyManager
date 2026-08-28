@@ -1,6 +1,6 @@
 # Proxy Manager
 
-Windows 桌面小工具，用两个开关分别管理 PowerShell 与 WSL 的代理（含各端 git 全局代理配置）。
+Windows 桌面工具，一键式开关 PowerShell 与 WSL 的代理（含各端 git 全局代理配置）。
 
 ## 功能
 
@@ -18,25 +18,12 @@ Windows 桌面小工具，用两个开关分别管理 PowerShell 与 WSL 的代�
 
 ## 安装与运行
 
-```bash
-pip install -r requirements.txt
-python proxy_manager.py
-```
+Release下载最新版本
 
 ## 使用
 
 1. 填写代理地址与端口（默认 `127.0.0.1:7897`）
 2. 打开对应终端的开关，新开的终端即生效；WSL 已开的 shell 可点「重启 WSL」
-
-> Windows PowerShell 5.1 不读取环境变量，代理对 pwsh、git、curl 等遵循该约定的程序生效。
-
-## 打包为 exe
-
-```bash
-build.bat
-```
-
-输出位于 `dist/ProxyManager.exe`。
 
 ## License
 
