@@ -23,6 +23,7 @@ import re
 import json
 import os
 import socket
+import sys
 import threading
 import ctypes
 import uuid
@@ -162,6 +163,10 @@ def apply_acrylic(root):
     the DWM attributes are unsupported. Re-run after every theme switch:
     the key color must always match the current palette background."""
     try:
+        # Windows 10 has no DWM backdrop: with the color key set the extend-
+        # frame area renders as a black void. Keying is Win11 22H2+ only.
+        if sys.getwindowsversion().build < 22621:
+            return
         hwnd = user32.GetParent(root.winfo_id())
         if dwmapi.DwmExtendFrameIntoClientArea(
                 hwnd, ctypes.byref(_MARGINS(-1, -1, -1, -1))) != 0:
@@ -180,6 +185,7 @@ def apply_acrylic(root):
 # and window resize). These helpers freeze/redraw the whole HWND tree instead.
 WM_ENTERSIZEMOVE = 0x0231
 WM_EXITSIZEMOVE  = 0x0232
+WM_DPICHANGED    = 0x02E0
 _GWL_WNDPROC = -4
 
 _WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t,
@@ -217,6 +223,8 @@ def _tree_redraw_now(hwnd):
 # Keep module-level references so the trampoline is never garbage-collected.
 _resize_old_wndproc = None
 _resize_wndproc_ref = None
+_taskbar_created_msg = 0  # registered "TaskbarCreated" message id
+_hook_cbs = {}            # "taskbar" / "dpi" -> callback
 
 
 def _resize_wndproc(hwnd, msg, wparam, lparam):
@@ -228,14 +236,26 @@ def _resize_wndproc(hwnd, msg, wparam, lparam):
     elif msg == WM_EXITSIZEMOVE:
         _tree_set_redraw(hwnd, True, include_self=False)
         _tree_redraw_now(hwnd)
+    elif msg == _taskbar_created_msg and _hook_cbs.get("taskbar"):
+        # Explorer restarted and wiped the notification area: rebuild the
+        # tray icon. The WndProc runs on the window's (Tk main) thread.
+        _hook_cbs["taskbar"]()
+    elif msg == WM_DPICHANGED and _hook_cbs.get("dpi"):
+        _hook_cbs["dpi"]()
     return user32.CallWindowProcW(_resize_old_wndproc, hwnd, msg, wparam, lparam)
 
 
-def install_resize_freeze(root):
-    """Subclass the toplevel WndProc so interactive resize/move doesn't
-    repaint the full CTk widget tree per pixel. No-op on failure."""
-    global _resize_old_wndproc, _resize_wndproc_ref
+def install_window_hooks(root, on_taskbar_created=None, on_dpi_changed=None):
+    """Subclass the toplevel WndProc: smooth resize (freeze child repaint
+    during drag), tray-icon restore after an Explorer restart, and minsize
+    resync on DPI changes. All hooks degrade silently on failure."""
+    global _resize_old_wndproc, _resize_wndproc_ref, _taskbar_created_msg
     try:
+        if on_taskbar_created:
+            _hook_cbs["taskbar"] = on_taskbar_created
+        if on_dpi_changed:
+            _hook_cbs["dpi"] = on_dpi_changed
+        _taskbar_created_msg = user32.RegisterWindowMessageW("TaskbarCreated")
         hwnd = user32.GetParent(root.winfo_id())
         _resize_old_wndproc = user32.GetWindowLongPtrW(hwnd, _GWL_WNDPROC)
         _resize_wndproc_ref = _WNDPROC(_resize_wndproc)
@@ -656,6 +676,26 @@ def get_wsl_status(block: Optional[str] = None):
     return url if url else "configured"
 
 
+def _no_proxy_entries(value: str):
+    return [e.strip() for e in (value or "").split(",") if e.strip()]
+
+
+def _merged_no_proxy(existing: str) -> str:
+    """User's existing NO_PROXY + our loopback entries (union, user's first)."""
+    entries = _no_proxy_entries(existing)
+    for e in NO_PROXY_VALUE.split(","):
+        if e not in entries:
+            entries.append(e)
+    return ",".join(entries)
+
+
+def _stripped_no_proxy(existing: str) -> str:
+    """User's NO_PROXY minus exactly the entries this tool manages — anything
+    the user added themselves survives a disable."""
+    ours = set(NO_PROXY_VALUE.split(","))
+    return ",".join(e for e in _no_proxy_entries(existing) if e not in ours)
+
+
 def set_ps_proxy(host, port, enable=True):
     url = f"http://{host}:{port}"
     try:
@@ -664,15 +704,33 @@ def set_ps_proxy(host, port, enable=True):
         if enable:
             winreg.SetValueEx(key, "HTTP_PROXY", 0, winreg.REG_SZ, url)
             winreg.SetValueEx(key, "HTTPS_PROXY", 0, winreg.REG_SZ, url)
-            # Keep loopback traffic direct: without NO_PROXY, local dev servers
-            # get routed through the upstream proxy and typically break.
-            winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, NO_PROXY_VALUE)
+            # Keep loopback traffic direct without clobbering a user-set
+            # NO_PROXY: merge ours in on enable, strip only ours on disable.
+            try:
+                prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
+            except FileNotFoundError:
+                prev = ""
+            winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ,
+                              _merged_no_proxy(prev))
         else:
-            for n in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+            for n in ("HTTP_PROXY", "HTTPS_PROXY"):
                 try:
                     winreg.DeleteValue(key, n)
                 except FileNotFoundError:
                     pass
+            try:
+                prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
+            except FileNotFoundError:
+                prev = None
+            if prev is not None:
+                kept = _stripped_no_proxy(prev)
+                if kept:
+                    winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, kept)
+                else:
+                    try:
+                        winreg.DeleteValue(key, "NO_PROXY")
+                    except FileNotFoundError:
+                        pass
         winreg.CloseKey(key)
         # Broadcast env change so already-running processes pick it up.
         ret = ctypes.c_long()
@@ -715,6 +773,59 @@ def _get_wsl_gateway_ip():
     return None
 
 
+def proxy_port_alive(host, port, timeout=1.5):
+    """TCP connect probe: catches 'proxy app not running / wrong port' before
+    enabling, which otherwise silently breaks all terminal networking."""
+    try:
+        s = socket.create_connection((host, int(port)), timeout=timeout)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def wsl_default_shell():
+    """Basename of the default distro user's login shell, or None if WSL is
+    unusable. Anything other than bash never reads ~/.bashrc."""
+    try:
+        r = subprocess.run(["wsl", "-e", "bash", "-c", 'basename "${SHELL:-bash}"'],
+                           capture_output=True, text=True, timeout=15,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            return None
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _wsl_distros():
+    """Names of installed user distros (wsl -l -q emits UTF-16LE). Docker's
+    infra distros are skipped. Empty list -> WSL unusable or unparseable;
+    callers then fall back to the default distro."""
+    try:
+        r = subprocess.run(["wsl", "-l", "-q"], capture_output=True, timeout=15,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            return []
+        names = (r.stdout.decode("utf-16-le", errors="ignore")
+                 .replace("\x00", "").split())
+        return [n for n in names if n and not n.startswith("docker-desktop")]
+    except Exception:
+        return []
+
+
+def _wsl_write_failure(r, distro):
+    """Classify a failed `wsl -e bash` run without echoing wsl's own console
+    text (redirected output may be UTF-16 and decodes as mojibake)."""
+    if not wsl_available():
+        return "未检测到可用的 WSL 发行版"
+    detail = (r.stderr or "").strip().splitlines()
+    detail = detail[0].strip() if detail else ""
+    if detail and detail.isascii():
+        return f"写入 ~/.bashrc 失败：{detail}"
+    return "写入 ~/.bashrc 失败（权限不足或磁盘已满？）"
+
+
 def set_wsl_proxy(host, port, enable=True):
     url = f"http://{host}:{port}"
     # In WSL2 NAT mode 127.0.0.1 inside WSL does not reach the Windows host
@@ -734,34 +845,46 @@ export NO_PROXY="{NO_PROXY_VALUE}"
 export no_proxy="$NO_PROXY"
 {WSL_PROXY_END}"""
     try:
-        # Always remove any prior managed block first (idempotent).
-        sed = f"sed -i '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/d' ~/.bashrc"
-        subprocess.run(["wsl", "-e", "bash", "-c", sed],
-                       capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+        # One bash call per distro: repair a missing trailing newline, strip
+        # the managed block, then (on enable) append the fresh one. The strip
+        # result goes through `cat file > ~/.bashrc`, which writes THROUGH a
+        # symlink — `sed -i` would replace a stow/chezmoi-managed link with a
+        # plain file. The block arrives on stdin (no shell interpolation).
+        begin, end = re.escape(WSL_PROXY_BEGIN), re.escape(WSL_PROXY_END)
+        script = (
+            '[ -f ~/.bashrc ] && { '
+            '[ -n "$(tail -c1 ~/.bashrc 2>/dev/null)" ] && printf \'\\n\' >> ~/.bashrc; '
+            f'tmp=$(mktemp) && sed \'/{begin}/,/{end}/d\' ~/.bashrc > "$tmp" '
+            '&& cat "$tmp" > ~/.bashrc; rm -f "$tmp"; }'
+        )
         if enable:
-            # Feed the block via stdin so no shell interpolation touches it —
-            # avoids quoting/escaping pitfalls with arbitrary host strings.
-            # Guard first: if ~/.bashrc lacks a trailing newline, the appended
-            # marker glues onto the last user line and the later range-delete
-            # would remove that user line along with the block.
-            append = ("[ -s ~/.bashrc ] && [ -n \"$(tail -c1 ~/.bashrc)\" ]"
-                      " && printf '\\n' >> ~/.bashrc; cat >> ~/.bashrc")
-            # Send raw UTF-8 bytes: text=True would translate \n to \r\n on
-            # Windows, leaving a literal \r in every bashrc line and polluting
-            # the exported proxy values.
-            r = subprocess.run(["wsl", "-e", "bash", "-c", append],
-                               input=(block + "\n").encode("utf-8"),
-                               capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
-            if r.returncode != 0:
-                # bash never ran: WSL feature disabled or no distro installed.
-                return "未检测到可用的 WSL 发行版，无法写入 ~/.bashrc"
+            script += "\ncat >> ~/.bashrc\n"
+
+        # Apply to every user distro (multi-distro setups), skipping Docker's
+        # infra distros. Enable fails loudly; disable is best-effort.
+        errs = []
+        for d in (_wsl_distros() or [""]):
+            label = f"WSL({d})" if d else "WSL"
+            try:
+                cmd = ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", script]
+                r = subprocess.run(
+                    cmd,
+                    input=(block + "\n").encode("utf-8") if enable else None,
+                    capture_output=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                if enable and r.returncode != 0:
+                    errs.append(f"{label}: {_wsl_write_failure(r, d)}")
+            except Exception as e:
+                if enable:
+                    errs.append(f"{label}: {e}")
+        if enable and errs:
+            return "; ".join(errs)
         return True
-    except Exception as e:
+    except Exception:
         # Disabling is best-effort cleanup: a missing/broken WSL has nothing
         # to clean, and reporting it would block the whole disable flow.
-        if not enable:
-            return True
-        return str(e)
+        return True
 
 
 def set_git_proxy(host, port, enable=True, use_wsl=False):
@@ -775,23 +898,42 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
     url = f"http://{host}:{port}"
     try:
         if use_wsl:
-            if enable:
-                cmd = (f"git config --global --replace-all http.proxy '{url}' && "
-                       f"git config --global --replace-all https.proxy '{url}'")
-            else:
-                cmd = ("git config --global --unset-all http.proxy; "
-                       "git config --global --unset-all https.proxy; true")
-            r = subprocess.run(["wsl", "-e", "bash", "-c", cmd],
-                               capture_output=True, text=True, timeout=15,
-                               creationflags=subprocess.CREATE_NO_WINDOW)
-            if enable and r.returncode != 0:
-                # Avoid echoing wsl's own messages: redirected console output
-                # may be UTF-16 and would decode as mojibake.
-                if not wsl_available():
-                    return "未检测到可用的 WSL 发行版"
-                if r.returncode == 127:
-                    return "WSL 内未找到 git"
-                return f"WSL 内 git 配置失败（exit {r.returncode}）"
+            errs = []
+            for d in (_wsl_distros() or [""]):
+                label = f"WSL({d})" if d else "WSL"
+                try:
+                    if enable:
+                        cmd = (f"git config --global --replace-all http.proxy '{url}' && "
+                               f"git config --global --replace-all https.proxy '{url}'")
+                    elif host or port:
+                        # Remove only values equal to the URL this tool manages;
+                        # any proxy value the user set themselves survives.
+                        u = re.escape(url)
+                        cmd = (f"git config --global --unset-all http.proxy '{u}' 2>/dev/null; "
+                               f"git config --global --unset-all https.proxy '{u}' 2>/dev/null; true")
+                    else:
+                        # Address/port fields were cleared: the managed URL is
+                        # unknown, fall back to clearing the keys entirely.
+                        cmd = ("git config --global --unset-all http.proxy 2>/dev/null; "
+                               "git config --global --unset-all https.proxy 2>/dev/null; true")
+                    r = subprocess.run(
+                        ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", cmd],
+                        capture_output=True, text=True, timeout=15,
+                        creationflags=subprocess.CREATE_NO_WINDOW)
+                    if enable and r.returncode != 0:
+                        # Avoid echoing wsl's own messages: redirected console
+                        # output may be UTF-16 and would decode as mojibake.
+                        if not wsl_available():
+                            errs.append(f"{label}: 未检测到可用的 WSL 发行版")
+                        elif r.returncode == 127:
+                            errs.append(f"{label}: 未找到 git")
+                        else:
+                            errs.append(f"{label}: git 配置失败（exit {r.returncode}）")
+                except Exception as e:
+                    if enable:
+                        errs.append(f"{label}: {e}")
+            if enable and errs:
+                return "; ".join(errs)
         else:
             if enable:
                 for key in ("http.proxy", "https.proxy"):
@@ -801,10 +943,20 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
                     if r.returncode != 0:
                         return (r.stderr or f"exit {r.returncode}").strip() or f"exit {r.returncode}"
             else:
-                for key in ("http.proxy", "https.proxy"):
-                    subprocess.run(["git", "config", "--global", "--unset-all", key],
-                                   capture_output=True, timeout=15,
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                if host or port:
+                    # Surgical: remove only the value this tool set, so a
+                    # proxy the user configured by hand for another endpoint
+                    # survives a disable.
+                    for key in ("http.proxy", "https.proxy"):
+                        subprocess.run(["git", "config", "--global", "--unset-all", key, re.escape(url)],
+                                       capture_output=True, timeout=15,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    # Address/port fields were cleared: managed URL unknown.
+                    for key in ("http.proxy", "https.proxy"):
+                        subprocess.run(["git", "config", "--global", "--unset-all", key],
+                                       capture_output=True, timeout=15,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
         return True
     except FileNotFoundError:
         # Windows: git not on PATH. WSL: wsl.exe missing entirely.
@@ -1027,8 +1179,23 @@ class App:
         # background color is the transparency key, so this must run after the
         # palette is applied and again on every theme switch.
         apply_acrylic(self.root)
-        # Freeze full-tree repaint during interactive resize (smooth dragging).
-        install_resize_freeze(self.root)
+        # Smooth resize + tray restore after Explorer restarts + minsize
+        # resync on DPI changes.
+        install_window_hooks(self.root,
+                             on_taskbar_created=self._restart_tray,
+                             on_dpi_changed=self._resync_minsize)
+
+        # Config written while elevated lands in the admin account's HKCU and
+        # git config, not the desktop user's — surface it instead of silently
+        # configuring the wrong profile.
+        try:
+            if ctypes.windll.shell32.IsUserAnAdmin():
+                messagebox.showinfo(
+                    "提示",
+                    "当前以管理员身份运行。\n\n此时写入的环境变量和 git 配置属于"
+                    "管理员账户，与你平时使用的账户可能不是同一个。")
+        except Exception:
+            pass
 
         self._async_refresh()
         self._speed_prev = get_net_counters()
@@ -1494,6 +1661,16 @@ class App:
     # PowerShell and WSL each own their terminal's proxy (env vars / bashrc
     # block); the Git switch applies and removes git's global proxy on BOTH
     # sides at once, so the two ends never drift apart.
+    def _confirm_port_alive(self, h, p):
+        """Pre-flight TCP probe before enabling: a dead proxy port otherwise
+        silently breaks all terminal networking. Returns True to proceed."""
+        if h and _is_valid_port(p) and not proxy_port_alive(h, p):
+            return messagebox.askyesno(
+                "端口无响应",
+                f"{h}:{p} 上没有程序在监听（代理软件可能没有运行）。\n"
+                "继续启用会导致终端联网失败。\n\n仍要继续吗？")
+        return True
+
     def _toggle_ps(self):
         on = bool(self.ps_var.get())
         h = p = ""
@@ -1503,6 +1680,9 @@ class App:
                 self._ps_sw.deselect()
                 return
             h, p = r
+            if not self._confirm_port_alive(h, p):
+                self._ps_sw.deselect()
+                return
         self._lock_actions(True)
 
         def work():
@@ -1522,8 +1702,19 @@ class App:
                 self._wsl_sw.deselect()
                 return
             h, p = r
+            if not self._confirm_port_alive(h, p):
+                self._wsl_sw.deselect()
+                return
             if h.lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
                 note = "NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。"
+            shell = wsl_default_shell()
+            if shell and shell != "bash":
+                if not messagebox.askyesno(
+                        "非 bash shell",
+                        f"WSL 默认 shell 是 {shell}，而代理写入的是 ~/.bashrc"
+                        "（只有 bash 会读取它）。\n仍要继续写入吗？"):
+                    self._wsl_sw.deselect()
+                    return
         self._lock_actions(True)
 
         def work():
@@ -1542,6 +1733,14 @@ class App:
                 self._git_sw.deselect()
                 return
             h, p = r
+            if not self._confirm_port_alive(h, p):
+                self._git_sw.deselect()
+                return
+        else:
+            # Surgical removal needs the URL the tool set: read the current
+            # fields instead of passing empty strings.
+            h = self.host_var.get().strip()
+            p = self.port_var.get().strip()
         self._lock_actions(True)
 
         def work():
@@ -1575,10 +1774,23 @@ class App:
 
     # ── Restart WSL ──
     def _restart(self):
+        if not messagebox.askyesno(
+                "重启 WSL",
+                "将立即终止 WSL 中的所有进程，未保存的工作会丢失。\n确定重启？"):
+            return
         self._lock_actions(True, self._rst, "…")
 
         def do():
             ret = restart_wsl()
+            # A WSL restart can move the NAT subnet, so the gateway IP baked
+            # into the bashrc block goes stale. If the proxy is enabled with a
+            # loopback host, rewrite the block to pick up the fresh gateway.
+            if ret is True and self.wsl_var.get():
+                h = self.host_var.get().strip()
+                p = self.port_var.get().strip()
+                if (h and _is_valid_port(p) and h.lower() in LOOPBACK_HOSTS
+                        and get_wsl_network_mode() != "Mirrored"):
+                    set_wsl_proxy(h, str(int(p)), True)
             self._after(0, lambda: self._rst_done(ret))
 
         threading.Thread(target=do, daemon=True).start()
@@ -1752,6 +1964,25 @@ class App:
         """Hide to tray instead of quitting."""
         self.root.withdraw()
         self._start_tray()
+
+    def _restart_tray(self):
+        """Explorer restarted and wiped the notification area: rebuild the
+        tray icon. Called from the WndProc (Tk main thread)."""
+        self._stop_tray()
+        self._start_tray()
+
+    def _resync_minsize(self):
+        """A DPI change (dragging between monitors) rescales the widget tree;
+        the startup-time minsize is then wrong. Re-derive it, slightly delayed
+        so customtkinter's rescale has settled."""
+        def apply():
+            try:
+                self.root.update_idletasks()
+                self.root.minsize(self.root.winfo_reqwidth(),
+                                  self.root.winfo_reqheight())
+            except Exception:
+                pass
+        self.root.after(300, apply)
 
     def _start_tray(self):
         if self._tray_icon is not None:
