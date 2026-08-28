@@ -218,8 +218,7 @@ def load_config():
     """Read config.json defensively: on-disk values are never trusted, since a
     hand-edited or partially written file crashed startup (StringVar(int))."""
     defaults = {"host": DEFAULT_HOST, "port": DEFAULT_PORT,
-                "powershell": True, "git": False, "wsl": True,
-                "pin": False, "mode": "light"}
+                "powershell": True, "wsl": True, "pin": False, "mode": "light"}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -245,12 +244,12 @@ def load_config():
     return defaults
 
 
-def save_config(host, port, powershell, wsl, pin=False, mode="light", git=False):
+def save_config(host, port, powershell, wsl, pin=False, mode="light"):
     try:
         os.makedirs(_config_dir(), exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({"host": host, "port": port, "powershell": powershell,
-                       "wsl": wsl, "pin": pin, "mode": mode, "git": git},
+                       "wsl": wsl, "pin": pin, "mode": mode},
                       f, indent=2, ensure_ascii=False)
     except OSError:
         pass
@@ -789,7 +788,6 @@ class App:
         self.host_var = ctk.StringVar(value=cfg["host"])
         self.port_var = ctk.StringVar(value=cfg["port"])
         self.ps_var   = ctk.BooleanVar(value=cfg["powershell"])
-        self.git_var  = ctk.BooleanVar(value=cfg.get("git", False))
         self.wsl_var  = ctk.BooleanVar(value=cfg["wsl"])
         self.pin_var  = ctk.BooleanVar(value=cfg.get("pin", False))
 
@@ -1045,21 +1043,23 @@ class App:
                                   border_color=C["border"], fg_color=C["input_bg"], width=110)
         self._port.pack(side="left", padx=(8, 0))
 
-        chk = ctk.CTkFrame(cc, fg_color="transparent")
-        chk.pack(fill="x", padx=16, pady=(0, 6))
-        ctk.CTkCheckBox(chk, text="PowerShell", variable=self.ps_var,
-                        font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
-                        border_color=C["border"], fg_color=C["accent"],
-                        hover_color=C["accent_h"]).pack(side="left")
-        ctk.CTkCheckBox(chk, text="Git", variable=self.git_var,
-                        font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
-                        border_color=C["border"], fg_color=C["accent"],
-                        hover_color=C["accent_h"]).pack(side="left", padx=(18, 0))
-        ctk.CTkCheckBox(chk, text="WSL", variable=self.wsl_var,
-                        font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
-                        border_color=C["border"], fg_color=C["accent"],
-                        hover_color=C["accent_h"]).pack(side="left", padx=(18, 0))
-        ctk.CTkLabel(cc, text="勾选 Git 时同时配置 Windows 端；若同时勾选 WSL 则连同 WSL 内的 git 一起配置。\n"
+        sw = ctk.CTkFrame(cc, fg_color="transparent")
+        sw.pack(fill="x", padx=16, pady=(0, 6))
+        self._ps_sw = ctk.CTkSwitch(sw, text="PowerShell", variable=self.ps_var,
+                                    command=self._toggle_ps,
+                                    font=ctk.CTkFont(family=FONT_CN, size=12),
+                                    progress_color=C["accent"],
+                                    button_color=C["text2"],
+                                    button_hover_color=C["text"])
+        self._ps_sw.pack(side="left")
+        self._wsl_sw = ctk.CTkSwitch(sw, text="WSL", variable=self.wsl_var,
+                                     command=self._toggle_wsl,
+                                     font=ctk.CTkFont(family=FONT_CN, size=12),
+                                     progress_color=C["accent"],
+                                     button_color=C["text2"],
+                                     button_hover_color=C["text"])
+        self._wsl_sw.pack(side="left", padx=(24, 0))
+        ctk.CTkLabel(cc, text="开关即启用/停用对应终端的代理（含该端的 git 配置），新开终端生效。\n"
                               "提示：Windows PowerShell 5.1 不读取环境变量，代理对 pwsh、git、curl 等生效。",
                      font=ctk.CTkFont(family=FONT_CN, size=10),
                      text_color=C["text2"], justify="left").pack(anchor="w", padx=16, pady=(0, 12))
@@ -1067,39 +1067,22 @@ class App:
     def _build_buttons(self, parent):
         bf = ctk.CTkFrame(parent, fg_color="transparent")
         bf.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 12))
-        bf.grid_columnconfigure((0, 1, 2), weight=1)
-
-        self._en = ctk.CTkButton(
-            bf, text="启用代理", height=42,
-            font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
-            corner_radius=12, fg_color=C["accent"], hover_color=C["accent_h"],
-            text_color="#FFFFFF", command=self._enable)
-        self._en._role = "primary"  # stable identifier for theme restyling
-        self._en.grid(row=0, column=0, padx=(0, 6), sticky="ew")
-
-        self._dis = ctk.CTkButton(
-            bf, text="关闭代理", height=42,
-            font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
-            corner_radius=12, fg_color="transparent", border_width=2,
-            border_color=C["red"], text_color=C["red"],
-            hover_color=C["danger_hover"], command=self._disable)
-        self._dis._role = "danger"
-        self._dis.grid(row=0, column=1, padx=6, sticky="ew")
+        bf.grid_columnconfigure(0, weight=1)
 
         self._rst = ctk.CTkButton(
             bf, text="重启 WSL", height=42,
             font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
             corner_radius=12, fg_color=C["secondary"], hover_color=C["secondary_h"],
             text_color="#FFFFFF", command=self._restart)
-        self._rst._role = "secondary"
-        self._rst.grid(row=0, column=2, padx=(6, 0), sticky="ew")
+        self._rst._role = "secondary"  # stable identifier for theme restyling
+        self._rst.grid(row=0, column=0, sticky="ew")
 
     # ── Async Refresh ──
     def _async_refresh(self):
         self._refresh.configure(state="disabled")
         self._theme_btn.configure(state="disabled")
-        # Lock action buttons too: an _enable/_disable mid-refresh would
-        # stack a second _async_refresh via _jobs_done, wasting a ~5s WSL call.
+        # Lock the switches too: a toggle mid-refresh would stack a second
+        # _async_refresh via _toggle_done, wasting a ~5s WSL call.
         self._lock_actions(True)
         self._status.configure(text="检测中…")
         self._dot.configure(text_color=C["text2"])
@@ -1147,6 +1130,9 @@ class App:
             if self._refresh_token is not token:
                 return
             self._ps_on = bool(ps)
+            # The switch mirrors the actually detected state, so a failed or
+            # externally undone toggle snaps back instead of lying.
+            self.ps_var.set(self._ps_on)
             _sync_status()
 
         def ui_ps_vars(psp):
@@ -1181,6 +1167,7 @@ class App:
             self._wsl_https.set_value(wsp.get("HTTPS_PROXY", "未设置"))
             self._wsl_git.set_value(wgit)
             self._wsl_on = bool(ws)
+            self.wsl_var.set(self._wsl_on)
             _sync_status()
 
         def work():
@@ -1246,97 +1233,86 @@ class App:
         if not _is_valid_port(p):
             messagebox.showwarning("提示", "端口须为 1-65535 的整数")
             return None
-        if not self.ps_var.get() and not self.wsl_var.get():
-            messagebox.showwarning("提示", "请至少选择一个目标")
-            return None
         return h, str(int(p))
 
-    # ── Action locking (shared by enable/disable/restart) ──
+    # ── Action locking (shared by switches and restart) ──
     def _lock_actions(self, locked: bool, busy_btn=None, busy_label: str = ""):
-        """Freeze the three action buttons during background work so nothing
-        re-enters mid-operation; busy_btn doubles as the progress indicator."""
-        for btn, idle in ((self._en, "启用代理"), (self._dis, "关闭代理"),
-                          (self._rst, "重启 WSL")):
+        """Freeze the switches and the restart button during background work
+        so nothing re-enters mid-operation; busy_btn doubles as the progress
+        indicator."""
+        for btn, idle in ((self._rst, "重启 WSL"),):
             text = busy_label if (locked and btn is busy_btn) else idle
             btn.configure(state="disabled" if locked else "normal", text=text)
+        for sw in (self._ps_sw, self._wsl_sw):
+            sw.configure(state="disabled" if locked else "normal")
 
-    def _run_jobs(self, jobs, busy_btn, busy_label, wsl_prompt, on_success=None):
-        """Apply proxy mutations off the UI thread. Each job is a
-        (label, fn, args) triple whose fn returns True on success. on_success
-        runs on the UI thread only when every job succeeded."""
-        self._lock_actions(True, busy_btn, busy_label)
+    def _toggle_done(self, errs, label, note=None):
+        """Common completion path for both terminal switches."""
+        self._lock_actions(False)
+        if errs:
+            messagebox.showerror("错误", f"{label}: " + "\n".join(errs))
+        elif note:
+            messagebox.showinfo("提示", note)
+        else:
+            # Persist only on success, so the config never claims a state the
+            # system wasn't actually put into.
+            save_config(self.host_var.get().strip(), self.port_var.get().strip(),
+                        self.ps_var.get(), self.wsl_var.get(),
+                        self.pin_var.get(), self._mode)
+        # On error the refresh re-syncs each switch to the actually detected
+        # state, so a failed toggle snaps back instead of lying.
+        self._async_refresh()
+
+    # ── Per-terminal switches ──
+    # Each switch applies/removes that terminal's proxy (env vars / bashrc
+    # block) AND the git config on the same side, so a terminal's switch is
+    # the single source of truth for its whole proxy state.
+    def _toggle_ps(self):
+        on = bool(self.ps_var.get())
+        h = p = ""
+        if on:
+            r = self._validate()
+            if not r:
+                self._ps_sw.deselect()
+                return
+            h, p = r
+        self._lock_actions(True)
 
         def work():
             errs = []
-            for label, fn, args in jobs:
-                ret = fn(*args)
+            for fn in (lambda: set_ps_proxy(h, p, on),
+                       lambda: set_git_proxy(h, p, on, use_wsl=False)):
+                ret = fn()
                 if ret is not True:
-                    errs.append(f"{label}: {ret}")
-            hit_wsl = any(label == "WSL" for label, _, _ in jobs)
-            self._after(0, lambda: self._jobs_done(errs, hit_wsl, wsl_prompt, on_success))
+                    errs.append(str(ret))
+            self._after(0, lambda: self._toggle_done(errs, "PowerShell"))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _jobs_done(self, errs, hit_wsl, wsl_prompt, on_success=None):
-        self._lock_actions(False)
-        if errs:
-            # Show the error first, then refresh. If we kick off the refresh
-            # before the modal messagebox, the background _update callback can
-            # fire mid-dialog and visibly flicker the status dot / refresh button.
-            messagebox.showerror("错误", "\n".join(errs))
-            self._async_refresh()
-            return
-        if on_success:
-            on_success()
-        if hit_wsl and messagebox.askyesno("WSL 重启", wsl_prompt):
-            self._restart()
-        else:
-            self._async_refresh()
+    def _toggle_wsl(self):
+        on = bool(self.wsl_var.get())
+        h = p = ""
+        note = None
+        if on:
+            r = self._validate()
+            if not r:
+                self._wsl_sw.deselect()
+                return
+            h, p = r
+            if h.lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
+                note = "NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。"
+        self._lock_actions(True)
 
-    # ── Enable ──
-    def _enable(self):
-        r = self._validate()
-        if not r:
-            return
-        h, p = r
-        ps, wsl, git = self.ps_var.get(), self.wsl_var.get(), self.git_var.get()
-        jobs = []
-        if ps:
-            jobs.append(("PowerShell", set_ps_proxy, (h, p, True)))
-        if git:
-            jobs.append(("Git (Win)", set_git_proxy, (h, p, True, False)))
-        if wsl:
-            jobs.append(("WSL", set_wsl_proxy, (h, p, True)))
-            # Git checkbox covers Windows git; WSL git follows the WSL checkbox.
-            if git:
-                jobs.append(("Git (WSL)", set_git_proxy, (h, p, True, True)))
-        if not jobs:
-            return
-        prompt = ("WSL 端需新开 shell（或重启 WSL）才会生效。\n\n"
-                  "立即重启 WSL？（会终止其中所有进程）")
-        if wsl and h.lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
-            prompt = ("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。\n\n" + prompt)
-        # Persist only after every job succeeded, so the config never claims a
-        # state the system wasn't actually put into.
-        def on_success():
-            save_config(h, p, ps, wsl, self.pin_var.get(), self._mode, git)
-        self._run_jobs(jobs, self._en, "启用中…", prompt, on_success=on_success)
+        def work():
+            errs = []
+            for fn in (lambda: set_wsl_proxy(h, p, on),
+                       lambda: set_git_proxy(h, p, on, use_wsl=True)):
+                ret = fn()
+                if ret is not True:
+                    errs.append(str(ret))
+            self._after(0, lambda: self._toggle_done(errs, "WSL", note))
 
-    # ── Disable ──
-    def _disable(self):
-        # Clean up unconditionally: the checkboxes describe where to APPLY the
-        # proxy, but a disable must sweep everything this tool may have set,
-        # otherwise unchecking a target before disabling orphans its proxy.
-        # The setters are best-effort when disabling (missing WSL/git is
-        # treated as "nothing to clean").
-        jobs = [
-            ("PowerShell", set_ps_proxy, ("", "", False)),
-            ("WSL", set_wsl_proxy, ("", "", False)),
-            ("Git (Win)", set_git_proxy, ("", "", False, False)),
-            ("Git (WSL)", set_git_proxy, ("", "", False, True)),
-        ]
-        self._run_jobs(jobs, self._dis, "关闭中…",
-                       "代理已移除，WSL 端新开 shell 生效。\n\n立即重启 WSL？")
+        threading.Thread(target=work, daemon=True).start()
 
     # ── Restart WSL ──
     def _restart(self):
@@ -1373,8 +1349,7 @@ class App:
         self.root.attributes("-topmost", new)
         self._sync_pin_btn()
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
-                    self.ps_var.get(), self.wsl_var.get(), new, self._mode,
-                    self.git_var.get())
+                    self.ps_var.get(), self.wsl_var.get(), new, self._mode)
 
     # ── Theme toggle ──
     def _theme_icon(self):
@@ -1386,7 +1361,7 @@ class App:
         apply_theme(self._mode)
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
                     self.ps_var.get(), self.wsl_var.get(), self.pin_var.get(),
-                    self._mode, self.git_var.get())
+                    self._mode)
         # Freeze window repainting during the bulk color update so the user
         # sees an instant snap instead of 200+ configure() calls repainting one
         # by one over ~180ms. WM_SETREDRAW tells the window to stop processing
