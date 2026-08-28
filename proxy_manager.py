@@ -3,8 +3,20 @@ Proxy Manager - One-click proxy injection for PowerShell & WSL
 Landscape layout, light/dark themes, system tray.
 """
 
-import customtkinter as ctk
+# tkinter is stdlib and always present; use it to report missing third-party
+# deps in a dialog instead of an unhelpful console traceback.
+import tkinter as tk
 import tkinter.messagebox as messagebox
+try:
+    import customtkinter as ctk
+except ImportError:
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror(
+        "ProxyManager 缺少依赖",
+        "customtkinter 未安装。\n\n请执行：\n    pip install -r requirements.txt",
+    )
+    raise SystemExit(1)
 import winreg
 import subprocess
 import re
