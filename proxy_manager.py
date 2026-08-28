@@ -203,6 +203,8 @@ FONT_EN = "Segoe UI"
 WSL_PROXY_BEGIN = "# >>> proxy-manager begin >>>"
 WSL_PROXY_END   = "# <<< proxy-manager end <<<"
 ENV_REG_PATH    = r"Environment"
+NO_PROXY_VALUE  = "localhost,127.0.0.1,::1"
+LOOPBACK_HOSTS  = {"127.0.0.1", "localhost", "::1", "::"}
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -216,7 +218,8 @@ def load_config():
     """Read config.json defensively: on-disk values are never trusted, since a
     hand-edited or partially written file crashed startup (StringVar(int))."""
     defaults = {"host": DEFAULT_HOST, "port": DEFAULT_PORT,
-                "powershell": True, "wsl": True, "pin": False, "mode": "light"}
+                "powershell": True, "git": False, "wsl": True,
+                "pin": False, "mode": "light"}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -242,12 +245,12 @@ def load_config():
     return defaults
 
 
-def save_config(host, port, powershell, wsl, pin=False, mode="light"):
+def save_config(host, port, powershell, wsl, pin=False, mode="light", git=False):
     try:
         os.makedirs(_config_dir(), exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({"host": host, "port": port, "powershell": powershell,
-                       "wsl": wsl, "pin": pin, "mode": mode},
+                       "wsl": wsl, "pin": pin, "mode": mode, "git": git},
                       f, indent=2, ensure_ascii=False)
     except OSError:
         pass
@@ -269,7 +272,7 @@ def get_wsl_ip():
     try:
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c", "hostname -I 2>/dev/null | awk '{print $1}'"],
-            capture_output=True, text=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW
+            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         ip = r.stdout.strip()
         return ip if ip else "未获取到"
@@ -278,27 +281,35 @@ def get_wsl_ip():
 
 
 def get_wsl_ip_and_block():
-    """Fetch WSL IP and the proxy-manager bashrc block in a single wsl.exe call.
+    """Fetch WSL IP, the proxy-manager bashrc block, and the WSL git proxy in
+    a single wsl.exe call.
 
     Each wsl.exe invocation costs ~5s of process-startup overhead on a cold
-    WSL instance, so merging the two commands halves the WSL cost per refresh.
-    Returns (ip_str, block_str)."""
+    WSL instance, so merging the commands saves ~10s of refresh latency.
+    Returns (ip_str, block_str, git_proxy_str)."""
     try:
-        # Generate a random separator per call so it can never collide with
+        # Generate random separators per call so they can never collide with
         # user content in ~/.bashrc (unlike a fixed string like "<<PM_SEP>>").
-        sep = uuid.uuid4().hex
+        sep1 = uuid.uuid4().hex
+        sep2 = uuid.uuid4().hex
         cmd = (
             "hostname -I 2>/dev/null | awk '{print $1}';"
-            f"echo '{sep}';"
-            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null"
+            f"echo '{sep1}';"
+            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null;"
+            f"echo '{sep2}';"
+            "git config --global --get http.proxy 2>/dev/null"
         )
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c", cmd],
-            capture_output=True, text=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW
+            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         out = r.stdout
-        if sep in out:
-            ip_part, block_part = out.split(sep, 1)
+        git_part = ""
+        if sep2 in out:
+            out, git_part = out.split(sep2, 1)
+            git_part = git_part.strip()
+        if sep1 in out:
+            ip_part, block_part = out.split(sep1, 1)
             # strip() removes the trailing newline that `echo` appends, so an
             # empty bashrc block stays empty (falsy) - matching the semantics of
             # the original _read_wsl_block and keeping get_wsl_status's
@@ -308,9 +319,10 @@ def get_wsl_ip_and_block():
             ip_part, block_part = out, ""
         ip = ip_part.strip()
         ip = ip if ip else "未获取到"
-        return (ip, block_part)
+        git_part = git_part if git_part else "未设置"
+        return (ip, block_part, git_part)
     except Exception:
-        return ("WSL 未运行", "")
+        return ("WSL 未运行", "", "未设置")
 
 
 # Cache is keyed by .wslconfig's mtime so editing networkingMode and clicking
@@ -484,7 +496,7 @@ def _read_wsl_block() -> str:
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c",
              f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null"],
-            capture_output=True, text=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW
+            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         return r.stdout
     except Exception:
@@ -533,8 +545,11 @@ def set_ps_proxy(host, port, enable=True):
         if enable:
             winreg.SetValueEx(key, "HTTP_PROXY", 0, winreg.REG_SZ, url)
             winreg.SetValueEx(key, "HTTPS_PROXY", 0, winreg.REG_SZ, url)
+            # Keep loopback traffic direct: without NO_PROXY, local dev servers
+            # get routed through the upstream proxy and typically break.
+            winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, NO_PROXY_VALUE)
         else:
-            for n in ("HTTP_PROXY", "HTTPS_PROXY"):
+            for n in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
                 try:
                     winreg.DeleteValue(key, n)
                 except FileNotFoundError:
@@ -551,19 +566,46 @@ def set_ps_proxy(host, port, enable=True):
         return str(e)
 
 
+def _get_wsl_gateway_ip():
+    """Return the WSL default gateway (= the Windows host as seen from WSL2
+    NAT mode), or None if it cannot be determined (WSL down, WSL1, etc.)."""
+    try:
+        r = subprocess.run(
+            ["wsl", "-e", "bash", "-c",
+             "ip route show default 2>/dev/null | awk '/default/ {print $3; exit}'"],
+            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        ip = r.stdout.strip()
+        if re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", ip):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
 def set_wsl_proxy(host, port, enable=True):
     url = f"http://{host}:{port}"
+    # In WSL2 NAT mode 127.0.0.1 inside WSL does not reach the Windows host
+    # (localhost forwarding is Windows->WSL only), so a loopback host would
+    # silently produce a dead proxy. Substitute the host's gateway IP; in
+    # mirrored mode (and WSL1) loopback works and is left untouched.
+    if enable and host.lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
+        gw = _get_wsl_gateway_ip()
+        if gw:
+            url = f"http://{gw}:{port}"
     block = f"""{WSL_PROXY_BEGIN}
 export HTTP_PROXY="{url}"
 export HTTPS_PROXY="{url}"
 export http_proxy="{url}"
 export https_proxy="{url}"
+export NO_PROXY="{NO_PROXY_VALUE}"
+export no_proxy="$NO_PROXY"
 {WSL_PROXY_END}"""
     try:
         # Always remove any prior managed block first (idempotent).
         sed = f"sed -i '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/d' ~/.bashrc"
         subprocess.run(["wsl", "-e", "bash", "-c", sed],
-                       capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
+                       capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
         if enable:
             # Feed the block via stdin so no shell interpolation touches it —
             # avoids quoting/escaping pitfalls with arbitrary host strings.
@@ -577,10 +619,76 @@ export https_proxy="{url}"
             # the exported proxy values.
             subprocess.run(["wsl", "-e", "bash", "-c", append],
                            input=(block + "\n").encode("utf-8"),
-                           capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
+                           capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
         return True
     except Exception as e:
+        # Disabling is best-effort cleanup: a missing/broken WSL has nothing
+        # to clean, and reporting it would block the whole disable flow.
+        if not enable:
+            return True
         return str(e)
+
+
+def set_git_proxy(host, port, enable=True, use_wsl=False):
+    """Configure git's global http.proxy/https.proxy, either on Windows
+    (use_wsl=False) or inside WSL (use_wsl=True).
+
+    Host/port are pre-validated by the UI, so the URL is injection-safe.
+    Disabling is best-effort: a missing git binary (or missing WSL) simply
+    means there is nothing to clean up and is reported as success, so it
+    never blocks the unconditional disable flow."""
+    url = f"http://{host}:{port}"
+    try:
+        if use_wsl:
+            if enable:
+                cmd = (f"git config --global --replace-all http.proxy '{url}' && "
+                       f"git config --global --replace-all https.proxy '{url}'")
+            else:
+                cmd = ("git config --global --unset-all http.proxy; "
+                       "git config --global --unset-all https.proxy; true")
+            r = subprocess.run(["wsl", "-e", "bash", "-c", cmd],
+                               capture_output=True, text=True, timeout=15,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            if enable and r.returncode != 0:
+                if "command not found" in (r.stderr or "") or r.returncode == 127:
+                    return "WSL 内未找到 git"
+                return (r.stderr or f"exit {r.returncode}").strip() or f"exit {r.returncode}"
+        else:
+            if enable:
+                for key in ("http.proxy", "https.proxy"):
+                    r = subprocess.run(["git", "config", "--global", "--replace-all", key, url],
+                                       capture_output=True, text=True, timeout=15,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                    if r.returncode != 0:
+                        return (r.stderr or f"exit {r.returncode}").strip() or f"exit {r.returncode}"
+            else:
+                for key in ("http.proxy", "https.proxy"):
+                    subprocess.run(["git", "config", "--global", "--unset-all", key],
+                                   capture_output=True, timeout=15,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+        return True
+    except FileNotFoundError:
+        # Windows: git not on PATH. WSL: wsl.exe missing entirely.
+        if not enable:
+            return True
+        return "WSL 内未找到 git" if use_wsl else "未找到 git，请确认已安装 Git"
+    except Exception as e:
+        if not enable:
+            return True
+        return str(e)
+
+
+def get_git_proxy_win():
+    """Read git's global http.proxy on Windows ('未设置' when unset, '未检测到'
+    when git is unavailable)."""
+    try:
+        r = subprocess.run(["git", "config", "--global", "--get", "http.proxy"],
+                           capture_output=True, text=True, timeout=8,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        v = r.stdout.strip()
+        return v if v else "未设置"
+    except Exception:
+        return "未检测到"
 
 
 def restart_wsl():
@@ -681,6 +789,7 @@ class App:
         self.host_var = ctk.StringVar(value=cfg["host"])
         self.port_var = ctk.StringVar(value=cfg["port"])
         self.ps_var   = ctk.BooleanVar(value=cfg["powershell"])
+        self.git_var  = ctk.BooleanVar(value=cfg.get("git", False))
         self.wsl_var  = ctk.BooleanVar(value=cfg["wsl"])
         self.pin_var  = ctk.BooleanVar(value=cfg.get("pin", False))
 
@@ -787,7 +896,7 @@ class App:
         ctk.CTkLabel(left, text="代理管理器",
                      font=ctk.CTkFont(family=FONT_CN, size=19, weight="bold"),
                      text_color=C["text"]).pack(anchor="w")
-        ctk.CTkLabel(left, text="PowerShell & WSL 一键代理切换",
+        ctk.CTkLabel(left, text="PowerShell · Git · WSL 一键代理切换",
                      font=ctk.CTkFont(family=FONT_CN, size=11),
                      text_color=C["text2"]).pack(anchor="w")
 
@@ -885,7 +994,7 @@ class App:
         ctk.CTkLabel(pc, text="代理变量",
                      font=ctk.CTkFont(family=FONT_CN, size=12, weight="bold"),
                      text_color=C["text"]).pack(anchor="w", padx=16, pady=(12, 6))
-        ps_hd = ctk.CTkLabel(pc, text="PowerShell",
+        ps_hd = ctk.CTkLabel(pc, text="PowerShell（用户环境变量）",
                              font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
                              text_color=C["text2"])
         ps_hd._tint = "text2"  # pinned secondary color across theme switches
@@ -893,7 +1002,9 @@ class App:
         self._ps_http = InfoRow(pc, "HTTP_PROXY")
         self._ps_http.pack(fill="x", padx=16, pady=(0, 2))
         self._ps_https = InfoRow(pc, "HTTPS_PROXY")
-        self._ps_https.pack(fill="x", padx=16, pady=(0, 8))
+        self._ps_https.pack(fill="x", padx=16, pady=(0, 2))
+        self._git_http = InfoRow(pc, "Git 代理")
+        self._git_http.pack(fill="x", padx=16, pady=(0, 8))
         wsl_hd = ctk.CTkLabel(pc, text="WSL",
                               font=ctk.CTkFont(family=FONT_EN, size=10, weight="bold"),
                               text_color=C["text2"])
@@ -902,7 +1013,9 @@ class App:
         self._wsl_http = InfoRow(pc, "HTTP_PROXY")
         self._wsl_http.pack(fill="x", padx=16, pady=(0, 2))
         self._wsl_https = InfoRow(pc, "HTTPS_PROXY")
-        self._wsl_https.pack(fill="x", padx=16, pady=(0, 12))
+        self._wsl_https.pack(fill="x", padx=16, pady=(0, 2))
+        self._wsl_git = InfoRow(pc, "Git 代理")
+        self._wsl_git.pack(fill="x", padx=16, pady=(0, 12))
 
         # Config card.
         cc = ctk.CTkFrame(right, corner_radius=14, fg_color=C["card"],
@@ -933,15 +1046,23 @@ class App:
         self._port.pack(side="left", padx=(8, 0))
 
         chk = ctk.CTkFrame(cc, fg_color="transparent")
-        chk.pack(fill="x", padx=16, pady=(0, 14))
+        chk.pack(fill="x", padx=16, pady=(0, 6))
         ctk.CTkCheckBox(chk, text="PowerShell", variable=self.ps_var,
                         font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
                         border_color=C["border"], fg_color=C["accent"],
                         hover_color=C["accent_h"]).pack(side="left")
+        ctk.CTkCheckBox(chk, text="Git", variable=self.git_var,
+                        font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
+                        border_color=C["border"], fg_color=C["accent"],
+                        hover_color=C["accent_h"]).pack(side="left", padx=(18, 0))
         ctk.CTkCheckBox(chk, text="WSL", variable=self.wsl_var,
                         font=ctk.CTkFont(family=FONT_CN, size=11), corner_radius=6,
                         border_color=C["border"], fg_color=C["accent"],
                         hover_color=C["accent_h"]).pack(side="left", padx=(18, 0))
+        ctk.CTkLabel(cc, text="勾选 Git 时同时配置 Windows 端；若同时勾选 WSL 则连同 WSL 内的 git 一起配置。\n"
+                              "提示：Windows PowerShell 5.1 不读取环境变量，代理对 pwsh、git、curl 等生效。",
+                     font=ctk.CTkFont(family=FONT_CN, size=10),
+                     text_color=C["text2"], justify="left").pack(anchor="w", padx=16, pady=(0, 12))
 
     def _build_buttons(self, parent):
         bf = ctk.CTkFrame(parent, fg_color="transparent")
@@ -994,7 +1115,7 @@ class App:
         # completes, so the user sees local info (~1ms) immediately instead of
         # staring at "检测中…" for 5-6s while WSL spins up. The refresh button
         # is re-enabled only after every future has settled.
-        pending = {"n": 5}  # one per future (ps, li, mo, psp, wsl)
+        pending = {"n": 6}  # one per future (ps, li, mo, psp, git, wsl)
 
         def on_done(_future):
             # Decrement in the main thread to avoid races on pending["n"].
@@ -1034,6 +1155,11 @@ class App:
             self._ps_http.set_value(psp.get("HTTP_PROXY", "未设置"))
             self._ps_https.set_value(psp.get("HTTPS_PROXY", "未设置"))
 
+        def ui_git_win(gv):
+            if self._refresh_token is not token:
+                return
+            self._git_http.set_value(gv)
+
         def ui_li(li):
             if self._refresh_token is not token:
                 return
@@ -1044,7 +1170,7 @@ class App:
                 return
             self._wmode.set_value(mo)
 
-        def ui_wsl(ip, ws, wsp):
+        def ui_wsl(ip, ws, wsp, wgit):
             """Update WSL rows. Parsing (get_wsl_status/get_wsl_proxy_vars) is
             done in the callback so the regex runs on the pool thread, not the
             UI thread."""
@@ -1053,33 +1179,36 @@ class App:
             self._wip.set_value(ip)
             self._wsl_http.set_value(wsp.get("HTTP_PROXY", "未设置"))
             self._wsl_https.set_value(wsp.get("HTTPS_PROXY", "未设置"))
+            self._wsl_git.set_value(wgit)
             self._wsl_on = bool(ws)
             _sync_status()
 
         def work():
-            with ThreadPoolExecutor(max_workers=5) as pool:
+            with ThreadPoolExecutor(max_workers=6) as pool:
                 f_ps  = pool.submit(get_ps_status)
                 f_li  = pool.submit(get_local_ip)
                 f_mo  = pool.submit(get_wsl_network_mode)
                 f_psp = pool.submit(get_ps_proxy_vars)
-                # Merge two WSL calls (get_wsl_ip + _read_wsl_block) into one
-                # wsl.exe invocation to save ~5s of process-startup overhead.
+                f_git = pool.submit(get_git_proxy_win)
+                # Merge three WSL reads (get_wsl_ip + _read_wsl_block + WSL git
+                # proxy) into one wsl.exe invocation to save ~10s of latency.
                 f_wsl = pool.submit(get_wsl_ip_and_block)
 
                 f_ps.add_done_callback(lambda f: self._after(0, lambda: ui_ps(f.result())))
                 f_li.add_done_callback(lambda f: self._after(0, lambda: ui_li(f.result())))
                 f_mo.add_done_callback(lambda f: self._after(0, lambda: ui_mo(f.result())))
                 f_psp.add_done_callback(lambda f: self._after(0, lambda: ui_ps_vars(f.result())))
+                f_git.add_done_callback(lambda f: self._after(0, lambda: ui_git_win(f.result())))
                 # Parse the block on the pool thread, then marshal only the
                 # pre-computed values to the UI thread.
                 def wsl_cb(f):
-                    ip, block = f.result()
+                    ip, block, wgit = f.result()
                     ws = get_wsl_status(block)
                     wsp = get_wsl_proxy_vars(block)
-                    self._after(0, lambda: ui_wsl(ip, ws, wsp))
+                    self._after(0, lambda: ui_wsl(ip, ws, wsp, wgit))
                 f_wsl.add_done_callback(wsl_cb)
 
-                for f in (f_ps, f_li, f_mo, f_psp, f_wsl):
+                for f in (f_ps, f_li, f_mo, f_psp, f_git, f_wsl):
                     f.add_done_callback(on_done)
 
         threading.Thread(target=work, daemon=True).start()
@@ -1131,9 +1260,10 @@ class App:
             text = busy_label if (locked and btn is busy_btn) else idle
             btn.configure(state="disabled" if locked else "normal", text=text)
 
-    def _run_jobs(self, jobs, busy_btn, busy_label, wsl_prompt):
+    def _run_jobs(self, jobs, busy_btn, busy_label, wsl_prompt, on_success=None):
         """Apply proxy mutations off the UI thread. Each job is a
-        (label, fn, args) triple whose fn returns True on success."""
+        (label, fn, args) triple whose fn returns True on success. on_success
+        runs on the UI thread only when every job succeeded."""
         self._lock_actions(True, busy_btn, busy_label)
 
         def work():
@@ -1143,11 +1273,11 @@ class App:
                 if ret is not True:
                     errs.append(f"{label}: {ret}")
             hit_wsl = any(label == "WSL" for label, _, _ in jobs)
-            self._after(0, lambda: self._jobs_done(errs, hit_wsl, wsl_prompt))
+            self._after(0, lambda: self._jobs_done(errs, hit_wsl, wsl_prompt, on_success))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _jobs_done(self, errs, hit_wsl, wsl_prompt):
+    def _jobs_done(self, errs, hit_wsl, wsl_prompt, on_success=None):
         self._lock_actions(False)
         if errs:
             # Show the error first, then refresh. If we kick off the refresh
@@ -1156,6 +1286,8 @@ class App:
             messagebox.showerror("错误", "\n".join(errs))
             self._async_refresh()
             return
+        if on_success:
+            on_success()
         if hit_wsl and messagebox.askyesno("WSL 重启", wsl_prompt):
             self._restart()
         else:
@@ -1167,28 +1299,44 @@ class App:
         if not r:
             return
         h, p = r
-        save_config(h, p, self.ps_var.get(), self.wsl_var.get(),
-                    self.pin_var.get(), self._mode)
+        ps, wsl, git = self.ps_var.get(), self.wsl_var.get(), self.git_var.get()
         jobs = []
-        if self.ps_var.get():
+        if ps:
             jobs.append(("PowerShell", set_ps_proxy, (h, p, True)))
-        if self.wsl_var.get():
+        if git:
+            jobs.append(("Git (Win)", set_git_proxy, (h, p, True, False)))
+        if wsl:
             jobs.append(("WSL", set_wsl_proxy, (h, p, True)))
-        if jobs:
-            self._run_jobs(jobs, self._en, "启用中…",
-                           "代理已注入，WSL 需重启生效。\n\n立即重启？\n（会终止 WSL 中所有进程）")
+            # Git checkbox covers Windows git; WSL git follows the WSL checkbox.
+            if git:
+                jobs.append(("Git (WSL)", set_git_proxy, (h, p, True, True)))
+        if not jobs:
+            return
+        prompt = ("WSL 端需新开 shell（或重启 WSL）才会生效。\n\n"
+                  "立即重启 WSL？（会终止其中所有进程）")
+        if wsl and h.lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
+            prompt = ("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。\n\n" + prompt)
+        # Persist only after every job succeeded, so the config never claims a
+        # state the system wasn't actually put into.
+        def on_success():
+            save_config(h, p, ps, wsl, self.pin_var.get(), self._mode, git)
+        self._run_jobs(jobs, self._en, "启用中…", prompt, on_success=on_success)
 
     # ── Disable ──
     def _disable(self):
-        jobs = []
-        if self.ps_var.get():
-            jobs.append(("PowerShell", set_ps_proxy, (DEFAULT_HOST, DEFAULT_PORT, False)))
-        if self.wsl_var.get():
-            jobs.append(("WSL", set_wsl_proxy, (DEFAULT_HOST, DEFAULT_PORT, False)))
-        if not jobs:
-            return
+        # Clean up unconditionally: the checkboxes describe where to APPLY the
+        # proxy, but a disable must sweep everything this tool may have set,
+        # otherwise unchecking a target before disabling orphans its proxy.
+        # The setters are best-effort when disabling (missing WSL/git is
+        # treated as "nothing to clean").
+        jobs = [
+            ("PowerShell", set_ps_proxy, ("", "", False)),
+            ("WSL", set_wsl_proxy, ("", "", False)),
+            ("Git (Win)", set_git_proxy, ("", "", False, False)),
+            ("Git (WSL)", set_git_proxy, ("", "", False, True)),
+        ]
         self._run_jobs(jobs, self._dis, "关闭中…",
-                       "代理已移除，WSL 需重启生效。\n\n立即重启？")
+                       "代理已移除，WSL 端新开 shell 生效。\n\n立即重启 WSL？")
 
     # ── Restart WSL ──
     def _restart(self):
@@ -1225,7 +1373,8 @@ class App:
         self.root.attributes("-topmost", new)
         self._sync_pin_btn()
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
-                    self.ps_var.get(), self.wsl_var.get(), new, self._mode)
+                    self.ps_var.get(), self.wsl_var.get(), new, self._mode,
+                    self.git_var.get())
 
     # ── Theme toggle ──
     def _theme_icon(self):
@@ -1236,7 +1385,8 @@ class App:
         self._mode = "dark" if self._mode == "light" else "light"
         apply_theme(self._mode)
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
-                    self.ps_var.get(), self.wsl_var.get(), self.pin_var.get(), self._mode)
+                    self.ps_var.get(), self.wsl_var.get(), self.pin_var.get(),
+                    self._mode, self.git_var.get())
         # Freeze window repainting during the bulk color update so the user
         # sees an instant snap instead of 200+ configure() calls repainting one
         # by one over ~180ms. WM_SETREDRAW tells the window to stop processing
