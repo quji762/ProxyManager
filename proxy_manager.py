@@ -144,6 +144,35 @@ HWND_BROADCAST   = 0xFFFF
 WM_SETTINGCHANGE = 0x001A
 WM_SETREDRAW     = 0x000B
 
+# ─── Acrylic backdrop (Win11 frosted glass) ───────────────────────────────────
+dwmapi = ctypes.WinDLL("dwmapi")
+
+
+class _MARGINS(ctypes.Structure):
+    _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
+                ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
+
+
+def apply_acrylic(root):
+    """Frosted-glass (acrylic) backdrop behind the window on Windows 11 22H2+.
+
+    The palette background doubles as the transparency key, so the gutters
+    between cards show the blurred desktop while the cards themselves stay
+    solid and clickable. Degrades silently to a normal opaque window when
+    the DWM attributes are unsupported. Re-run after every theme switch:
+    the key color must always match the current palette background."""
+    try:
+        hwnd = user32.GetParent(root.winfo_id())
+        if dwmapi.DwmExtendFrameIntoClientArea(
+                hwnd, ctypes.byref(_MARGINS(-1, -1, -1, -1))) != 0:
+            return
+        backdrop = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW = acrylic
+        dwmapi.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(backdrop),
+                                     ctypes.sizeof(backdrop))
+        root.attributes("-transparentcolor", C["bg"])
+    except Exception:
+        pass
+
 # ─── Theme palettes ───────────────────────────────────────────────────────────
 # Two full color sets; C is the active one, swapped by apply_theme().
 PALETTES = {
@@ -832,19 +861,22 @@ class App:
         # Apply persisted topmost state.
         self.root.attributes("-topmost", self.pin_var.get())
 
-        # Auto-size height to fit content, cap at 85% screen height.
+        # Let the window auto-size to its content and only position it
+        # centered. Setting an explicit WxH here would be scaled a second time
+        # by customtkinter's DPI scaling (reqheight is already in scaled
+        # units), inflating the window ~1.5x taller than the content at 150%.
         self.root.update_idletasks()
-        req_h = self.root.winfo_reqheight()
-        max_h = int(self.root.winfo_screenheight() * 0.85)
-        final_h = min(req_h + 10, max_h)
-        x = (self.root.winfo_screenwidth() - APP_WIDTH) // 2
-        y = (self.root.winfo_screenheight() - final_h) // 2
-        self.root.geometry(f"{APP_WIDTH}x{final_h}+{x}+{y}")
-        # Fixed size: width is constant and height auto-fits content, so there's
-        # nothing to gain from resizing — and freeing the window from resize
-        # eliminates the customtkinter <Configure> scaling overhead (which
-        # fires minsize/maxsize/geometry on every pixel of drag).
-        self.root.resizable(False, False)
+        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        x = max(0, (self.root.winfo_screenwidth() - w) // 2)
+        y = max(0, (self.root.winfo_screenheight() - h) // 2)
+        self.root.geometry(f"+{x}+{y}")
+        self.root.minsize(APP_WIDTH, 540)
+        self.root.resizable(True, True)
+
+        # Frosted-glass backdrop (no-op on unsupported systems). The theme's
+        # background color is the transparency key, so this must run after the
+        # palette is applied and again on every theme switch.
+        apply_acrylic(self.root)
 
         self._async_refresh()
         self._speed_prev = get_net_counters()
@@ -893,16 +925,18 @@ class App:
 
         self._build_title(content)
         self._build_columns(content)
-        self._build_buttons(content)
 
     def _build_title(self, parent):
-        tf = ctk.CTkFrame(parent, fg_color="transparent")
-        tf.grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(12, 4))
+        # Solid header card: ClearType text on the acrylic key color renders
+        # with ugly fringes, so the title never sits on see-through pixels.
+        tf = ctk.CTkFrame(parent, corner_radius=14, fg_color=C["card"],
+                          border_width=1, border_color=C["border"])
+        tf.grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(12, 10))
         tf.grid_columnconfigure(0, weight=1)
 
         # Left: app name + subtitle.
         left = ctk.CTkFrame(tf, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="w")
+        left.grid(row=0, column=0, sticky="w", padx=(16, 0), pady=10)
         ctk.CTkLabel(left, text="代理管理器",
                      font=ctk.CTkFont(family=FONT_CN, size=19, weight="bold"),
                      text_color=C["text"]).pack(anchor="w")
@@ -910,9 +944,9 @@ class App:
                      font=ctk.CTkFont(family=FONT_CN, size=11),
                      text_color=C["text2"]).pack(anchor="w")
 
-        # Right: theme toggle, pin, refresh.
+        # Right: theme toggle, pin, WSL restart, refresh.
         right = ctk.CTkFrame(tf, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="e")
+        right.grid(row=0, column=1, sticky="e", padx=(0, 12))
 
         self._theme_btn = ctk.CTkButton(
             right, text=self._theme_icon(), width=34, height=34,
@@ -928,6 +962,15 @@ class App:
             text_color=C["text2"], command=self._toggle_pin)
         self._pin_btn.pack(side="left", padx=(0, 6))
         self._sync_pin_btn()
+
+        # Low-key WSL restart: lives among the title-bar icon buttons instead
+        # of a prominent bottom bar — it's a rarely used maintenance action.
+        self._rst = ctk.CTkButton(
+            right, text="⟲", width=34, height=34,
+            font=ctk.CTkFont(size=16), corner_radius=17,
+            fg_color=C["input_bg"], hover_color=C["border"],
+            text_color=C["text2"], command=self._restart)
+        self._rst.pack(side="left", padx=(0, 6))
 
         self._refresh = ctk.CTkButton(
             right, text="⟳", width=34, height=34,
@@ -962,6 +1005,25 @@ class App:
                                     font=ctk.CTkFont(family=FONT_CN, size=15, weight="bold"),
                                     text_color=C["text"])
         self._status.pack(anchor="w")
+
+        # Per-terminal switches live in the status card: they ARE the status
+        # control, so state and control sit in the same place.
+        swf = ctk.CTkFrame(sc, fg_color="transparent")
+        swf.pack(fill="x", padx=16, pady=(0, 14))
+        self._ps_sw = ctk.CTkSwitch(swf, text="PowerShell", variable=self.ps_var,
+                                    command=self._toggle_ps,
+                                    font=ctk.CTkFont(family=FONT_CN, size=12),
+                                    progress_color=C["accent"],
+                                    button_color=C["text2"],
+                                    button_hover_color=C["text"])
+        self._ps_sw.pack(side="left")
+        self._wsl_sw = ctk.CTkSwitch(swf, text="WSL", variable=self.wsl_var,
+                                     command=self._toggle_wsl,
+                                     font=ctk.CTkFont(family=FONT_CN, size=12),
+                                     progress_color=C["accent"],
+                                     button_color=C["text2"],
+                                     button_hover_color=C["text"])
+        self._wsl_sw.pack(side="left", padx=(24, 0))
 
         # Network info card.
         nc = ctk.CTkFrame(left, corner_radius=14, fg_color=C["card"],
@@ -1055,39 +1117,11 @@ class App:
                                   border_color=C["border"], fg_color=C["input_bg"], width=110)
         self._port.pack(side="left", padx=(8, 0))
 
-        sw = ctk.CTkFrame(cc, fg_color="transparent")
-        sw.pack(fill="x", padx=16, pady=(0, 6))
-        self._ps_sw = ctk.CTkSwitch(sw, text="PowerShell", variable=self.ps_var,
-                                    command=self._toggle_ps,
-                                    font=ctk.CTkFont(family=FONT_CN, size=12),
-                                    progress_color=C["accent"],
-                                    button_color=C["text2"],
-                                    button_hover_color=C["text"])
-        self._ps_sw.pack(side="left")
-        self._wsl_sw = ctk.CTkSwitch(sw, text="WSL", variable=self.wsl_var,
-                                     command=self._toggle_wsl,
-                                     font=ctk.CTkFont(family=FONT_CN, size=12),
-                                     progress_color=C["accent"],
-                                     button_color=C["text2"],
-                                     button_hover_color=C["text"])
-        self._wsl_sw.pack(side="left", padx=(24, 0))
-        ctk.CTkLabel(cc, text="开关即启用/停用对应终端的代理（含该端的 git 配置），新开终端生效。\n"
+        ctk.CTkLabel(cc, text="开关会同时配置该端的 git 全局代理。\n"
                               "提示：Windows PowerShell 5.1 不读取环境变量，代理对 pwsh、git、curl 等生效。",
                      font=ctk.CTkFont(family=FONT_CN, size=10),
-                     text_color=C["text2"], justify="left").pack(anchor="w", padx=16, pady=(0, 12))
-
-    def _build_buttons(self, parent):
-        bf = ctk.CTkFrame(parent, fg_color="transparent")
-        bf.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 12))
-        bf.grid_columnconfigure(0, weight=1)
-
-        self._rst = ctk.CTkButton(
-            bf, text="重启 WSL", height=42,
-            font=ctk.CTkFont(family=FONT_CN, size=14, weight="bold"),
-            corner_radius=12, fg_color=C["secondary"], hover_color=C["secondary_h"],
-            text_color="#FFFFFF", command=self._restart)
-        self._rst._role = "secondary"  # stable identifier for theme restyling
-        self._rst.grid(row=0, column=0, sticky="ew")
+                     text_color=C["text2"], justify="left",
+                     wraplength=290).pack(anchor="w", padx=16, pady=(0, 12))
 
     # ── Async Refresh ──
     def _async_refresh(self):
@@ -1249,10 +1283,10 @@ class App:
 
     # ── Action locking (shared by switches and restart) ──
     def _lock_actions(self, locked: bool, busy_btn=None, busy_label: str = ""):
-        """Freeze the switches and the restart button during background work
-        so nothing re-enters mid-operation; busy_btn doubles as the progress
-        indicator."""
-        for btn, idle in ((self._rst, "重启 WSL"),):
+        """Freeze the switches and the title-bar restart button during
+        background work so nothing re-enters mid-operation; busy_btn doubles
+        as the progress indicator."""
+        for btn, idle in ((self._rst, "⟲"),):
             text = busy_label if (locked and btn is busy_btn) else idle
             btn.configure(state="disabled" if locked else "normal", text=text)
         for sw in (self._ps_sw, self._wsl_sw):
@@ -1328,7 +1362,7 @@ class App:
 
     # ── Restart WSL ──
     def _restart(self):
-        self._lock_actions(True, self._rst, "重启中…")
+        self._lock_actions(True, self._rst, "…")
 
         def do():
             ret = restart_wsl()
@@ -1391,6 +1425,8 @@ class App:
             user32.SendMessageW(hwnd, WM_SETREDRAW, 1, 0)
             # Force a single repaint now that all colors are set.
             self.root.update_idletasks()
+            # Re-key the transparency to the new palette background.
+            apply_acrylic(self.root)
 
     def _apply_colors(self, widget):
         """Recursively restyle an existing widget tree to the active palette
