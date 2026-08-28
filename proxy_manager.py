@@ -195,10 +195,11 @@ user32.CallWindowProcW.argtypes = [ctypes.c_ssize_t, ctypes.c_ssize_t, ctypes.c_
 _ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ssize_t, ctypes.c_ssize_t)
 
 
-def _tree_set_redraw(hwnd, on):
+def _tree_set_redraw(hwnd, on, include_self=True):
     """WM_SETREDRAW the window and every child HWND (Tk = one HWND per widget)."""
     flag = 1 if on else 0
-    user32.SendMessageW(hwnd, WM_SETREDRAW, flag, 0)
+    if include_self:
+        user32.SendMessageW(hwnd, WM_SETREDRAW, flag, 0)
 
     def cb(child, _lparam):
         user32.SendMessageW(child, WM_SETREDRAW, flag, 0)
@@ -220,11 +221,12 @@ _resize_wndproc_ref = None
 
 def _resize_wndproc(hwnd, msg, wparam, lparam):
     if msg == WM_ENTERSIZEMOVE:
-        # Drag-resize started: freeze painting; Windows stretches the last
-        # frame, which reads as a fluid resize instead of per-pixel reflow.
-        _tree_set_redraw(hwnd, False)
+        # Drag-resize started: freeze the CHILD widgets only. The toplevel
+        # must keep painting — it owns the acrylic color key, and a frozen
+        # layered window loses its surface and vanishes visually.
+        _tree_set_redraw(hwnd, False, include_self=False)
     elif msg == WM_EXITSIZEMOVE:
-        _tree_set_redraw(hwnd, True)
+        _tree_set_redraw(hwnd, True, include_self=False)
         _tree_redraw_now(hwnd)
     return user32.CallWindowProcW(_resize_old_wndproc, hwnd, msg, wparam, lparam)
 
@@ -890,6 +892,51 @@ class InfoRow(ctk.CTkFrame):
 
 
 # ─── Main App ─────────────────────────────────────────────────────────────────
+class Tooltip:
+    """Minimal hover tooltip: pops a small borderless label below the widget
+    after a short delay. Rebuilt on every show so theme colors stay current."""
+
+    def __init__(self, widget, text, delay=450):
+        self._w, self._text, self._delay = widget, text, delay
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None):
+        self._hide()
+        self._after_id = self._w.after(self._delay, self._show)
+
+    def _hide(self, _e=None):
+        if self._after_id:
+            self._w.after_cancel(self._after_id)
+            self._after_id = None
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
+    def _show(self):
+        if self._tip:
+            return
+        w = self._w
+        tip = tk.Toplevel(w)
+        tip.overrideredirect(True)
+        try:
+            tip.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        tk.Label(tip, text=self._text, justify="left",
+                 bg=C["card"], fg=C["text"],
+                 highlightthickness=1, highlightbackground=C["border"],
+                 font=(FONT_CN, 10)).pack(padx=1, pady=1)
+        tip.update_idletasks()
+        x = w.winfo_rootx() + (w.winfo_width() - tip.winfo_reqwidth()) // 2
+        y = w.winfo_rooty() + w.winfo_height() + 6
+        tip.geometry(f"+{max(0, x)}+{y}")
+        self._tip = tip
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -942,7 +989,9 @@ class App:
         x = max(0, (self.root.winfo_screenwidth() - w) // 2)
         y = max(0, (self.root.winfo_screenheight() - h) // 2)
         self.root.geometry(f"+{x}+{y}")
-        self.root.minsize(APP_WIDTH, 540)
+        # The minimum size IS the full content size: the vertical card stack
+        # cannot reflow, so shrinking any further would clip cards off.
+        self.root.minsize(self.root.winfo_reqwidth(), self.root.winfo_reqheight())
         self.root.resizable(True, True)
 
         # Frosted-glass backdrop (no-op on unsupported systems). The theme's
@@ -1054,6 +1103,12 @@ class App:
             fg_color=C["input_bg"], hover_color=C["border"],
             text_color=C["text2"], command=self._async_refresh)
         self._refresh.pack(side="left")
+
+        # Hover hints for the icon buttons.
+        Tooltip(self._theme_btn, "切换亮色 / 暗色主题")
+        Tooltip(self._pin_btn, "窗口置顶")
+        Tooltip(self._rst, "重启 WSL")
+        Tooltip(self._refresh, "刷新状态")
 
     def _build_columns(self, parent):
         # Shared padding dict for cards.
