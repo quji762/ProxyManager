@@ -572,8 +572,11 @@ export https_proxy="{url}"
             # would remove that user line along with the block.
             append = ("[ -s ~/.bashrc ] && [ -n \"$(tail -c1 ~/.bashrc)\" ]"
                       " && printf '\\n' >> ~/.bashrc; cat >> ~/.bashrc")
+            # Send raw UTF-8 bytes: text=True would translate \n to \r\n on
+            # Windows, leaving a literal \r in every bashrc line and polluting
+            # the exported proxy values.
             subprocess.run(["wsl", "-e", "bash", "-c", append],
-                           input=block + "\n", text=True,
+                           input=(block + "\n").encode("utf-8"),
                            capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
         return True
     except Exception as e:
