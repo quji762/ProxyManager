@@ -173,6 +173,75 @@ def apply_acrylic(root):
     except Exception:
         pass
 
+
+# ─── Paint freeze / smooth resize ─────────────────────────────────────────────
+# Tk widgets are individual child HWNDs, so WM_SETREDRAW on the toplevel alone
+# does not stop them repainting one by one (visible as jank on theme switches
+# and window resize). These helpers freeze/redraw the whole HWND tree instead.
+WM_ENTERSIZEMOVE = 0x0231
+WM_EXITSIZEMOVE  = 0x0232
+_GWL_WNDPROC = -4
+
+_WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t,
+                              ctypes.c_ssize_t, ctypes.c_uint,
+                              ctypes.c_size_t, ctypes.c_ssize_t)
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.GetWindowLongPtrW.argtypes = [ctypes.c_ssize_t, ctypes.c_int]
+user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetWindowLongPtrW.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_ssize_t]
+user32.CallWindowProcW.restype = ctypes.c_ssize_t
+user32.CallWindowProcW.argtypes = [ctypes.c_ssize_t, ctypes.c_ssize_t, ctypes.c_uint,
+                                   ctypes.c_size_t, ctypes.c_ssize_t]
+_ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ssize_t, ctypes.c_ssize_t)
+
+
+def _tree_set_redraw(hwnd, on):
+    """WM_SETREDRAW the window and every child HWND (Tk = one HWND per widget)."""
+    flag = 1 if on else 0
+    user32.SendMessageW(hwnd, WM_SETREDRAW, flag, 0)
+
+    def cb(child, _lparam):
+        user32.SendMessageW(child, WM_SETREDRAW, flag, 0)
+        return 1
+    user32.EnumChildWindows(hwnd, _ENUMPROC(cb), 0)
+
+
+def _tree_redraw_now(hwnd):
+    """Invalidate and synchronously repaint the whole tree."""
+    user32.RedrawWindow(hwnd, None, None,
+                        0x0001 | 0x0004 | 0x0080 | 0x0400 | 0x0081)
+                      # INVALIDATE|FRAME|ERASE|ALLCHILDREN|UPDATENOW
+
+
+# Keep module-level references so the trampoline is never garbage-collected.
+_resize_old_wndproc = None
+_resize_wndproc_ref = None
+
+
+def _resize_wndproc(hwnd, msg, wparam, lparam):
+    if msg == WM_ENTERSIZEMOVE:
+        # Drag-resize started: freeze painting; Windows stretches the last
+        # frame, which reads as a fluid resize instead of per-pixel reflow.
+        _tree_set_redraw(hwnd, False)
+    elif msg == WM_EXITSIZEMOVE:
+        _tree_set_redraw(hwnd, True)
+        _tree_redraw_now(hwnd)
+    return user32.CallWindowProcW(_resize_old_wndproc, hwnd, msg, wparam, lparam)
+
+
+def install_resize_freeze(root):
+    """Subclass the toplevel WndProc so interactive resize/move doesn't
+    repaint the full CTk widget tree per pixel. No-op on failure."""
+    global _resize_old_wndproc, _resize_wndproc_ref
+    try:
+        hwnd = user32.GetParent(root.winfo_id())
+        _resize_old_wndproc = user32.GetWindowLongPtrW(hwnd, _GWL_WNDPROC)
+        _resize_wndproc_ref = _WNDPROC(_resize_wndproc)
+        user32.SetWindowLongPtrW(hwnd, _GWL_WNDPROC,
+                                 ctypes.cast(_resize_wndproc_ref, ctypes.c_void_p).value)
+    except Exception:
+        pass
+
 # ─── Theme palettes ───────────────────────────────────────────────────────────
 # Two full color sets; C is the active one, swapped by apply_theme().
 PALETTES = {
@@ -259,7 +328,8 @@ def load_config():
     """Read config.json defensively: on-disk values are never trusted, since a
     hand-edited or partially written file crashed startup (StringVar(int))."""
     defaults = {"host": DEFAULT_HOST, "port": DEFAULT_PORT,
-                "powershell": True, "wsl": True, "pin": False, "mode": "light"}
+                "powershell": True, "git": False, "wsl": True,
+                "pin": False, "mode": "light"}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -285,12 +355,12 @@ def load_config():
     return defaults
 
 
-def save_config(host, port, powershell, wsl, pin=False, mode="light"):
+def save_config(host, port, powershell, wsl, pin=False, mode="light", git=False):
     try:
         os.makedirs(_config_dir(), exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({"host": host, "port": port, "powershell": powershell,
-                       "wsl": wsl, "pin": pin, "mode": mode},
+                       "wsl": wsl, "pin": pin, "mode": mode, "git": git},
                       f, indent=2, ensure_ascii=False)
     except OSError:
         pass
@@ -829,6 +899,7 @@ class App:
         self.host_var = ctk.StringVar(value=cfg["host"])
         self.port_var = ctk.StringVar(value=cfg["port"])
         self.ps_var   = ctk.BooleanVar(value=cfg["powershell"])
+        self.git_var  = ctk.BooleanVar(value=cfg.get("git", False))
         self.wsl_var  = ctk.BooleanVar(value=cfg["wsl"])
         self.pin_var  = ctk.BooleanVar(value=cfg.get("pin", False))
 
@@ -846,6 +917,7 @@ class App:
         self._proxy_on = False
         self._ps_on = False
         self._wsl_on = False
+        self._git_on = False
         self._refresh_token = None
 
         # Rebuild generation - incremented each time _build() tears down and
@@ -877,6 +949,8 @@ class App:
         # background color is the transparency key, so this must run after the
         # palette is applied and again on every theme switch.
         apply_acrylic(self.root)
+        # Freeze full-tree repaint during interactive resize (smooth dragging).
+        install_resize_freeze(self.root)
 
         self._async_refresh()
         self._speed_prev = get_net_counters()
@@ -963,11 +1037,13 @@ class App:
         self._pin_btn.pack(side="left", padx=(0, 6))
         self._sync_pin_btn()
 
-        # Low-key WSL restart: lives among the title-bar icon buttons instead
-        # of a prominent bottom bar — it's a rarely used maintenance action.
+        # Low-key WSL restart: labeled with text (an ⟲ icon would be easily
+        # confused with the ⟳ refresh button) and tucked among the title-bar
+        # icon buttons — it's a rarely used maintenance action.
         self._rst = ctk.CTkButton(
-            right, text="⟲", width=34, height=34,
-            font=ctk.CTkFont(size=16), corner_radius=17,
+            right, text="WSL", width=42, height=34,
+            font=ctk.CTkFont(family=FONT_EN, size=11, weight="bold"),
+            corner_radius=17,
             fg_color=C["input_bg"], hover_color=C["border"],
             text_color=C["text2"], command=self._restart)
         self._rst.pack(side="left", padx=(0, 6))
@@ -1023,7 +1099,14 @@ class App:
                                      progress_color=C["accent"],
                                      button_color=C["text2"],
                                      button_hover_color=C["text"])
-        self._wsl_sw.pack(side="left", padx=(24, 0))
+        self._wsl_sw.pack(side="left", padx=(18, 0))
+        self._git_sw = ctk.CTkSwitch(swf, text="Git", variable=self.git_var,
+                                     command=self._toggle_git,
+                                     font=ctk.CTkFont(family=FONT_CN, size=12),
+                                     progress_color=C["accent"],
+                                     button_color=C["text2"],
+                                     button_hover_color=C["text"])
+        self._git_sw.pack(side="left", padx=(18, 0))
 
         # Network info card.
         nc = ctk.CTkFrame(left, corner_radius=14, fg_color=C["card"],
@@ -1117,7 +1200,7 @@ class App:
                                   border_color=C["border"], fg_color=C["input_bg"], width=110)
         self._port.pack(side="left", padx=(8, 0))
 
-        ctk.CTkLabel(cc, text="开关会同时配置该端的 git 全局代理。\n"
+        ctk.CTkLabel(cc, text="Git 开关同时启停 Windows 与 WSL 两端的 git 全局代理。\n"
                               "提示：Windows PowerShell 5.1 不读取环境变量，代理对 pwsh、git、curl 等生效。",
                      font=ctk.CTkFont(family=FONT_CN, size=10),
                      text_color=C["text2"], justify="left",
@@ -1157,20 +1240,31 @@ class App:
                 self._theme_btn.configure(state="normal")
                 self._lock_actions(False)
 
-        # Track PS and WSL proxy states independently so that whichever future
-        # completes first cannot clobber the other's contribution. Both callbacks
-        # funnel through _sync_status which ORs the two into _proxy_on.
+        # Track PS / WSL / Git proxy states independently so that whichever
+        # future completes first cannot clobber the other's contribution. All
+        # callbacks funnel through _sync_status which ORs them into _proxy_on.
         self._ps_on = False
         self._wsl_on = False
+        self._git_on = False
+        self._git_win_val = "未设置"
+        self._git_wsl_val = "未设置"
 
         def _sync_status():
-            self._proxy_on = bool(self._ps_on or self._wsl_on)
+            self._proxy_on = bool(self._ps_on or self._wsl_on or self._git_on)
             if self._proxy_on:
                 self._dot.configure(text_color=C["green"])
                 self._status.configure(text="已启用")
             else:
                 self._dot.configure(text_color=C["text2"])
                 self._status.configure(text="未启用")
+
+        def _sync_git_switch():
+            # The Git switch covers both ends at once, so it's "on" when
+            # either side still carries a git proxy config.
+            self._git_on = (self._git_win_val not in ("未设置", "未检测到")
+                            or self._git_wsl_val not in ("未设置", "未检测到"))
+            self.git_var.set(self._git_on)
+            _sync_status()
 
         def ui_ps(ps):
             if self._refresh_token is not token:
@@ -1191,6 +1285,8 @@ class App:
             if self._refresh_token is not token:
                 return
             self._git_http.set_value(gv)
+            self._git_win_val = gv
+            _sync_git_switch()
 
         def ui_li(li):
             if self._refresh_token is not token:
@@ -1212,9 +1308,10 @@ class App:
             self._wsl_http.set_value(wsp.get("HTTP_PROXY", "未设置"))
             self._wsl_https.set_value(wsp.get("HTTPS_PROXY", "未设置"))
             self._wsl_git.set_value(wgit)
+            self._git_wsl_val = wgit
             self._wsl_on = bool(ws)
             self.wsl_var.set(self._wsl_on)
-            _sync_status()
+            _sync_git_switch()
 
         def work():
             with ThreadPoolExecutor(max_workers=6) as pool:
@@ -1286,14 +1383,14 @@ class App:
         """Freeze the switches and the title-bar restart button during
         background work so nothing re-enters mid-operation; busy_btn doubles
         as the progress indicator."""
-        for btn, idle in ((self._rst, "⟲"),):
+        for btn, idle in ((self._rst, "WSL"),):
             text = busy_label if (locked and btn is busy_btn) else idle
             btn.configure(state="disabled" if locked else "normal", text=text)
-        for sw in (self._ps_sw, self._wsl_sw):
+        for sw in (self._ps_sw, self._wsl_sw, self._git_sw):
             sw.configure(state="disabled" if locked else "normal")
 
     def _toggle_done(self, errs, label, note=None):
-        """Common completion path for both terminal switches."""
+        """Common completion path for the terminal/git switches."""
         self._lock_actions(False)
         if errs:
             messagebox.showerror("错误", f"{label}: " + "\n".join(errs))
@@ -1304,15 +1401,15 @@ class App:
             # system wasn't actually put into.
             save_config(self.host_var.get().strip(), self.port_var.get().strip(),
                         self.ps_var.get(), self.wsl_var.get(),
-                        self.pin_var.get(), self._mode)
+                        self.pin_var.get(), self._mode, self.git_var.get())
         # On error the refresh re-syncs each switch to the actually detected
         # state, so a failed toggle snaps back instead of lying.
         self._async_refresh()
 
-    # ── Per-terminal switches ──
-    # Each switch applies/removes that terminal's proxy (env vars / bashrc
-    # block) AND the git config on the same side, so a terminal's switch is
-    # the single source of truth for its whole proxy state.
+    # ── Per-target switches ──
+    # PowerShell and WSL each own their terminal's proxy (env vars / bashrc
+    # block); the Git switch applies and removes git's global proxy on BOTH
+    # sides at once, so the two ends never drift apart.
     def _toggle_ps(self):
         on = bool(self.ps_var.get())
         h = p = ""
@@ -1325,12 +1422,8 @@ class App:
         self._lock_actions(True)
 
         def work():
-            errs = []
-            for fn in (lambda: set_ps_proxy(h, p, on),
-                       lambda: set_git_proxy(h, p, on, use_wsl=False)):
-                ret = fn()
-                if ret is not True:
-                    errs.append(str(ret))
+            ret = set_ps_proxy(h, p, on)
+            errs = [] if ret is True else [str(ret)]
             self._after(0, lambda: self._toggle_done(errs, "PowerShell"))
 
         threading.Thread(target=work, daemon=True).start()
@@ -1350,13 +1443,30 @@ class App:
         self._lock_actions(True)
 
         def work():
+            ret = set_wsl_proxy(h, p, on)
+            errs = [] if ret is True else [str(ret)]
+            self._after(0, lambda: self._toggle_done(errs, "WSL", note))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_git(self):
+        on = bool(self.git_var.get())
+        h = p = ""
+        if on:
+            r = self._validate()
+            if not r:
+                self._git_sw.deselect()
+                return
+            h, p = r
+        self._lock_actions(True)
+
+        def work():
             errs = []
-            for fn in (lambda: set_wsl_proxy(h, p, on),
-                       lambda: set_git_proxy(h, p, on, use_wsl=True)):
-                ret = fn()
+            for use_wsl in (False, True):
+                ret = set_git_proxy(h, p, on, use_wsl=use_wsl)
                 if ret is not True:
                     errs.append(str(ret))
-            self._after(0, lambda: self._toggle_done(errs, "WSL", note))
+            self._after(0, lambda: self._toggle_done(errs, "Git"))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1395,7 +1505,8 @@ class App:
         self.root.attributes("-topmost", new)
         self._sync_pin_btn()
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
-                    self.ps_var.get(), self.wsl_var.get(), new, self._mode)
+                    self.ps_var.get(), self.wsl_var.get(), new, self._mode,
+                    self.git_var.get())
 
     # ── Theme toggle ──
     def _theme_icon(self):
@@ -1407,13 +1518,13 @@ class App:
         apply_theme(self._mode)
         save_config(self.host_var.get().strip(), self.port_var.get().strip(),
                     self.ps_var.get(), self.wsl_var.get(), self.pin_var.get(),
-                    self._mode)
+                    self._mode, self.git_var.get())
         # Freeze window repainting during the bulk color update so the user
-        # sees an instant snap instead of 200+ configure() calls repainting one
-        # by one over ~180ms. WM_SETREDRAW tells the window to stop processing
-        # paint messages; we flush all configures, then thaw and refresh once.
-        hwnd = self.root.winfo_id()
-        user32.SendMessageW(hwnd, WM_SETREDRAW, 0, 0)
+        # sees an instant snap instead of hundreds of configure() calls
+        # repainting widget by widget. Tk widgets are separate HWNDs, so the
+        # freeze must cover the whole window tree, not just the toplevel.
+        hwnd = user32.GetParent(self.root.winfo_id())
+        _tree_set_redraw(hwnd, False)
         try:
             self.root.configure(fg_color=C["bg"])
             for w in self.root.winfo_children():
@@ -1422,9 +1533,9 @@ class App:
             self._dot.configure(text_color=C["green"] if self._proxy_on else C["text2"])
             self._sync_pin_btn()
         finally:
-            user32.SendMessageW(hwnd, WM_SETREDRAW, 1, 0)
-            # Force a single repaint now that all colors are set.
-            self.root.update_idletasks()
+            _tree_set_redraw(hwnd, True)
+            # Force a single synchronous repaint now that all colors are set.
+            _tree_redraw_now(hwnd)
             # Re-key the transparency to the new palette background.
             apply_acrylic(self.root)
 
