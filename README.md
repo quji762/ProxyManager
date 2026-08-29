@@ -18,7 +18,7 @@ Windows 桌面工具，一键式开关 PowerShell 与 WSL 的代理（含各端 
 
 ## 安装与运行
 
-Release下载最新版本
+从 [Releases](https://github.com/quji762/ProxyManager/releases) 下载最新版本，解压后直接运行。
 
 ## 使用
 
