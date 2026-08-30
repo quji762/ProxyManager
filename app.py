@@ -1101,6 +1101,16 @@ def main():
     api = Api()
     bg = "#1B1B21" if cfg.get("mode") == "dark" else "#F7F6FB"
 
+    # Promote the tray BEFORE it registers: on every launch but the very
+    # first, Explorer's registry entry already exists, so flipping
+    # IsPromoted here makes the icon land VISIBLE on the taskbar at
+    # NIM_ADD time. (Setting the flag after registration has no live
+    # effect — the icon would stay hidden in the overflow for the whole
+    # session, which users read as "no tray icon".) The post-tray
+    # promotion below covers the true first launch, where the entry is
+    # only created by that first NIM_ADD.
+    _promote_tray_icon()
+
     window = webview.create_window(
         "代理管理器", UI_PATH,
         js_api=api, width=1060, height=700, min_size=(920, 620),
@@ -1126,6 +1136,9 @@ def main():
     # Native frameless resize: install the WM_NCHITTEST hook as soon as the
     # window exists, then keep re-installing via the watchdog below — WinForms
     # can recreate its handle at any time, which silently drops a subclass.
+    # The post-tray promotion covers the true first launch (registry entry is
+    # only created by that first NIM_ADD) and forces one icon re-registration
+    # so Explorer applies the promoted state immediately.
     def _on_loaded():
         ensure_resize_hook(window)
     window.events.loaded += _on_loaded
@@ -1264,31 +1277,6 @@ def main():
                   f"RESIZE_OK={all(results[k] == v for k, v in expect.items())}",
                   flush=True)
         threading.Thread(target=_window_probe, daemon=True).start()
-
-        # Tray diagnostics: where is the tray thread, and did the icon window
-        # ever get created? Dumped to a file because pythonw has no stdout.
-        def _tray_dump():
-            time.sleep(8)
-            import traceback
-            path = os.path.join(APP_DIR, "tray_dump.txt")
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    icon = getattr(api, "_icon", None)
-                    f.write(f"icon={icon}\n")
-                    for attr in ("_atom", "_hwnd", "_menu_hwnd"):
-                        f.write(f"{attr}={getattr(icon, attr, 'MISSING')}\n")
-                    f.write(f"visible={getattr(icon, 'visible', '?')}\n")
-                    t = getattr(icon, "_thread", None)
-                    f.write(f"loop thread alive: {t.is_alive() if t else 'never set'}\n")
-                    f.write("--- thread stacks ---\n")
-                    for tid, frame in sys._current_frames().items():
-                        f.write(f"thread {tid}:\n")
-                        for entry in traceback.extract_stack(frame):
-                            f.write(f"  {entry.filename}:{entry.lineno} {entry.name}\n")
-            except Exception:
-                import traceback
-                traceback.print_exc()
-        threading.Thread(target=_tray_dump, daemon=True).start()
     try:
         webview.start(debug=bool(os.environ.get("PM_DEBUG")))
         print("[pm] webview.start returned normally", flush=True)
