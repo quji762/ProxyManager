@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -29,8 +29,10 @@ jobs:
           --hidden-import PIL
           --hidden-import PIL.Image
           --hidden-import PIL.ImageDraw
-          --add-data "assets/tray.png;assets"
-          proxy_manager.py
+          --collect-all webview
+          --add-data "ui;ui"
+          --add-data "assets;assets"
+          app.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

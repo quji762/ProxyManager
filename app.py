@@ -1,13 +1,13 @@
 """
-ProxyManager Prototype 2.0 - pywebview (WebView2) shell.
+ProxyManager - pywebview (WebView2) front-end.
 
-Reuses every backend function from ../proxy_manager.py unchanged; only the
-tkinter UI layer is replaced by a web UI (prototype/ui/index.html). Run:
+The UI is a zero-build single-page web app (ui/index.html) rendered in
+WebView2; every system-touching operation is delegated to the backend
+library proxy_manager.py via the js_api bridge. Run:
 
-    py -3.13 prototype/app.py
+    py -3.13 app.py        (or double-click start.bat)
 
-Config (config v2, superset of the tkinter app's config.json - the old app
-ignores unknown keys): host, port, powershell, wsl, git_win, git_wsl, pin,
+Config (config v2): host, port, powershell, wsl, git_win, git_wsl, pin,
 mode, ports (quick-select presets), autostart, bg_path, bg_dim, card_alpha.
 A legacy {"git": bool} key migrates into git_win/git_wsl on load.
 
@@ -22,15 +22,18 @@ import sys
 import threading
 import time
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
-sys.path.insert(0, _ROOT)
+# ui/ ships as data next to the script; under PyInstaller it lands in the
+# extraction dir (sys._MEIPASS) instead.
+if getattr(sys, "frozen", False):
+    _BASE = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+else:
+    _BASE = os.path.dirname(os.path.abspath(__file__))
 
 import webview  # noqa: E402
 
 import proxy_manager as pm  # noqa: E402  (backend: registry/WSL/git logic)
 
-UI_PATH = os.path.join(_HERE, "ui", "index.html")
+UI_PATH = os.path.join(_BASE, "ui", "index.html")
 
 # Frameless gives the HypoMux-style integrated title bar. Flip to False if a
 # future pywebview build regresses edge-resizing on frameless windows.
@@ -77,7 +80,7 @@ def load_config():
         out["port"] = defaults["port"]
     for k in ("powershell", "wsl", "git_win", "git_wsl", "pin", "autostart"):
         out[k] = bool(cfg.get(k, defaults[k]))
-    if out["mode"] not in pm.PALETTES:
+    if out["mode"] not in ("light", "dark"):
         out["mode"] = "light"
 
     ports = cfg.get("ports")
@@ -920,7 +923,7 @@ def _make_tray(api, window):
         pystray.MenuItem("退出", quit_app),
     )
     icon = pystray.Icon("proxy_manager", Image.open(
-        os.path.join(_ROOT, "assets", "tray.png")).convert("RGBA"),
+        os.path.join(_BASE, "assets", "tray.png")).convert("RGBA"),
         "代理管理器", menu)
     threading.Thread(target=icon.run, daemon=True).start()
     return icon
