@@ -1001,8 +1001,11 @@ def main():
     try:
         _make_tray(api, window)
         api._tray_ok = True
-    except Exception as e:
-        print(f"[pm] tray unavailable: {e}", flush=True)
+    except Exception:
+        # Windowless (pythonw) launches have no stdout — a bare print here
+        # would vanish; failures must land in crash.log to be diagnosable.
+        pm._log_crash(*sys.exc_info())
+        print(f"[pm] tray unavailable", flush=True)
 
     # Native frameless resize: install the WM_NCHITTEST hook as soon as the
     # window exists, then keep re-installing via the watchdog below — WinForms
