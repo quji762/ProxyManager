@@ -907,7 +907,7 @@ class Api:
         set_resize_maximized(self._maximized)
 
 
-def _promote_tray_icon(retries=6):
+def _promote_tray_icon(retries=6, icon=None):
     """Win11 hides newly registered tray icons in the overflow flyout, which
     makes the app look like it has no tray at all. Flip Explorer's
     IsPromoted flag for our entries so the icon shows on the taskbar.
@@ -916,7 +916,12 @@ def _promote_tray_icon(retries=6):
     executable path is unreliable: pythonw vs pythonw3.13 vs packaged names
     all differ between windowless/console/frozen launches. All matching
     entries (windowless + console launches each register their own) are
-    promoted."""
+    promoted.
+
+    Setting IsPromoted on a LIVE icon does not move it retroactively — the
+    icon stays in the overflow until it re-registers. So after the flags are
+    written, the icon is hidden and shown once (NIM_DELETE + NIM_ADD) to make
+    Explorer place it on the taskbar immediately."""
     import winreg
 
     base = r"Control Panel\NotifyIconSettings"
@@ -939,11 +944,19 @@ def _promote_tray_icon(retries=6):
                         tip, _ = winreg.QueryValueEx(sk, "Tooltip")
                     except FileNotFoundError:
                         tip = ""
+                    try:
+                        exe, _ = winreg.QueryValueEx(sk, "ExecutablePath")
+                    except FileNotFoundError:
+                        exe = ""
                     finally:
                         winreg.CloseKey(sk)
                 except OSError:
                     continue
-                if tip and APP_TITLE in tip:
+                # Win11 does not persist szTip into the entry's Tooltip value
+                # (it reads as empty), so match by interpreter binary — the
+                # only stable identity across windowless/console launches.
+                exe_l = exe.lower()
+                if (tip and APP_TITLE in tip) or "python" in exe_l:
                     matches.append(sub)
         finally:
             winreg.CloseKey(key)
@@ -953,23 +966,42 @@ def _promote_tray_icon(retries=6):
         targets = find_targets()
         if targets:
             promoted = 0
+            changed = False
             for sub in targets:
                 try:
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                         base + "\\" + sub, 0, winreg.KEY_SET_VALUE)
-                    winreg.SetValueEx(key, "IsPromoted", 0, winreg.REG_DWORD, 1)
-                    winreg.CloseKey(key)
+                                         base + "\\" + sub, 0,
+                                         winreg.KEY_READ | winreg.KEY_SET_VALUE)
+                    try:
+                        cur = winreg.QueryValueEx(key, "IsPromoted")[0]
+                    except FileNotFoundError:
+                        cur = 0
+                    if cur != 1:
+                        winreg.SetValueEx(key, "IsPromoted", 0,
+                                          winreg.REG_DWORD, 1)
+                        changed = True
                     promoted += 1
+                    winreg.CloseKey(key)
                 except OSError:
                     pass
             if promoted:
+                # Re-register the live icon so Explorer applies the new
+                # promotion state right now instead of on next launch.
+                if changed and icon is not None:
+                    try:
+                        icon.visible = False
+                        time.sleep(0.05)
+                        icon.visible = True
+                    except Exception:
+                        pass
                 return True
         time.sleep(3)
     return False
 
 
-def _promote_tray_icon_async():
-    threading.Thread(target=_promote_tray_icon, daemon=True).start()
+def _promote_tray_icon_async(icon=None):
+    threading.Thread(target=_promote_tray_icon, kwargs={"icon": icon},
+                     daemon=True).start()
 
 
 def _show_main_window(api):
@@ -1084,7 +1116,7 @@ def main():
     try:
         _make_tray(api, window)
         api._tray_ok = True
-        _promote_tray_icon_async()  # Win11 hides new tray icons by default
+        _promote_tray_icon_async(getattr(api, "_icon", None))  # Win11 hides new tray icons by default
     except Exception:
         # Windowless (pythonw) launches have no stdout — a bare print here
         # would vanish; failures must land in crash.log to be diagnosable.
