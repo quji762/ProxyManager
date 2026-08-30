@@ -972,12 +972,29 @@ def _promote_tray_icon_async():
     threading.Thread(target=_promote_tray_icon, daemon=True).start()
 
 
+def _show_main_window(api):
+    """Show, restore from minimized, and raise to the foreground. show() alone
+    unhides the window BEHIND whatever is active, which reads as 'the tray
+    icon does nothing'. SetForegroundWindow is permitted here because the
+    tray click was delivered to this process."""
+    w = api._window
+    if w is None:
+        return
+    w.show()
+    hwnd = api._hwnd()
+    if not hwnd:
+        return
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.SetForegroundWindow(hwnd)
+
+
 def _make_tray(api, window):
     import pystray
     from PIL import Image
 
     def show(icon=None, item=None):
-        window.show()
+        _show_main_window(api)
 
     def quit_app(icon=None, item=None):
         icon.stop()
@@ -1113,7 +1130,7 @@ def main():
                 except OSError:
                     pass
                 try:
-                    window.show()
+                    _show_main_window(api)
                 except Exception:
                     pass
             time.sleep(1.5)
