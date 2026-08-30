@@ -441,6 +441,7 @@ class Api:
         self._speed = {"up": "0 B/s", "dn": "0 B/s", "dn_num": 0.0,
                        "iface": pm._primary_iface or "", "alive": None}
         self._window = None
+        self._icon = None
         self._pinned = cfg.get("pin", False)
         self._maximized = False
         self._prev_bounds = None
@@ -907,6 +908,27 @@ class Api:
         set_resize_maximized(self._maximized)
 
 
+def _tray_executable_matches(executable):
+    """Return whether a NotifyIcon entry belongs to this runtime family.
+
+    Store Python records the real binary (for example pythonw3.13.exe), while
+    sys.executable may be the WindowsApps alias (pythonw.exe).  Matching the
+    windowless/console family keeps an unrelated python.exe tray entry from
+    making the promotion retry return before our pythonw entry exists.
+    """
+    candidate = str(executable or "").replace("/", "\\").rsplit("\\", 1)[-1].lower()
+    current = os.path.basename(sys.executable).lower()
+    if getattr(sys, "frozen", False):
+        return candidate == current
+    if current.startswith("pythonw"):
+        return candidate.startswith("pythonw") and candidate.endswith(".exe")
+    if current.startswith("python"):
+        return (candidate.startswith("python")
+                and not candidate.startswith("pythonw")
+                and candidate.endswith(".exe"))
+    return candidate == current
+
+
 def _promote_tray_icon(retries=6, icon=None):
     """Win11 hides newly registered tray icons in the overflow flyout, which
     makes the app look like it has no tray at all. Flip Explorer's
@@ -952,11 +974,12 @@ def _promote_tray_icon(retries=6, icon=None):
                         winreg.CloseKey(sk)
                 except OSError:
                     continue
-                # Win11 does not persist szTip into the entry's Tooltip value
-                # (it reads as empty), so match by interpreter binary — the
-                # only stable identity across windowless/console launches.
-                exe_l = exe.lower()
-                if (tip and APP_TITLE in tip) or "python" in exe_l:
+                # Win11 usually leaves Tooltip empty. Match the current
+                # interpreter family without accepting every Python tray app;
+                # accepting python.exe while we run under pythonw.exe caused
+                # this retry to finish before our own entry was registered.
+                if ((tip and pm.APP_TITLE in str(tip))
+                        or _tray_executable_matches(exe)):
                     matches.append(sub)
         finally:
             winreg.CloseKey(key)
@@ -966,7 +989,6 @@ def _promote_tray_icon(retries=6, icon=None):
         targets = find_targets()
         if targets:
             promoted = 0
-            changed = False
             for sub in targets:
                 try:
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -979,7 +1001,6 @@ def _promote_tray_icon(retries=6, icon=None):
                     if cur != 1:
                         winreg.SetValueEx(key, "IsPromoted", 0,
                                           winreg.REG_DWORD, 1)
-                        changed = True
                     promoted += 1
                     winreg.CloseKey(key)
                 except OSError:
@@ -987,7 +1008,7 @@ def _promote_tray_icon(retries=6, icon=None):
             if promoted:
                 # Re-register the live icon so Explorer applies the new
                 # promotion state right now instead of on next launch.
-                if changed and icon is not None:
+                if icon is not None:
                     try:
                         icon.visible = False
                         time.sleep(0.05)
@@ -995,7 +1016,8 @@ def _promote_tray_icon(retries=6, icon=None):
                     except Exception:
                         pass
                 return True
-        time.sleep(3)
+        if _ + 1 < retries:
+            time.sleep(3)
     return False
 
 
@@ -1029,8 +1051,15 @@ def _make_tray(api, window):
         _show_main_window(api)
 
     def quit_app(icon=None, item=None):
-        icon.stop()
-        window.destroy()
+        # Mark this as a real exit before Close() fires the shared closing
+        # handler. Otherwise _on_closing sees a healthy tray, hides the window
+        # and cancels destruction, leaving an invisible process holding the
+        # singleton mutex after the tray has already stopped.
+        api._tray_ok = False
+        try:
+            icon.stop()
+        finally:
+            window.destroy()
 
     menu = pystray.Menu(
         pystray.MenuItem("显示主窗口", show, default=True),
@@ -1039,9 +1068,45 @@ def _make_tray(api, window):
     icon = pystray.Icon("proxy_manager", Image.open(
         os.path.join(_BASE, "assets", "tray.png")).convert("RGBA"),
         "代理管理器", menu)
-    api._icon = icon  # exposed for PM_DEBUG diagnostics
-    threading.Thread(target=icon.run, daemon=True).start()
+    ready = threading.Event()
+
+    def setup(active_icon):
+        active_icon.visible = True
+        ready.set()
+
+    api._icon = icon  # exposed for wake recovery and PM_DEBUG diagnostics
+    threading.Thread(target=icon.run, kwargs={"setup": setup},
+                     daemon=True).start()
+    if not ready.wait(5):
+        try:
+            icon.stop()
+        except Exception:
+            pass
+        raise RuntimeError("tray icon did not register within 5 seconds")
     return icon
+
+
+def _refresh_tray_icon(api):
+    """Re-register an existing instance's icon after a second launch.
+
+    This repairs the otherwise unrecoverable state where the window is hidden,
+    the process still owns the singleton mutex, and Explorer no longer shows
+    its notification icon.
+    """
+    icon = getattr(api, "_icon", None)
+    if icon is None:
+        return False
+    try:
+        icon.visible = False
+        time.sleep(0.05)
+        icon.visible = True
+        api._tray_ok = True
+        _promote_tray_icon_async(icon)
+        return True
+    except Exception:
+        api._tray_ok = False
+        pm._log_crash(*sys.exc_info())
+        return False
 
 
 def _wake_or_exit():
@@ -1109,7 +1174,10 @@ def main():
     # session, which users read as "no tray icon".) The post-tray
     # promotion below covers the true first launch, where the entry is
     # only created by that first NIM_ADD.
-    _promote_tray_icon()
+    # Only check once before registration. A first-ever launch has no entry
+    # yet, so waiting here only delays both the window and tray. The retrying
+    # pass runs after _make_tray has confirmed NIM_ADD completed.
+    _promote_tray_icon(retries=1)
 
     window = webview.create_window(
         "代理管理器", UI_PATH,
@@ -1175,6 +1243,7 @@ def main():
                 except OSError:
                     pass
                 try:
+                    _refresh_tray_icon(api)
                     _show_main_window(api)
                 except Exception:
                     pass
