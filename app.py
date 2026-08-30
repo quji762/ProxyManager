@@ -907,6 +907,71 @@ class Api:
         set_resize_maximized(self._maximized)
 
 
+def _promote_tray_icon(retries=6):
+    """Win11 hides newly registered tray icons in the overflow flyout, which
+    makes the app look like it has no tray at all. Flip Explorer's
+    IsPromoted flag for our entries so the icon shows on the taskbar.
+    The entry appears in the registry only after the first NIM_ADD, hence
+    the retries. Entries are matched by tooltip text (exact) — matching by
+    executable path is unreliable: pythonw vs pythonw3.13 vs packaged names
+    all differ between windowless/console/frozen launches. All matching
+    entries (windowless + console launches each register their own) are
+    promoted."""
+    import winreg
+
+    base = r"Control Panel\NotifyIconSettings"
+
+    def find_targets():
+        matches = []
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, base, 0, winreg.KEY_READ)
+        except OSError:
+            return matches
+        try:
+            for i in range(128):
+                try:
+                    sub = winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                try:
+                    sk = winreg.OpenKey(key, sub, 0, winreg.KEY_READ)
+                    try:
+                        tip, _ = winreg.QueryValueEx(sk, "Tooltip")
+                    except FileNotFoundError:
+                        tip = ""
+                    finally:
+                        winreg.CloseKey(sk)
+                except OSError:
+                    continue
+                if tip and APP_TITLE in tip:
+                    matches.append(sub)
+        finally:
+            winreg.CloseKey(key)
+        return matches
+
+    for _ in range(retries):
+        targets = find_targets()
+        if targets:
+            promoted = 0
+            for sub in targets:
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                         base + "\\" + sub, 0, winreg.KEY_SET_VALUE)
+                    winreg.SetValueEx(key, "IsPromoted", 0, winreg.REG_DWORD, 1)
+                    winreg.CloseKey(key)
+                    promoted += 1
+                except OSError:
+                    pass
+            if promoted:
+                return True
+        time.sleep(3)
+    return False
+
+
+def _promote_tray_icon_async():
+    threading.Thread(target=_promote_tray_icon, daemon=True).start()
+
+
 def _make_tray(api, window):
     import pystray
     from PIL import Image
@@ -925,6 +990,7 @@ def _make_tray(api, window):
     icon = pystray.Icon("proxy_manager", Image.open(
         os.path.join(_BASE, "assets", "tray.png")).convert("RGBA"),
         "代理管理器", menu)
+    api._icon = icon  # exposed for PM_DEBUG diagnostics
     threading.Thread(target=icon.run, daemon=True).start()
     return icon
 
@@ -1001,6 +1067,7 @@ def main():
     try:
         _make_tray(api, window)
         api._tray_ok = True
+        _promote_tray_icon_async()  # Win11 hides new tray icons by default
     except Exception:
         # Windowless (pythonw) launches have no stdout — a bare print here
         # would vanish; failures must land in crash.log to be diagnosable.
@@ -1148,6 +1215,31 @@ def main():
                   f"RESIZE_OK={all(results[k] == v for k, v in expect.items())}",
                   flush=True)
         threading.Thread(target=_window_probe, daemon=True).start()
+
+        # Tray diagnostics: where is the tray thread, and did the icon window
+        # ever get created? Dumped to a file because pythonw has no stdout.
+        def _tray_dump():
+            time.sleep(8)
+            import traceback
+            path = os.path.join(APP_DIR, "tray_dump.txt")
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    icon = getattr(api, "_icon", None)
+                    f.write(f"icon={icon}\n")
+                    for attr in ("_atom", "_hwnd", "_menu_hwnd"):
+                        f.write(f"{attr}={getattr(icon, attr, 'MISSING')}\n")
+                    f.write(f"visible={getattr(icon, 'visible', '?')}\n")
+                    t = getattr(icon, "_thread", None)
+                    f.write(f"loop thread alive: {t.is_alive() if t else 'never set'}\n")
+                    f.write("--- thread stacks ---\n")
+                    for tid, frame in sys._current_frames().items():
+                        f.write(f"thread {tid}:\n")
+                        for entry in traceback.extract_stack(frame):
+                            f.write(f"  {entry.filename}:{entry.lineno} {entry.name}\n")
+            except Exception:
+                import traceback
+                traceback.print_exc()
+        threading.Thread(target=_tray_dump, daemon=True).start()
     try:
         webview.start(debug=bool(os.environ.get("PM_DEBUG")))
         print("[pm] webview.start returned normally", flush=True)
