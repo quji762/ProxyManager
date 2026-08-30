@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>代理管理器</title>
+<style>
+/* ═══════════════════════ Design tokens ═══════════════════════ */
+:root {
+  --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  --radius: 10px;
+  --titlebar-h: 44px;
+  --statusbar-h: 62px;
+  --card-alpha: .92;
+}
+html[data-theme="light"] {
+  --bg-1: #F7F6FB; --bg-2: #EDECF4;
+  --card-rgb: 255,255,255;
+  --card: rgb(var(--card-rgb));
+  --border: #E4E4EC; --border-strong: #D6D6E0;
+  --text: #1C1C22; --text2: #777784; --text3: #A2A2AE;
+  --accent: #5B7BE8; --accent-h: #4A6AD8; --accent-soft: #EDF1FE; --accent-softer: #F5F7FE;
+  --on-accent: #FFFFFF;
+  --green: #1F9D55; --green-soft: #E8F6EE;
+  --red: #D9605B; --red-soft: #FBEDEC;
+  --amber: #B97F24; --amber-soft: #FBF3E4;
+  --chip: #F4F4F9; --chip-hover: #ECECF4;
+  --input: #F5F5F9; --input-border: #DCDCE6;
+  --shadow: 0 1px 2px rgba(28,28,40,.05), 0 4px 14px rgba(28,28,40,.05);
+  --titlebar-hover: rgba(0,0,0,.055);
+  --scrollbar: rgba(0,0,0,.16);
+}
+html[data-theme="dark"] {
+  --bg-1: #1B1B21; --bg-2: #131317;
+  --card-rgb: 36,36,44;
+  --card: rgb(var(--card-rgb));
+  --border: #35353F; --border-strong: #42424E;
+  --text: #E9E9F0; --text2: #93939F; --text3: #6C6C78;
+  --accent: #6B89EE; --accent-h: #7E97F1; --accent-soft: #2B3450; --accent-softer: #262D44;
+  --on-accent: #FFFFFF;
+  --green: #4CC078; --green-soft: #1F3328;
+  --red: #E57773; --red-soft: #3B2423;
+  --amber: #D9A04B; --amber-soft: #382C1B;
+  --chip: #2A2A32; --chip-hover: #33333C;
+  --input: #2B2B34; --input-border: #4A4A58;
+  --shadow: 0 1px 2px rgba(0,0,0,.25), 0 4px 14px rgba(0,0,0,.22);
+  --titlebar-hover: rgba(255,255,255,.07);
+  --scrollbar: rgba(255,255,255,.18);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font); font-size: 13px; color: var(--text);
+  background: linear-gradient(168deg, var(--bg-1) 0%, var(--bg-2) 100%);
+  user-select: none; cursor: default;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: var(--titlebar-h) 1fr var(--statusbar-h);
+  grid-template-areas: "title" "main" "status";
+}
+
+/* Custom background image + dim overlay (behind everything) */
+#bgLayer, #bgDim { position: fixed; inset: 0; z-index: 0; pointer-events: none; display: none; }
+#bgLayer { background-size: cover; background-position: center; }
+#bgDim { background: #000; opacity: 0; }
+body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
+
+/* ═══════════════════════ Title bar ═══════════════════════ */
+.titlebar {
+  grid-area: title; display: flex; align-items: center;
+  padding-left: 12px; gap: 9px; position: relative; z-index: 3;
+}
+.titlebar .app-icon {
+  width: 22px; height: 22px; border-radius: 6px; flex: none;
+  background: linear-gradient(135deg, var(--accent), #7E97F1);
+  display: grid; place-items: center; color: #fff;
+}
+.titlebar .app-name { font-size: 13px; font-weight: 600; }
+.titlebar .app-sub { font-size: 11px; color: var(--text2); margin-top: 1px; }
+.tb-btn {
+  width: 44px; height: var(--titlebar-h); border: 0; background: transparent;
+  color: var(--text2); display: grid; place-items: center; cursor: default;
+  transition: background .12s;
+}
+.tb-btn:hover { background: var(--titlebar-hover); color: var(--text); }
+.tb-btn.close:hover { background: #E81123; color: #fff; }
+.tb-btn:active { opacity: .7; }
+.tb-group { display: flex; align-items: stretch; height: 100%; }
+.tb-btn.small { width: 38px; }
+
+/* Tooltip */
+.tip {
+  position: fixed; z-index: 90; padding: 5px 10px; border-radius: 7px;
+  background: var(--card); color: var(--text); font-size: 12px;
+  border: 1px solid var(--border); box-shadow: var(--shadow);
+  opacity: 0; transform: translateY(2px); pointer-events: none;
+  transition: opacity .12s .35s, transform .12s .35s; white-space: nowrap;
+}
+.tip.show { opacity: 1; transform: none; }
+
+/* ═══════════════════════ Main scroll area ═══════════════════════ */
+.main {
+  grid-area: main; overflow-y: auto; padding: 4px 20px 18px;
+  scrollbar-width: thin; scrollbar-color: var(--scrollbar) transparent;
+  position: relative; z-index: 1;
+}
+.main::-webkit-scrollbar { width: 8px; }
+.main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 4px; }
+
+.card {
+  background: rgba(var(--card-rgb), var(--card-alpha));
+  border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.section-head { position: relative; margin: 18px 2px 8px; }
+.section-head .cap { display: block; font-size: 12px; color: var(--text2); }
+.section-head h2 { display: block; font-size: 19px; font-weight: 700; letter-spacing: .2px; margin-top: 2px; }
+
+/* ═══════════════════════ Hero card ═══════════════════════ */
+.hero { display: flex; gap: 24px; padding: 20px 24px 18px; }
+.hero-left { flex: 1.15; min-width: 0; }
+.hero-cap { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); }
+.badge {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600;
+  padding: 2.5px 9px; border-radius: 20px;
+}
+.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge.ok { color: var(--green); background: var(--green-soft); }
+.badge.idle { color: var(--text2); background: var(--chip); }
+.badge.warn { color: var(--amber); background: var(--amber-soft); }
+.hero-line { margin-top: 12px; font-size: 14px; }
+.hero-line b { font-size: 14.5px; }
+.hero-line .dim { color: var(--text2); }
+.hero-desc { margin-top: 5px; font-size: 12px; color: var(--text2); }
+
+.cfg-row { display: flex; gap: 8px; margin-top: 16px; align-items: flex-end; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: 11px; color: var(--text2); font-weight: 600; padding-left: 2px; }
+.field input {
+  font-family: var(--font); font-size: 12.5px; color: var(--text);
+  background: var(--input); border: 1px solid var(--input-border); border-radius: 7px;
+  padding: 7px 11px; outline: none; width: 150px; transition: border-color .12s, background .12s;
+}
+.field input:focus { border-color: var(--accent); background: var(--card); }
+.field input.bad { border-color: var(--red); }
+.field input::selection { background: var(--accent-soft); }
+
+/* Port quick-select chips */
+.ports-wrap { position: relative; margin-top: 8px; }
+.port-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.pchip {
+  font-family: var(--font); font-size: 11.5px; font-weight: 600; color: var(--text2);
+  background: var(--chip); border: 1px solid transparent; border-radius: 20px;
+  padding: 3px 11px; cursor: default; transition: background .12s, color .12s;
+}
+.pchip:hover { background: var(--chip-hover); color: var(--text); }
+.pchip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.pchip.add { color: var(--accent); background: transparent; border: 1px dashed var(--border-strong); padding: 3px 10px; }
+.pchip.add:hover { background: var(--accent-soft); border-color: var(--accent); }
+.port-pop {
+  position: absolute; left: 0; top: calc(100% + 6px); z-index: 40;
+  width: 230px; padding: 10px 12px 12px; border-radius: 10px;
+  background: rgba(var(--card-rgb), .98); border: 1px solid var(--border); box-shadow: var(--shadow);
+  display: none;
+}
+.port-pop.show { display: block; }
+.port-pop h5 { font-size: 12px; font-weight: 700; margin-bottom: 8px; }
+.port-pop .row { display: flex; align-items: center; justify-content: space-between; padding: 3px 0; }
+.port-pop .row .pv { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.port-pop .row .del {
+  width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center;
+  color: var(--text3); font-size: 13px;
+}
+.port-pop .row .del:hover { background: var(--red-soft); color: var(--red); }
+.port-pop .addrow { display: flex; gap: 6px; margin-top: 8px; }
+.port-pop .addrow input {
+  flex: 1; min-width: 0; font-family: var(--font); font-size: 12px; color: var(--text);
+  background: var(--input); border: 1px solid var(--input-border); border-radius: 6px;
+  padding: 5px 8px; outline: none;
+}
+.port-pop .addrow input:focus { border-color: var(--accent); }
+
+.hero-actions { margin-top: 16px; display: flex; align-items: center; gap: 12px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; border-radius: 7px;
+  font-family: var(--font); font-size: 13px; font-weight: 600; border: 1px solid transparent;
+  padding: 8px 18px; transition: background .12s, opacity .12s; cursor: default;
+}
+.btn svg { width: 15px; height: 15px; }
+.btn.primary { background: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { background: var(--accent-h); }
+.btn.outline { background: transparent; color: var(--text); border-color: var(--border-strong); }
+.btn.outline:hover { background: var(--chip-hover); }
+.btn.subtle { background: var(--chip); color: var(--text); border-color: transparent; padding: 6px 12px; font-size: 12px; }
+.btn.subtle:hover { background: var(--chip-hover); }
+.btn:disabled { opacity: .45; pointer-events: none; }
+.btn.small { padding: 5px 11px; font-size: 12px; }
+.btn.tiny { padding: 4px 10px; font-size: 11.5px; border-radius: 6px; }
+
+.hero-right { width: 300px; flex: none; display: flex; flex-direction: column; }
+.metric-cap { font-size: 12px; color: var(--text2); }
+.metric { display: flex; align-items: baseline; gap: 6px; margin-top: 2px; }
+.metric .num { font-size: 42px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.metric .unit { font-size: 13px; color: var(--text2); font-weight: 600; }
+.metric-sub { display: flex; gap: 16px; margin-top: 4px; font-size: 12px; color: var(--text2); }
+.metric-sub .item { display: inline-flex; align-items: center; gap: 5px; }
+.metric-sub svg { width: 13px; height: 13px; }
+.metric-sub b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+.spark { margin-top: auto; height: 3px; border-radius: 2px; background: var(--chip); overflow: hidden; }
+.spark i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .6s ease; }
+.hero-hint { margin-top: 10px; font-size: 11px; color: var(--text3); line-height: 1.6; }
+
+/* ═══════════════════════ Endpoint rows ═══════════════════════ */
+.ep-list { display: flex; flex-direction: column; gap: 10px; }
+.ep {
+  display: flex; align-items: center; gap: 14px; padding: 13px 18px;
+  transition: border-color .15s;
+}
+.ep:hover { border-color: var(--border-strong); }
+.ep.busy { opacity: .75; }
+.ep .chip {
+  width: 42px; height: 42px; border-radius: 10px; flex: none;
+  display: grid; place-items: center; color: var(--accent); background: var(--accent-soft);
+}
+.ep .chip svg { width: 21px; height: 21px; }
+.ep .meta { flex: 1; min-width: 0; }
+.ep .name-row { display: flex; align-items: center; gap: 9px; }
+.ep .name { font-size: 14px; font-weight: 600; }
+.ep .desc { margin-top: 3px; font-size: 11.5px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ep .desc code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; color: var(--text); background: var(--chip); padding: 1px 6px; border-radius: 4px; }
+
+/* Win11 toggle */
+.tgl { position: relative; width: 44px; height: 22px; flex: none; border-radius: 11px; border: 1px solid var(--text2);
+  background: transparent; transition: background .15s, border-color .15s; cursor: default; }
+.tgl::after { content: ""; position: absolute; top: 50%; left: 3px; transform: translateY(-50%);
+  width: 12px; height: 12px; border-radius: 50%; background: var(--text2); transition: left .16s cubic-bezier(.2,.7,.3,1.2), width .16s, background .15s; }
+.tgl:hover::after { width: 14px; }
+.tgl.on { background: var(--accent); border-color: var(--accent); }
+.tgl.on::after { left: 26px; background: #fff; }
+.tgl.on:hover::after { left: 24px; }
+.tgl:active::after { width: 16px; }
+
+/* ═══════════════════════ Info cards ═══════════════════════ */
+.cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 12px; margin-top: 12px; }
+.info-card { padding: 14px 18px 12px; }
+.info-card h3 { font-size: 13px; font-weight: 700; margin-bottom: 9px; }
+.kv { display: flex; align-items: center; min-height: 26px; padding: 2.5px 0; }
+.kv .k { width: 108px; flex: none; font-size: 12px; color: var(--text2); }
+.kv .v { font-size: 12px; font-weight: 600; font-family: "Cascadia Mono", Consolas, monospace; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 5px; padding: 2px 6px; margin-left: -6px; }
+.kv .v.copyable:hover { background: var(--chip-hover); outline: 1px solid var(--border); }
+.kv .v.copied { color: var(--green); }
+.group-cap { font-size: 11px; font-weight: 700; color: var(--text2); margin: 10px 0 4px; letter-spacing: .3px; }
+.group-cap:first-of-type { margin-top: 0; }
+
+/* ═══════════════════════ Status bar ═══════════════════════ */
+.statusbar {
+  grid-area: status; display: flex; align-items: center; gap: 8px;
+  padding: 0 16px 0 20px; border-top: 1px solid var(--border);
+  background: rgba(var(--card-rgb), var(--card-alpha));
+  backdrop-filter: blur(20px); position: relative; z-index: 2;
+}
+.sb-chip { display: flex; align-items: center; gap: 10px; padding: 8px 14px 8px 8px; border-radius: 9px; }
+.sb-chip:hover { background: var(--chip-hover); }
+.sb-chip .ic { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
+.sb-chip .ic svg { width: 16px; height: 16px; }
+.sb-chip .lbl { font-size: 10.5px; color: var(--text2); }
+.sb-chip .val { font-size: 12.5px; font-weight: 600; margin-top: 1px; }
+.sb-chip .val .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
+.dot.g { background: var(--green); } .dot.r { background: var(--red); } .dot.n { background: var(--text3); }
+.statusbar .grow { flex: 1; }
+
+/* ═══════════════════════ Dialog / toast / popover ═══════════════════════ */
+.overlay { position: fixed; inset: 0; background: rgba(20,20,28,.4); display: none; place-items: center; z-index: 100; }
+.overlay.show { display: grid; }
+.dialog { width: 400px; padding: 22px 22px 18px; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+.dialog h4 { font-size: 15px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 9px; }
+.dialog h4 svg { width: 18px; height: 18px; color: var(--amber); flex: none; }
+.dialog p { font-size: 12.5px; color: var(--text2); line-height: 1.65; }
+.dialog .dlg-btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.toast {
+  position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%) translateY(8px);
+  background: rgba(var(--card-rgb), .98); border: 1px solid var(--border); box-shadow: var(--shadow);
+  padding: 9px 16px; border-radius: 9px; font-size: 12.5px; z-index: 110;
+  opacity: 0; transition: opacity .18s, transform .18s; pointer-events: none; max-width: 70%;
+}
+.toast.show { opacity: 1; transform: translateX(-50%); }
+.toast.err { color: var(--red); } .toast.ok { color: var(--green); }
+
+/* Settings dialog */
+.settings { width: 460px; }
+.set-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.set-row:last-of-type { border-bottom: 0; }
+.set-row .lbl { flex: 1; }
+.set-row .lbl b { display: block; font-size: 13px; font-weight: 600; }
+.set-row .lbl span { display: block; font-size: 11px; color: var(--text2); margin-top: 2px; }
+input[type="range"] { -webkit-appearance: none; width: 150px; height: 4px; border-radius: 2px; background: var(--chip); outline: none; }
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); border: 3px solid var(--card); box-shadow: 0 0 0 1px var(--border);
+}
+.range-val { width: 42px; text-align: right; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text2); }
+.bg-name { font-size: 11px; color: var(--text2); margin-top: 4px; }
+
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.skeleton { color: var(--text3) !important; }
+
+/* Corner grip affordance (bottom-right); hit-testing is native */
+.grip {
+  position: fixed; right: 3px; bottom: 3px; width: 12px; height: 12px; z-index: 201;
+  opacity: .5; pointer-events: none;
+}
+html.maximized .grip { display: none; }
+.grip::before {
+  content: ""; position: absolute; right: 2px; bottom: 2px; width: 7px; height: 7px;
+  border-right: 2px solid var(--text3); border-bottom: 2px solid var(--text3);
+  border-radius: 0 0 3px 0;
+}
+</style>
+</head>
+<body>
+
+<div id="bgLayer"></div>
+<div id="bgDim"></div>
+
+<!-- ════════ Frameless resize affordance (hit-testing is native WM_NCHITTEST) ════════ -->
+<div class="grip"></div>
+
+<!-- ════════ Title bar ════════ -->
+<div class="titlebar">
+  <div class="pywebview-drag-region" id="dragRegion" style="display:flex;align-items:center;gap:9px;flex:1;min-width:0">
+    <div class="app-icon">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7l-5 5 5 5"/><path d="M16 7l5 5-5 5"/></svg>
+    </div>
+    <div class="app-name">代理管理器</div>
+    <div class="app-sub">终端一键代理</div>
+  </div>
+  <div class="tb-group">
+    <button class="tb-btn small" id="btnTheme" data-tip="切换亮色 / 暗色主题">
+      <svg id="icoMoon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      <svg id="icoSun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+    <button class="tb-btn small" id="btnPin" data-tip="窗口置顶">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 3h6l1 7 2.5 2.5a1 1 0 0 1-.7 1.7H6.2a1 1 0 0 1-.7-1.7L8 10z"/></svg>
+    </button>
+    <button class="tb-btn small" id="btnSettings" data-tip="设置">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+    <button class="tb-btn" id="btnMin" data-tip="最小化"><svg width="11" height="11" viewBox="0 0 12 12"><path d="M1 6h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></button>
+    <button class="tb-btn" id="btnMax" data-tip="最大化 / 还原">
+      <svg id="icoMax" width="11" height="11" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
+      <svg id="icoRestore" style="display:none" width="11" height="11" viewBox="0 0 12 12"><rect x="1.5" y="3.5" width="7" height="7" rx="1.2" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M3.5 1.5h6a1 1 0 0 1 1 1v6" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>
+    </button>
+    <button class="tb-btn close" id="btnClose" data-tip="隐藏到托盘"><svg width="11" height="11" viewBox="0 0 12 12"><path d="M1.5 1.5l9 9M10.5 1.5l-9 9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></button>
+  </div>
+</div>
+
+<!-- ════════ Main ════════ -->
+<div class="main">
+
+  <!-- Hero: status + config + speed -->
+  <div class="card hero">
+    <div class="hero-left">
+      <div class="hero-cap">终端代理引擎
+        <span class="badge idle" id="heroBadge"><span class="dot"></span>检测中</span>
+      </div>
+      <div class="hero-line" id="heroLine"><b>0 / 4</b> <span class="dim">个端点已启用</span></div>
+      <div class="hero-desc">PowerShell · WSL 终端与两端 Git 可独立切换</div>
+
+      <div class="cfg-row">
+        <div class="field"><label>代理地址</label><input id="inHost" spellcheck="false" autocomplete="off"></div>
+        <div class="field"><label>端口</label><input id="inPort" spellcheck="false" autocomplete="off" style="width:92px"></div>
+      </div>
+      <div class="ports-wrap">
+        <div class="port-chips" id="portChips"></div>
+        <div class="port-pop" id="portPop">
+          <h5>端口预设管理</h5>
+          <div id="portPopList"></div>
+          <div class="addrow">
+            <input id="portAddIn" placeholder="输入端口，如 10809" spellcheck="false" maxlength="5">
+            <button class="btn tiny primary" id="portAddBtn">添加</button>
+          </div>
+        </div>
+      </div>
+      <div class="hero-actions">
+        <button class="btn primary" id="btnAllOn">
+          <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 4l14 8-14 8z"/></svg>
+          全部启用
+        </button>
+        <button class="btn outline" id="btnAllOff">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6h12M6 12h12M6 18h12"/></svg>
+          全部关闭
+        </button>
+        <button class="btn subtle" id="btnWslRestart" data-tip="重启 WSL（终止其中所有进程）">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
+          重启 WSL
+        </button>
+      </div>
+      <div class="hero-hint">点击端口预设可快速切换：已启用的端点会自动以新端口重新应用。Git(Windows) 与 Git(WSL) 现在可以分别控制两端的全局 git 代理。</div>
+    </div>
+
+    <div class="hero-right">
+      <div class="metric-cap" id="speedCap">实时网速</div>
+      <div class="metric"><span class="num" id="spdDn">0.0</span><span class="unit">MB/s</span></div>
+      <div class="metric-sub">
+        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6"/></svg>上传 <b id="spdUp">0 B/s</b></span>
+        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10a4 4 0 0 1 7.7-1.5A3.5 3.5 0 0 1 17 15h-1.5"/><circle cx="8" cy="17" r="1.4"/><path d="M9.4 17H15"/></svg>代理端口 <b id="portAlive">—</b></span>
+      </div>
+      <div class="spark"><i id="sparkBar"></i></div>
+    </div>
+  </div>
+
+  <!-- Endpoints -->
+  <div class="section-head">
+    <span class="cap">参与切换的端点</span><h2>代理端点</h2>
+  </div>
+  <div class="ep-list" id="epList"></div>
+
+  <!-- Info cards -->
+  <div class="cols">
+    <div class="card info-card">
+      <h3>网络信息</h3>
+      <div class="kv"><span class="k">本机 IP</span><span class="v copyable" id="vLip" data-copy>—</span></div>
+      <div class="kv"><span class="k">WSL IP</span><span class="v copyable" id="vWip" data-copy>—</span></div>
+      <div class="kv"><span class="k">WSL 网络模式</span><span class="v" id="vMode">—</span></div>
+    </div>
+    <div class="card info-card">
+      <h3>代理变量</h3>
+      <div class="group-cap">POWERSHELL（用户环境变量）</div>
+      <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vPsHttp">—</span></div>
+      <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vPsHttps">—</span></div>
+      <div class="kv"><span class="k">Git（Windows）</span><span class="v" id="vPsGit">—</span></div>
+      <div class="group-cap">WSL</div>
+      <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vWslHttp">—</span></div>
+      <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vWslHttps">—</span></div>
+      <div class="kv"><span class="k">Git（WSL）</span><span class="v" id="vWslGit">—</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ Status bar ════════ -->
+<div class="statusbar">
+  <div class="sb-chip" data-tip="代理端口连通性（每秒探测）">
+    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7v10M5 10v4M15 4v16M19 9v6"/></svg></div>
+    <div><div class="lbl">代理端口</div><div class="val" id="sbPort"><span class="dot n"></span>检测中</div></div>
+  </div>
+  <div class="sb-chip" data-tip="WSL2 网络模式（.wslconfig）">
+    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+    <div><div class="lbl">WSL 网络</div><div class="val" id="sbMode">—</div></div>
+  </div>
+  <div class="sb-chip" data-tip="Git 全局代理（Windows / WSL 两个独立开关）">
+    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 3-2.5 4.5-6 4.5"/></svg></div>
+    <div><div class="lbl">Git 代理</div><div class="val" id="sbGit">—</div></div>
+  </div>
+  <div class="grow"></div>
+  <button class="btn primary small" id="sbRefresh" data-tip="重新检测所有端点状态">
+    <svg id="sbRefreshIco" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
+    刷新状态
+  </button>
+</div>
+
+<!-- ════════ Confirm dialog ════════ -->
+<div class="overlay" id="overlay">
+  <div class="card dialog">
+    <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span id="dlgTitleText">确认操作</span></h4>
+    <p id="dlgText"></p>
+    <div class="dlg-btns">
+      <button class="btn outline" id="dlgCancel">取消</button>
+      <button class="btn primary" id="dlgOk">继续</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ Settings dialog ════════ -->
+<div class="overlay" id="settingsOv">
+  <div class="card dialog settings">
+    <h4 style="color:var(--text)"><svg style="color:var(--text2)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>设置</span></h4>
+
+    <div class="set-row">
+      <div class="lbl"><b>自定义背景图片</b><span>覆盖默认渐变背景，配合暗色主题效果最佳</span>
+        <div class="bg-name" id="bgName">未设置</div></div>
+      <button class="btn small outline" id="bgPick">选择图片</button>
+      <button class="btn small subtle" id="bgClear">恢复默认</button>
+    </div>
+    <div class="set-row">
+      <div class="lbl"><b>背景遮罩强度</b><span>压暗背景图片，保证前景可读性</span></div>
+      <input type="range" id="rgDim" min="0" max="80" step="5">
+      <span class="range-val" id="rgDimVal">45%</span>
+    </div>
+    <div class="set-row">
+      <div class="lbl"><b>卡片不透明度</b><span>数值越低，卡片越通透（磨砂感越强）</span></div>
+      <input type="range" id="rgAlpha" min="50" max="100" step="2">
+      <span class="range-val" id="rgAlphaVal">92%</span>
+    </div>
+    <div class="set-row">
+      <div class="lbl"><b>开机自动启动</b><span>写入当前用户注册表 Run 键</span></div>
+      <div class="tgl" id="tglAuto"></div>
+    </div>
+
+    <div class="dlg-btns">
+      <button class="btn primary" id="settingsClose">完成</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="tip" id="tooltip"></div>
+
+<script>
+"use strict";
+/* ═══════════════ API bridge: real pywebview or browser mock ═══════════════ */
+const HAS_BRIDGE = () => !!(window.pywebview && window.pywebview.api);
+const api = (() => {
+  const call = (name, ...args) => {
+    if (HAS_BRIDGE()) return window.pywebview.api[name](...args);
+    return mock(name, ...args);
+  };
+
+  /* Browser mock so the UI can be designed/tested standalone. */
+  let mockState = {
+    host: "127.0.0.1", port: "7897", mode: "light", pin: false,
+    ps: true, wsl: false, gitwin: false, gitwsl: false,
+    ports: [7890, 7892, 7897], autostart: false,
+    lip: "192.168.1.146", wip: "172.24.156.88", wmode: "Mirrored",
+    psHttp: "http://127.0.0.1:7897",
+    wslHttp: "未设置", wslGit: "未设置", gitWinVal: "未设置",
+    alive: true, iface: "以太网",
+  };
+  const delay = (ms) => new Promise(res => setTimeout(res, ms));
+  async function mock(name, ...args) {
+    await delay(name === "refresh_item" && args[0] === "wsl" ? 1200 : 150);
+    switch (name) {
+      case "get_config": return { host: mockState.host, port: mockState.port,
+        mode: mockState.mode, pin: mockState.pin, ports: mockState.ports,
+        autostart: mockState.autostart, bg_path: "", bg_dim: 0.45, card_alpha: 0.92 };
+      case "save_config": Object.assign(mockState, args[0]); return true;
+      case "refresh_item": {
+        const w = args[0];
+        if (w === "ps") return { status: mockState.ps ? mockState.psHttp : null,
+          vars: { HTTP_PROXY: mockState.psHttp, HTTPS_PROXY: mockState.psHttp } };
+        if (w === "wsl") return { ip: mockState.wip, on: mockState.wsl,
+          vars: { HTTP_PROXY: mockState.wslHttp, HTTPS_PROXY: mockState.wslHttp === "未设置" ? "未设置" : mockState.wslHttp },
+          git: mockState.wslGit };
+        if (w === "gitwin") return mockState.gitWinVal;
+        if (w === "ip") return mockState.lip;
+        if (w === "mode") return mockState.wmode;
+        return null;
+      }
+      case "prepare_toggle": return { ok: true };
+      case "do_toggle": {
+        const [target, on] = args;
+        if (target === "ps") { mockState.ps = on; mockState.psHttp = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "wsl") { mockState.wsl = on; mockState.wslHttp = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "gitwin") { mockState.gitwin = on; mockState.gitWinVal = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "gitwsl") { mockState.gitwsl = on; mockState.wslGit = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        return { ok: true };
+      }
+      case "switch_port": {
+        const p = String(args[0]);
+        mockState.port = p;
+        if (mockState.ps) mockState.psHttp = `http://${mockState.host}:${p}`;
+        if (mockState.wsl) mockState.wslHttp = `http://${mockState.host}:${p}`;
+        if (mockState.gitwin) mockState.gitWinVal = `http://${mockState.host}:${p}`;
+        if (mockState.gitwsl) mockState.wslGit = `http://${mockState.host}:${p}`;
+        return { ok: true, applied: ["ps", "wsl", "gitwin", "gitwsl"].filter(t => mockState[t]) };
+      }
+      case "get_speed": {
+        const n = Math.random() * 3;
+        return { up: `${(n * 0.3).toFixed(1)} MB/s`, dn: `${n.toFixed(1)} MB/s`,
+                 dn_num: n * 1024 * 1024, iface: mockState.iface, alive: mockState.alive };
+      }
+      case "restart_wsl": await delay(1500); return { ok: true };
+      case "window_control": {
+        if (args[0] === "maximize") mockState._max = !mockState._max;
+        return { ok: true, maximized: !!mockState._max, pinned: args[0] === "pin" ? !!args[1] : false };
+      }
+      case "pick_background": await delay(600); return { ok: true, name: "wallpaper.png" };
+      case "get_background": return { data: "mock-bg" };
+      case "clear_background": return true;
+      case "set_autostart": mockState.autostart = !!args[0]; return { ok: true };
+      case "copy": return true;
+      default: return null;
+    }
+  }
+  return { call };
+})();
+
+/* ═══════════════ Helpers ═══════════════ */
+const $ = (id) => document.getElementById(id);
+const UNSET = new Set(["未设置", "未检测到", "—", ""]);
+
+function toast(msg, kind = "") {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show " + kind;
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+/* Tooltip engine */
+(() => {
+  const tip = $("tooltip");
+  let cur = null;
+  document.addEventListener("mouseover", (e) => {
+    const el = e.target.closest("[data-tip]");
+    if (el === cur) return;
+    cur = el;
+    tip.classList.remove("show");
+    if (!el) return;
+    tip.textContent = el.dataset.tip;
+    const r = el.getBoundingClientRect();
+    requestAnimationFrame(() => {
+      tip.style.visibility = "hidden"; tip.classList.add("show");
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      let x = r.left + r.width / 2 - tw / 2;
+      x = Math.max(8, Math.min(x, innerWidth - tw - 8));
+      let y = r.bottom + 7;
+      if (y + th > innerHeight - 4) y = r.top - th - 7;
+      tip.style.left = x + "px"; tip.style.top = y + "px"; tip.style.visibility = "";
+    });
+  });
+})();
+
+/* Confirm dialog (Promise-based, replaces native messagebox). Requests are
+   queued: overlapping confirmations would otherwise swallow the first. */
+const _dlgQueue = [];
+let _dlgOpen = false;
+function confirmDlg(text, okText = "继续") {
+  return new Promise((resolve) => {
+    _dlgQueue.push({ text, okText, resolve });
+    _pumpDlg();
+  });
+}
+function _pumpDlg() {
+  if (_dlgOpen || !_dlgQueue.length) return;
+  const { text, okText, resolve } = _dlgQueue.shift();
+  _dlgOpen = true;
+  $("dlgText").textContent = text;
+  $("dlgOk").textContent = okText;
+  $("overlay").classList.add("show");
+  const done = (v) => {
+    $("overlay").classList.remove("show");
+    _dlgOpen = false;
+    resolve(v);
+    _pumpDlg();
+  };
+  $("dlgOk").onclick = () => done(true);
+  $("dlgCancel").onclick = () => done(false);
+}
+
+/* ═══════════════ State ═══════════════ */
+const ICONS = {
+  ps: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8l4 4-4 4"/><path d="M12 17h7"/></svg>',
+  wsl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12 14h5"/></svg>',
+  gitwin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 3-2.5 4.5-6 4.5"/></svg>',
+  gitwsl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7"/><path d="M18 10.5c0 3-2.5 4.5-6 4.5" stroke-dasharray="2.5 2.5"/></svg>',
+};
+const EP_DEFS = [
+  { id: "ps",     name: "PowerShell",     desc: "写入用户环境变量，对新开的终端生效" },
+  { id: "wsl",    name: "WSL 终端",       desc: "写入各发行版 ~/.bashrc 的受管代码块" },
+  { id: "gitwin", name: "Git · Windows",  desc: "Windows 端 git config --global 代理" },
+  { id: "gitwsl", name: "Git · WSL",      desc: "WSL 各发行版 git config --global 代理" },
+];
+const state = { ps: false, wsl: false, gitwin: false, gitwsl: false, busy: {} };
+const cfg = { ports: [], bg_path: "", bg_dim: 0.45, card_alpha: 0.92 };
+const ui = { pinned: false, maximized: false };
+
+/* ═══════════════ Endpoints render ═══════════════ */
+function renderEndpoints() {
+  $("epList").innerHTML = EP_DEFS.map((d) => {
+    const on = state[d.id];
+    const badge = on ? '<span class="badge ok"><span class="dot"></span>已启用</span>'
+                     : '<span class="badge idle"><span class="dot"></span>未启用</span>';
+    const val = epValue(d.id);
+    return `<div class="card ep ${state.busy[d.id] ? "busy" : ""}" id="ep-${d.id}">
+      <div class="chip">${ICONS[d.id]}</div>
+      <div class="meta">
+        <div class="name-row"><span class="name">${d.name}</span>${badge}</div>
+        <div class="desc">${d.desc} · <code id="epv-${d.id}">${esc_(val)}</code></div>
+      </div>
+      <div class="tgl ${on ? "on" : ""}" id="sw-${d.id}" data-ep="${d.id}" data-tip="${on ? "点击关闭" : "点击启用"}"></div>
+    </div>`;
+  }).join("");
+  document.querySelectorAll(".tgl[data-ep]").forEach((el) => {
+    el.onclick = () => toggleEndpoint(el.dataset.ep, !state[el.dataset.ep]);
+  });
+  updateHero();
+}
+
+/* Per-endpoint current value: git rows show what was actually detected in
+   each git config; ps/wsl rows show the detected proxy URL. */
+let detected = { gitwin: "未设置", gitwsl: "未设置", ps: null, wsl_url: null };
+function epValue(id) {
+  if (id === "gitwin") return detected.gitwin;
+  if (id === "gitwsl") return detected.gitwsl;
+  if (id === "ps") return detected.ps || "未设置";
+  if (id === "wsl") return state.wsl ? (detected.wsl_url || "未设置") : "未设置";
+  return "未设置";
+}
+
+function updateHero() {
+  const n = ["ps", "wsl", "gitwin", "gitwsl"].reduce((a, k) => a + Number(state[k]), 0);
+  const badge = $("heroBadge");
+  if (n === 4) { badge.className = "badge ok"; badge.innerHTML = '<span class="dot"></span>全部启用'; }
+  else if (n > 0) { badge.className = "badge warn"; badge.innerHTML = '<span class="dot"></span>部分启用'; }
+  else { badge.className = "badge idle"; badge.innerHTML = '<span class="dot"></span>未启用'; }
+  $("heroLine").innerHTML = `<b>${n} / 4</b> <span class="dim">个端点已启用</span>`;
+  const gw = detected.gitwin, gl = detected.gitwsl;
+  const fmt = (v) => UNSET.has(v) ? "未设置" : String(v).replace(/^http:\/\//, "");
+  $("sbGit").textContent = `Win ${fmt(gw)} · WSL ${fmt(gl)}`;
+}
+
+/* ═══════════════ Toggle flow (validation + confirm + apply) ═══════════════ */
+let busyAll = false;
+function setBusy(ep, b) { state.busy[ep] = b; renderEndpoints(); }
+
+async function toggleEndpoint(ep, on) {
+  if (state.busy[ep] || busyAll) return;
+  const host = $("inHost").value.trim(), port = $("inPort").value.trim();
+  if (on) {
+    if (!validateFields(true)) return;
+    /* Pass the CURRENT field values: Python's cached address may still be
+       one persistSoon debounce behind what the user just typed. */
+    const pre = await api.call("prepare_toggle", ep, true, host, port);
+    if (pre && pre.confirm) {
+      if (!(await confirmDlg(pre.message))) return;
+    } else if (pre && pre.error) {
+      toast(pre.error, "err"); return;
+    }
+  }
+  setBusy(ep, true);
+  try {
+    const r = await api.call("do_toggle", ep, on, host, port);
+    if (r && r.error) toast(r.error, "err");
+    else if (r && r.note) toast(r.note);
+    else toast(`${epName(ep)} 已${on ? "启用" : "关闭"}`, "ok");
+  } finally {
+    setBusy(ep, false);
+    refreshAll();
+  }
+}
+
+function epName(ep) { return (EP_DEFS.find((d) => d.id === ep) || {}).name || ep; }
+
+/* Field validation, mirroring the Python-side rules. */
+function validateFields(mark) {
+  const h = $("inHost"), p = $("inPort");
+  const host = h.value.trim(), port = p.value.trim();
+  h.classList.remove("bad"); p.classList.remove("bad");
+  const bad = (el, msg) => { if (mark) el.classList.add("bad"); toast(msg, "err"); return false; };
+  if (!host) return bad(h, "请填写代理地址");
+  if (/\s/.test(host)) return bad(h, "代理地址不能包含空格");
+  if (!/^[A-Za-z0-9._-]+$/.test(host))
+    return bad(h, host.includes(":") ? "地址中不应包含端口或冒号，端口请填入“端口”字段" : "地址含非法字符（仅允许字母、数字、. - _）");
+  if (host.includes("://")) return bad(h, "只需填写地址，不含协议头（如 http://）");
+  if (!/^\d+$/.test(port) || !(+port >= 1 && +port <= 65535)) return bad(p, "端口须为 1-65535 的整数");
+  return true;
+}
+
+/* ═══════════════ Port presets: chips + quick switch + manage ═══════════════ */
+function renderPorts() {
+  const cur = $("inPort").value.trim();
+  const chips = cfg.ports.map((p) =>
+    `<button class="pchip ${String(p) === cur ? "active" : ""}" data-port="${p}" data-tip="切换到端口 ${p}">${p}</button>`).join("");
+  $("portChips").innerHTML = chips + '<button class="pchip add" id="portManage" data-tip="管理端口预设">＋ 管理</button>';
+  $("portChips").querySelectorAll(".pchip[data-port]").forEach((el) => {
+    el.onclick = () => quickSwitchPort(el.dataset.port);
+  });
+  $("portManage").onclick = (e) => { e.stopPropagation(); renderPortPop(); $("portPop").classList.toggle("show"); };
+}
+
+function renderPortPop() {
+  const cur = $("inPort").value.trim();
+  $("portPopList").innerHTML = cfg.ports.map((p) =>
+    `<div class="row"><span class="pv">${p}${String(p) === cur ? ' <span style="color:var(--accent);font-size:10.5px">当前</span>' : ""}</span>
+     <span class="del" data-del="${p}" data-tip="移除预设">×</span></div>`).join("")
+    || '<div style="font-size:11.5px;color:var(--text3);padding:2px 0">暂无预设</div>';
+  $("portPopList").querySelectorAll("[data-del]").forEach((el) => {
+    el.onclick = () => {
+      cfg.ports = cfg.ports.filter((x) => String(x) !== el.dataset.del);
+      renderPorts(); renderPortPop(); persistSoon();
+    };
+  });
+}
+
+async function quickSwitchPort(p) {
+  if (busyAll || Object.values(state.busy).some(Boolean) || refreshing) return;
+  p = String(p);
+  const oldPort = $("inPort").value.trim();
+  if (p === oldPort) return;
+  $("inPort").value = p;
+  $("inPort").classList.remove("bad");
+  if (!validateFields(true)) { $("inPort").value = oldPort; renderPorts(); return; }
+  const enabled = ["ps", "wsl", "gitwin", "gitwsl"].filter((k) => state[k]);
+  if (enabled.length > 0) {
+    const go = await confirmDlg(
+      `已启用的 ${enabled.length} 个端点将关闭并以新端口 ${p} 重新应用，` +
+      "期间终端代理会短暂中断。\n确认切换？", "切换端口");
+    if (!go) { $("inPort").value = oldPort; renderPorts(); return; }
+    setBusyAll(true);
+    try {
+      /* Persist the new address first so switch_port works on it. */
+      await api.call("save_config", { host: $("inHost").value.trim(), port: p });
+      const r = await api.call("switch_port", p);
+      if (r && r.error) toast(r.error, "err");
+      else toast(`端口已切换为 ${p}，${(r.applied || []).length} 个端点已重新应用`, "ok");
+    } catch (e) {
+      toast("端口切换失败: " + e, "err");
+    } finally { setBusyAll(false); }
+  } else {
+    persistSoon();
+    toast(`端口已设为 ${p}`, "ok");
+  }
+  renderPorts();
+  refreshAll();
+}
+
+function setBusyAll(b) {
+  busyAll = b;
+  $("btnAllOn").disabled = $("btnAllOff").disabled = b;
+}
+
+/* ═══════════════ Refresh (parallel, incremental) ═══════════════ */
+let refreshing = false;
+async function refreshAll() {
+  if (refreshing) return;
+  refreshing = true;
+  const spin = $("sbRefreshIco");
+  spin.classList.add("spin");
+  $("sbRefresh").disabled = true;
+  let pending = 0;
+  const settle = () => {
+    if (--pending === 0) {
+      refreshing = false;
+      spin.classList.remove("spin");
+      $("sbRefresh").disabled = false;
+      if (anyOk) persistSoon();
+    }
+  };
+  const track = (p) => { pending++; p.finally(settle); };
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  let anyOk = false;
+
+  track(api.call("refresh_item", "ps").then((r) => {
+    anyOk = true;
+    state.ps = !!r.status;
+    detected.ps = r.status ? r.vars.HTTP_PROXY : null;
+    set("vPsHttp", r.vars.HTTP_PROXY); set("vPsHttps", r.vars.HTTPS_PROXY);
+    renderEndpoints();
+  }).catch(() => {}));
+  track(api.call("refresh_item", "wsl").then((r) => {
+    anyOk = true;
+    state.wsl = !!r.on;
+    detected.gitwsl = r.git;
+    state.gitwsl = !UNSET.has(r.git); // mirror the actually detected state
+    detected.wsl_url = state.wsl ? r.vars.HTTP_PROXY : null;
+    set("vWip", r.ip);
+    set("vWslHttp", r.vars.HTTP_PROXY); set("vWslHttps", r.vars.HTTPS_PROXY);
+    set("vWslGit", r.git);
+    renderEndpoints();
+  }).catch(() => {}));
+  track(api.call("refresh_item", "gitwin").then((v) => {
+    anyOk = true;
+    detected.gitwin = v;
+    state.gitwin = !UNSET.has(v);
+    set("vPsGit", v);
+    renderEndpoints();
+  }).catch(() => {}));
+  track(api.call("refresh_item", "ip").then((v) => { set("vLip", v); }).catch(() => {}));
+  track(api.call("refresh_item", "mode").then((v) => { set("vMode", v); set("sbMode", v); }).catch(() => {}));
+  renderEndpoints();
+}
+
+/* Persist host/port/states silently (debounced), like save_config on success. */
+let persistTimer = null;
+function persistSoon() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    api.call("save_config", {
+      host: $("inHost").value.trim(), port: $("inPort").value.trim(),
+      powershell: state.ps, wsl: state.wsl, git_win: state.gitwin, git_wsl: state.gitwsl,
+      pin: ui.pinned, mode: document.documentElement.dataset.theme,
+      ports: cfg.ports, bg_dim: cfg.bg_dim, card_alpha: cfg.card_alpha,
+    });
+  }, 400);
+}
+
+/* ═══════════════ All on / all off ═══════════════ */
+async function allEndpoints(on) {
+  if (busyAll || Object.values(state.busy).some(Boolean)) return;
+  const host = $("inHost").value.trim(), port = $("inPort").value.trim();
+  if (on && !validateFields(true)) return;
+  setBusyAll(true);
+  let hadError = false;
+  try {
+    for (const d of EP_DEFS) {
+      if (state[d.id] === on) continue;
+      if (on) {
+        // Per-endpoint pre-flight (shell/git/WSL checks), deduping identical
+        // confirmations so the user isn't asked the same question 3 times.
+        const pre = await api.call("prepare_toggle", d.id, true, host, port);
+        if (pre && pre.confirm) {
+          if (!allEndpoints.confirmed?.has(pre.confirm)) {
+            if (!(await confirmDlg(pre.message))) continue;
+            (allEndpoints.confirmed ??= new Set()).add(pre.confirm);
+          }
+        } else if (pre && pre.error) {
+          toast(pre.error, "err"); hadError = true; break;
+        }
+      }
+      setBusy(d.id, true);
+      try {
+        const r = await api.call("do_toggle", d.id, on, host, port);
+        if (r && r.error) { toast(r.error, "err"); hadError = true; break; }
+        state[d.id] = on;
+      } finally {
+        setBusy(d.id, false);
+      }
+    }
+    if (!hadError) toast(on ? "已启用全部端点" : "已关闭全部端点", "ok");
+  } finally {
+    allEndpoints.confirmed = null;
+    setBusyAll(false);
+    refreshAll();
+  }
+}
+
+/* ═══════════════ Speed ticker ═══════════════ */
+function fmtMB(num) {
+  if (num < 1024) return [num.toFixed(0), "B/s"];
+  const units = [["KB", 1024], ["MB", 1024 ** 2], ["GB", 1024 ** 3]];
+  let v = num, lbl = "KB/s";
+  for (const [u, f] of units) if (num >= f) { v = num / f; lbl = u + "/s"; } else break;
+  return [v >= 100 ? v.toFixed(0) : v.toFixed(1), lbl];
+}
+async function tickSpeed() {
+  try {
+    const s = await api.call("get_speed");
+    if (s) {
+      const [dn, unit] = fmtMB(s.dn_num ?? 0);
+      $("spdDn").textContent = dn;
+      document.querySelector(".metric .unit").textContent = unit;
+      $("spdUp").textContent = s.up;
+      const aliveTxt = s.alive === null || s.alive === undefined ? "—"
+        : (s.alive ? "在线" : "无响应");
+      $("portAlive").textContent = aliveTxt;
+      $("portAlive").style.color = s.alive === null || s.alive === undefined
+        ? "var(--text3)" : (s.alive ? "var(--green)" : "var(--red)");
+      $("sparkBar").style.width = Math.min(100, (s.dn_num ?? 0) / (5 * 1024 * 1024) * 100) + "%";
+      const sb = $("sbPort");
+      sb.innerHTML = s.alive ? '<span class="dot g"></span>在线 · ' + esc_($("inPort").value || "7897")
+                             : '<span class="dot r"></span>无响应';
+      if (s.iface) $("speedCap").textContent = `实时网速（${s.iface}）`;
+    }
+  } catch (e) { /* keep last values */ }
+  setTimeout(tickSpeed, 1000);
+}
+
+/* ═══════════════ Theme / pin / maximize / window controls ═══════════════ */
+function applyTheme(mode) {
+  document.documentElement.dataset.theme = mode;
+  $("icoMoon").style.display = mode === "dark" ? "none" : "";
+  $("icoSun").style.display = mode === "dark" ? "" : "none";
+}
+async function toggleTheme() {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  persistSoon();
+}
+function applyPin(on) {
+  ui.pinned = !!on;
+  $("btnPin").style.color = ui.pinned ? "var(--accent)" : "";
+  $("btnPin").style.background = ui.pinned ? "var(--accent-soft)" : "";
+}
+async function togglePin() {
+  applyPin(!ui.pinned);
+  api.call("window_control", "pin", ui.pinned);
+  persistSoon();
+}
+function applyMaximized(m) {
+  ui.maximized = !!m;
+  document.documentElement.classList.toggle("maximized", ui.maximized);
+  $("icoMax").style.display = ui.maximized ? "none" : "";
+  $("icoRestore").style.display = ui.maximized ? "" : "none";
+  $("btnMax").dataset.tip = ui.maximized ? "向下还原" : "最大化";
+}
+async function toggleMaximize() {
+  const r = await api.call("window_control", "maximize");
+  if (r && typeof r.maximized === "boolean") applyMaximized(r.maximized);
+}
+
+/* ═══════════════ Settings: background / opacity / autostart ═══════════════ */
+function applyBg(path, dataUrl, dim) {
+  cfg.bg_path = path || "";
+  if (path && dataUrl && dataUrl !== "mock-bg") {
+    $("bgLayer").style.backgroundImage = `url("${dataUrl}")`;
+    document.body.classList.add("has-bg");
+    $("bgName").textContent = path.split(/[\\/]/).pop();
+  } else if (path && dataUrl === "mock-bg") {
+    $("bgLayer").style.backgroundImage = "linear-gradient(135deg,#31427e,#0f1226)";
+    document.body.classList.add("has-bg");
+    $("bgName").textContent = "wallpaper.png";
+  } else {
+    document.body.classList.remove("has-bg");
+    $("bgName").textContent = "未设置";
+  }
+  $("bgDim").style.opacity = dim ?? cfg.bg_dim;
+}
+function applyAlpha(a) {
+  cfg.card_alpha = a;
+  document.documentElement.style.setProperty("--card-alpha", a);
+}
+function debounce(fn, ms) {
+  let h; return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
+}
+const saveSettings = debounce(() => {
+  api.call("save_config", { bg_path: cfg.bg_path, bg_dim: cfg.bg_dim, card_alpha: cfg.card_alpha });
+}, 350);
+
+async function openSettings() {
+  const c = await api.call("get_config");
+  cfg.bg_dim = c.bg_dim ?? 0.45; cfg.card_alpha = c.card_alpha ?? 0.92;
+  $("rgDim").value = Math.round(cfg.bg_dim * 100);
+  $("rgDimVal").textContent = $("rgDim").value + "%";
+  $("rgAlpha").value = Math.round(cfg.card_alpha * 100);
+  $("rgAlphaVal").textContent = $("rgAlpha").value + "%";
+  $("tglAuto").classList.toggle("on", !!c.autostart);
+  if (c.bg_path) {
+    const bg = await api.call("get_background");
+    applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
+  } else applyBg("", null, cfg.bg_dim);
+  $("settingsOv").classList.add("show");
+}
+function closeSettings() {
+  $("settingsOv").classList.remove("show");
+  saveSettings();
+}
+$("settingsOv").addEventListener("mousedown", (e) => {
+  if (e.target === $("settingsOv")) closeSettings();
+});
+
+/* ═══════════════ Copy on click ═══════════════ */
+document.addEventListener("click", async (e) => {
+  const el = e.target.closest("[data-copy]");
+  if (!el) return;
+  const text = el.textContent.trim();
+  if (!text || /\s/.test(text) || !/\d/.test(text)) return;
+  try {
+    if (navigator.clipboard && location.protocol !== "file:") await navigator.clipboard.writeText(text);
+    else await api.call("copy", text);
+  } catch (_) { await api.call("copy", text); }
+  el.classList.add("copied");
+  const old = el.textContent;
+  el.textContent = old + "  ✓ 已复制";
+  setTimeout(() => {
+    // Only restore if the feedback is still on screen — a concurrent refresh
+    // may have written a fresh value that must not be clobbered.
+    if (!el.textContent.includes("已复制")) return;
+    el.classList.remove("copied"); el.textContent = old;
+  }, 1200);
+});
+
+/* ═══════════════ Wiring ═══════════════ */
+$("btnAllOn").onclick = () => allEndpoints(true);
+$("btnAllOff").onclick = () => allEndpoints(false);
+$("btnTheme").onclick = toggleTheme;
+$("btnPin").onclick = togglePin;
+$("btnSettings").onclick = openSettings;
+$("settingsClose").onclick = closeSettings;
+$("btnMin").onclick = () => api.call("window_control", "minimize");
+$("btnMax").onclick = toggleMaximize;
+$("btnClose").onclick = () => api.call("window_control", "close");
+$("btnWslRestart").onclick = async () => {
+  if (busyAll || Object.values(state.busy).some(Boolean)) return;
+  const go = await confirmDlg("将立即终止 WSL 中的所有进程，未保存的工作会丢失。确定重启？", "重启");
+  if (!go) return;
+  setBusyAll(true);
+  try {
+    /* Flush the current address: the rewrite after restart uses it. */
+    await api.call("save_config", { host: $("inHost").value.trim(), port: $("inPort").value.trim() });
+    const r = await api.call("restart_wsl");
+    if (r && r.error) toast("重启失败: " + r.error, "err");
+    else { toast("WSL 已重启", "ok"); refreshAll(); }
+  } catch (e) {
+    toast("重启失败: " + e, "err");
+  } finally {
+    setBusyAll(false);
+  }
+};
+$("sbRefresh").onclick = () => refreshAll();
+$("inHost").addEventListener("input", () => { $("inHost").classList.remove("bad"); renderEndpoints(); });
+$("inPort").addEventListener("input", () => { $("inPort").classList.remove("bad"); renderPorts(); renderEndpoints(); });
+["inHost", "inPort"].forEach((id) => $(id).addEventListener("change", persistSoon));
+
+/* Double-click title bar empty area toggles maximize (standard behavior). */
+$("dragRegion").addEventListener("dblclick", (e) => {
+  if (!e.target.closest(".tb-btn")) toggleMaximize();
+});
+
+/* Port preset popover: add / close-on-outside-click */
+$("portAddBtn").onclick = () => {
+  const v = $("portAddIn").value.trim();
+  if (!/^\d+$/.test(v) || !(+v >= 1 && +v <= 65535)) { toast("端口须为 1-65535 的整数", "err"); return; }
+  if (cfg.ports.map(String).includes(v)) { toast("该端口已在预设中", "err"); return; }
+  if (cfg.ports.length >= 12) { toast("预设最多 12 个，请先移除不需要的端口", "err"); return; }
+  cfg.ports.push(+v);
+  $("portAddIn").value = "";
+  renderPorts(); renderPortPop(); persistSoon();
+};
+$("portAddIn").addEventListener("keydown", (e) => { if (e.key === "Enter") $("portAddBtn").click(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && _dlgOpen) $("dlgCancel").click();
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".ports-wrap")) $("portPop").classList.remove("show");
+});
+
+/* Settings wiring */
+$("bgPick").onclick = async () => {
+  const r = await api.call("pick_background");
+  if (r && r.error) { toast("选择图片失败: " + r.error, "err"); return; }
+  if (r && r.ok) {
+    cfg.bg_path = r.path || cfg.bg_path; // Python persisted the new path; mirror it
+    const bg = await api.call("get_background");
+    applyBg(cfg.bg_path, bg && bg.data, cfg.bg_dim);
+    saveSettings();
+  }
+};
+$("bgClear").onclick = () => {
+  cfg.bg_path = "";
+  api.call("clear_background");
+  applyBg("", null, cfg.bg_dim);
+  saveSettings();
+};
+$("rgDim").addEventListener("input", (e) => {
+  cfg.bg_dim = (+e.target.value) / 100;
+  $("rgDimVal").textContent = e.target.value + "%";
+  $("bgDim").style.opacity = cfg.bg_dim;
+  saveSettings();
+});
+$("rgAlpha").addEventListener("input", (e) => {
+  applyAlpha((+e.target.value) / 100);
+  $("rgAlphaVal").textContent = e.target.value + "%";
+  saveSettings();
+});
+$("tglAuto").onclick = async () => {
+  const on = !$("tglAuto").classList.contains("on");
+  const r = await api.call("set_autostart", on);
+  if (r && r.ok) { $("tglAuto").classList.toggle("on", on); toast(on ? "已开启开机自启" : "已关闭开机自启", "ok"); }
+  else toast("设置失败: " + ((r && r.error) || "未知错误"), "err");
+};
+
+function esc_(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+/* ═══════════════ Boot ═══════════════ */
+let booted = false;
+async function boot() {
+  if (booted) return; // pywebviewready and the browser fallback can both fire
+  booted = true;
+  const c = await api.call("get_config");
+  $("inHost").value = c.host; $("inPort").value = c.port;
+  applyTheme(c.mode || "light");
+  applyPin(!!c.pin);
+  cfg.ports = (c.ports || []).map(String);
+  applyAlpha(c.card_alpha ?? 0.92);
+  cfg.bg_dim = c.bg_dim ?? 0.45;
+  if (c.bg_path) {
+    const bg = await api.call("get_background");
+    applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
+  }
+  /* Sync the maximize affordance with reality (a renderer reload resets it
+     while the window may still be maximized). */
+  try {
+    const w = await api.call("window_control", "query");
+    if (w && w.maximized) applyMaximized(true);
+  } catch (_) { /* cosmetic only */ }
+  renderPorts();
+  renderEndpoints();
+  refreshAll();
+  tickSpeed();
+}
+if (HAS_BRIDGE()) boot();
+else window.addEventListener("pywebviewready", boot);
+/* Browser fallback: if no bridge ever arrives, boot with mock after a beat. */
+setTimeout(() => { if (!HAS_BRIDGE() && !booted) boot(); }, 350);
+</script>
+</body>
+</html>
