@@ -801,9 +801,9 @@ async function quickSwitchPort(p) {
     if (!go) { $("inPort").value = oldPort; renderPorts(); return; }
     setBusyAll(true);
     try {
-      /* Persist the new address first so switch_port works on it. */
-      await api.call("save_config", { host: $("inHost").value.trim(), port: p });
-      const r = await api.call("switch_port", p);
+      /* No pre-flush: switch_port compares against the still-old cached port
+         and persists the new one itself once endpoints are re-applied. */
+      const r = await api.call("switch_port", p, $("inHost").value.trim());
       if (r && r.error) toast(r.error, "err");
       else toast(`端口已切换为 ${p}，${(r.applied || []).length} 个端点已重新应用`, "ok");
     } catch (e) {

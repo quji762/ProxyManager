@@ -626,17 +626,18 @@ class Api:
         return (self.host, self.port)
 
     # ── quick port switch: re-apply enabled endpoints on the new port ──
-    def switch_port(self, new_port):
+    def switch_port(self, new_port, host=None):
         new_port = str(new_port).strip()
         if not pm._is_valid_port(new_port):
             return {"error": "端口须为 1-65535 的整数"}
         new_port = str(int(new_port))
-        if new_port == self.port:
-            return {"ok": True, "applied": []}
-        if not _valid_host(self.host):
+        host = str(host).strip() if host else self.host
+        if not _valid_host(host):
             return {"error": "代理地址不合法，请先修正"}
+        if new_port == self.port and host == self.host:
+            return {"ok": True, "applied": []}
 
-        old_h, old_p = self.host, self.port
+        old_h, old_p = host, self.port
         managed_url = f"http://{old_h}:{old_p}"
         # Detect what is currently on. Only values equal to this tool's
         # managed URL count as "ours" — a proxy the user configured by hand
