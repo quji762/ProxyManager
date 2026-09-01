@@ -129,8 +129,8 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .badge.ok { color: var(--green); background: var(--green-soft); }
 .badge.idle { color: var(--text2); background: var(--chip); }
 .badge.warn { color: var(--amber); background: var(--amber-soft); }
-.hero-line { margin-top: 12px; font-size: 14px; }
-.hero-line b { font-size: 14.5px; }
+.hero-line { margin-top: 12px; font-size: 16px; }
+.hero-line b { font-size: 19px; }
 .hero-line .dim { color: var(--text2); }
 .hero-desc { margin-top: 5px; font-size: 12px; color: var(--text2); }
 
@@ -198,12 +198,36 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .btn.small { padding: 5px 11px; font-size: 12px; }
 .btn.tiny { padding: 4px 10px; font-size: 11.5px; border-radius: 6px; }
 
-.hero-right { width: 300px; flex: none; display: flex; flex-direction: column; }
-.metric-cap { font-size: 12px; color: var(--text2); }
+.hero-right { position: relative; width: 300px; flex: none; display: flex; flex-direction: column; }
+.metric-cap-row { display: flex; align-items: center; gap: 6px; }
+.metric-cap { font-size: 12px; color: var(--text2); flex: 1; }
+.metric-gear {
+  width: 22px; height: 22px; border: none; border-radius: 6px; flex: none;
+  display: grid; place-items: center; color: var(--text3); background: transparent;
+  transition: background .12s, color .12s; cursor: default;
+}
+.metric-gear svg { width: 12px; height: 12px; }
+.metric-gear:hover { background: var(--chip-hover); color: var(--accent); }
+.speed-pop {
+  position: absolute; top: 26px; right: 0; z-index: 60; width: 240px; padding: 12px 14px 14px;
+  border-radius: 10px; background: rgba(var(--card-rgb), .98);
+  border: 1px solid var(--border); box-shadow: var(--shadow); display: none;
+}
+.speed-pop.show { display: block; }
+.speed-pop h5 { font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+.speed-pop .desc { font-size: 11px; color: var(--text3); line-height: 1.5; margin-bottom: 8px; }
+.speed-pop .addrow { display: flex; gap: 6px; align-items: center; }
+.speed-pop .addrow input {
+  flex: 1; min-width: 0; font-family: var(--font); font-size: 12px; color: var(--text);
+  background: var(--input); border: 1px solid var(--input-border); border-radius: 6px;
+  padding: 5px 8px; outline: none;
+}
+.speed-pop .addrow input:focus { border-color: var(--accent); }
+.speed-pop .addrow .unit-lbl { font-size: 11.5px; color: var(--text2); flex: none; }
 .metric { display: flex; align-items: baseline; gap: 6px; margin-top: 2px; }
-.metric .num { font-size: 42px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
-.metric .unit { font-size: 13px; color: var(--text2); font-weight: 600; }
-.metric-sub { display: flex; gap: 16px; margin-top: 4px; font-size: 12px; color: var(--text2); }
+.metric .num { font-size: 52px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.metric .unit { font-size: 15px; color: var(--text2); font-weight: 600; }
+.metric-sub { display: flex; gap: 16px; margin-top: 4px; font-size: 13px; color: var(--text2); }
 .metric-sub .item { display: inline-flex; align-items: center; gap: 5px; }
 .metric-sub svg { width: 13px; height: 13px; }
 .metric-sub b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -212,13 +236,43 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .hero-hint { margin-top: 10px; font-size: 11px; color: var(--text3); line-height: 1.6; }
 
 /* ═══════════════════════ Endpoint rows ═══════════════════════ */
+.ep-wrap { display: flex; align-items: stretch; gap: 12px; }
+.ep-wrap .ep-list { flex: 1; min-width: 0; }
 .ep-list { display: flex; flex-direction: column; gap: 10px; }
+/* Vertical page-level toggle rails: knob up = all on, down = all off.
+   Two rails: 全部开启 (accent when on) and 全部关闭 (red when idle-latched). */
+.vt-rail {
+  position: relative; width: 58px; flex: none; border-radius: 29px;
+  border: 1px solid var(--border-strong); background: var(--chip);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; cursor: default; user-select: none; transition: background .2s, border-color .2s;
+}
+.vt-rail:hover { border-color: var(--accent); }
+.vt-rail .vt-word {
+  writing-mode: vertical-rl; letter-spacing: 5px; font-size: 13px; font-weight: 700;
+  color: var(--text3); transition: color .2s; pointer-events: none;
+}
+.vt-rail .vt-knob {
+  position: absolute; left: 50%; transform: translate(-50%, 0);
+  width: 26px; height: 26px; border-radius: 50%; background: var(--text3);
+  transition: top .22s cubic-bezier(.2,.7,.3,1.2), background .2s; pointer-events: none;
+}
+.vt-rail.on { background: var(--accent-soft); border-color: var(--accent); }
+.vt-rail.on .vt-knob { background: var(--accent); }
+.vt-rail.on .vt-word { color: var(--accent); }
+.vt-rail.partial .vt-knob { background: var(--accent); }
+.vt-rail.off { background: var(--red-soft); border-color: var(--red); }
+.vt-rail.off .vt-knob { background: var(--red); }
+.vt-rail.off .vt-word { color: var(--red); }
+/* Per-endpoint row (horizontal card) */
 .ep {
-  display: flex; align-items: center; gap: 14px; padding: 13px 18px;
+  display: flex; align-items: center; gap: 14px; padding: 13px 14px 13px 18px;
   transition: border-color .15s;
 }
 .ep:hover { border-color: var(--border-strong); }
 .ep.busy { opacity: .75; }
+/* breathing room between the per-row switch and the page-level vertical rail */
+.ep .tgl { margin-right: 10px; }
 .ep .chip {
   width: 42px; height: 42px; border-radius: 10px; flex: none;
   display: grid; place-items: center; color: var(--accent); background: var(--accent-soft);
@@ -227,7 +281,7 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .ep .meta { flex: 1; min-width: 0; }
 .ep .name-row { display: flex; align-items: center; gap: 9px; }
 .ep .name { font-size: 14px; font-weight: 600; }
-.ep .desc { margin-top: 3px; font-size: 11.5px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ep .desc { margin-top: 3px; font-size: 11.5px; color: var(--text2); line-height: 1.5; word-break: break-all; }
 .ep .desc code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; color: var(--text); background: var(--chip); padding: 1px 6px; border-radius: 4px; }
 
 /* Win11 toggle */
@@ -245,14 +299,27 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 12px; margin-top: 12px; }
 .info-card { padding: 14px 18px 12px; }
 .info-card h3 { font-size: 13px; font-weight: 700; margin-bottom: 9px; }
-.kv { display: flex; align-items: center; min-height: 26px; padding: 2.5px 0; }
+.kv { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 2.5px 0; }
 .kv .k { width: 108px; flex: none; font-size: 12px; color: var(--text2); }
 .kv .v { font-size: 12px; font-weight: 600; font-family: "Cascadia Mono", Consolas, monospace; color: var(--text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 5px; padding: 2px 6px; margin-left: -6px; }
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 5px; padding: 2px 6px; margin-left: -6px;
+  flex: 1; min-width: 0; }
 .kv .v.copyable:hover { background: var(--chip-hover); outline: 1px solid var(--border); }
+/* per-variable connectivity test chip */
+.test-chip {
+  flex: none; font-family: var(--font); font-size: 10.5px; font-weight: 700;
+  color: var(--text3); background: var(--chip); border: 1px solid transparent;
+  border-radius: 9px; padding: 2px 9px; cursor: default;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.test-chip:hover { color: var(--accent); border-color: var(--accent); }
+.test-chip.testing { color: var(--text2); background: var(--chip-hover); pointer-events: none; }
+.test-chip.ok { color: var(--green); border-color: var(--green); background: var(--chip); }
+.test-chip.fail { color: var(--red); border-color: var(--red); background: var(--chip); }
 .kv .v.copied { color: var(--green); }
 .group-cap { font-size: 11px; font-weight: 700; color: var(--text2); margin: 10px 0 4px; letter-spacing: .3px; }
 .group-cap:first-of-type { margin-top: 0; }
+.net-hint { margin-top: 6px; font-size: 10.5px; color: var(--text3); line-height: 1.5; }
 
 /* ═══════════════════════ Status bar ═══════════════════════ */
 .statusbar {
@@ -270,6 +337,27 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .sb-chip .val .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
 .dot.g { background: var(--green); } .dot.r { background: var(--red); } .dot.n { background: var(--text3); }
 .statusbar .grow { flex: 1; }
+
+/* Channel page tabs (Win / WSL) in the status bar */
+.lane-tabs {
+  display: flex; gap: 4px; padding: 4px; margin: 0 4px;
+  border-radius: 10px; background: var(--chip); border: 1px solid var(--border);
+}
+.lane-tab {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--font); font-size: 12.5px; font-weight: 600; color: var(--text2);
+  background: transparent; border: 1px solid transparent; border-radius: 7px;
+  padding: 5px 12px; cursor: default; transition: background .12s, color .12s;
+}
+.lane-tab svg { width: 15px; height: 15px; }
+.lane-tab:hover { color: var(--text); }
+.lane-tab.active { background: var(--card); color: var(--accent); border-color: var(--border); box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.lane-tab .cnt {
+  font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+  color: var(--text3); background: var(--chip-hover);
+  padding: 1px 7px; border-radius: 9px;
+}
+.lane-tab.active .cnt { color: var(--accent); background: var(--accent-soft); }
 
 /* ═══════════════════════ Dialog / toast / popover ═══════════════════════ */
 .overlay { position: fixed; inset: 0; background: rgba(20,20,28,.4); display: none; place-items: center; z-index: 100; }
@@ -366,8 +454,8 @@ html.maximized .grip { display: none; }
       <div class="hero-cap">终端代理引擎
         <span class="badge idle" id="heroBadge"><span class="dot"></span>检测中</span>
       </div>
-      <div class="hero-line" id="heroLine"><b>0 / 4</b> <span class="dim">个端点已启用</span></div>
-      <div class="hero-desc">PowerShell · WSL 终端与两端 Git 可独立切换</div>
+      <div class="hero-line" id="heroLine"><b>0 / 8</b> <span class="dim">个端点已启用</span></div>
+      <div class="hero-desc">Windows 与 WSL 双渠道：终端 · Git · npm · pip 可独立切换</div>
 
       <div class="cfg-row">
         <div class="field"><label>代理地址</label><input id="inHost" spellcheck="false" autocomplete="off"></div>
@@ -385,57 +473,88 @@ html.maximized .grip { display: none; }
         </div>
       </div>
       <div class="hero-actions">
-        <button class="btn primary" id="btnAllOn">
-          <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 4l14 8-14 8z"/></svg>
-          全部启用
-        </button>
-        <button class="btn outline" id="btnAllOff">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6h12M6 12h12M6 18h12"/></svg>
-          全部关闭
-        </button>
         <button class="btn subtle" id="btnWslRestart" data-tip="重启 WSL（终止其中所有进程）">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
           重启 WSL
         </button>
       </div>
-      <div class="hero-hint">点击端口预设可快速切换：已启用的端点会自动以新端口重新应用。Git(Windows) 与 Git(WSL) 现在可以分别控制两端的全局 git 代理。</div>
+      <div class="hero-hint">右侧两条纵向开关分别批量开启 / 关闭当前页的 4 个端点；底部状态栏可切换 Windows / WSL 渠道页签。点击端口预设可快速切换：已启用的端点会自动以新端口重新应用；NAT 模式自动使用宿主网关 IP。</div>
     </div>
 
     <div class="hero-right">
-      <div class="metric-cap" id="speedCap">实时网速</div>
+      <div class="metric-cap-row">
+        <div class="metric-cap" id="speedCap">实时网速</div>
+        <button class="metric-gear" id="btnSpeedFull" data-tip="自定义网速满值">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
       <div class="metric"><span class="num" id="spdDn">0.0</span><span class="unit">MB/s</span></div>
       <div class="metric-sub">
-        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6"/></svg>上传 <b id="spdUp">0 B/s</b></span>
-        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10a4 4 0 0 1 7.7-1.5A3.5 3.5 0 0 1 17 15h-1.5"/><circle cx="8" cy="17" r="1.4"/><path d="M9.4 17H15"/></svg>代理端口 <b id="portAlive">—</b></span>
+        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V8M6 14l6-6 6 6"/></svg>上传 <b id="spdUp">0 B/s</b></span>
+        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6"/></svg>下载 <b id="spdDn2">0 B/s</b></span>
       </div>
       <div class="spark"><i id="sparkBar"></i></div>
+      <div class="speed-pop" id="speedPop">
+        <h5>自定义网速满值</h5>
+        <div class="desc">进度条满格对应的网速。带宽换算：100 Mbps ≈ 12.5 MB/s。</div>
+        <div class="addrow">
+          <input id="speedFullIn" spellcheck="false" inputmode="decimal" placeholder="5">
+          <span class="unit-lbl">Mbps</span>
+          <button class="btn tiny primary" id="speedFullOk">确定</button>
+        </div>
+      </div>
     </div>
   </div>
 
-  <!-- Endpoints -->
+  <!-- Endpoints: current channel page -->
   <div class="section-head">
-    <span class="cap">参与切换的端点</span><h2>代理端点</h2>
+    <span class="cap" id="epCap">参与切换的端点 · 当前渠道</span><h2 id="epTitle">代理端点</h2>
   </div>
-  <div class="ep-list" id="epList"></div>
+  <div class="ep-wrap">
+    <div class="ep-list" id="epList"></div>
+    <div class="vt-rail" id="vtRailOn" data-tip="批量开启当前页的全部端点">
+      <div class="vt-knob"></div>
+      <div class="vt-word">全部开启</div>
+    </div>
+    <div class="vt-rail" id="vtRailOff" data-tip="批量关闭当前页的全部端点">
+      <div class="vt-knob"></div>
+      <div class="vt-word">全部关闭</div>
+    </div>
+  </div>
 
   <!-- Info cards -->
   <div class="cols">
     <div class="card info-card">
       <h3>网络信息</h3>
-      <div class="kv"><span class="k">本机 IP</span><span class="v copyable" id="vLip" data-copy>—</span></div>
-      <div class="kv"><span class="k">WSL IP</span><span class="v copyable" id="vWip" data-copy>—</span></div>
-      <div class="kv"><span class="k">WSL 网络模式</span><span class="v" id="vMode">—</span></div>
+      <div id="netWin">
+        <div class="kv"><span class="k">本机 IP</span><span class="v copyable" id="vLip" data-copy>—</span></div>
+      </div>
+      <div id="netWsl" style="display:none">
+        <div class="kv"><span class="k">WSL IP</span><span class="v copyable" id="vWip" data-copy>—</span></div>
+        <div class="kv"><span class="k">WSL 网络模式</span><span class="v" id="vMode2">—</span></div>
+        <div class="net-hint" id="natHint">NAT 模式自动使用宿主网关 IP；镜像模式保持 127.0.0.1 不变</div>
+      </div>
     </div>
     <div class="card info-card">
-      <h3>代理变量</h3>
-      <div class="group-cap">POWERSHELL（用户环境变量）</div>
-      <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vPsHttp">—</span></div>
-      <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vPsHttps">—</span></div>
-      <div class="kv"><span class="k">Git（Windows）</span><span class="v" id="vPsGit">—</span></div>
-      <div class="group-cap">WSL</div>
-      <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vWslHttp">—</span></div>
-      <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vWslHttps">—</span></div>
-      <div class="kv"><span class="k">Git（WSL）</span><span class="v" id="vWslGit">—</span></div>
+      <h3 id="varsTitle">环境变量</h3>
+      <div id="varsWin">
+        <div class="group-cap">POWERSHELL（用户环境变量）</div>
+        <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vPsHttp">—</span><button class="test-chip" data-test="ps" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vPsHttps">—</span><button class="test-chip" data-test="ps" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">Git（git config --global）</span><span class="v" id="vPsGit">—</span><button class="test-chip" data-test="gitwin" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="group-cap">包管理器（用户级配置文件）</div>
+        <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v" id="vNpm">—</span><button class="test-chip" data-test="npm" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">pip（pip.ini）</span><span class="v" id="vPip">—</span><button class="test-chip" data-test="pip" data-tip="通过该代理发起连通性测试">测试</button></div>
+      </div>
+      <div id="varsWsl" style="display:none">
+        <div class="group-cap">WSL 终端（~/.bashrc 受管块）</div>
+        <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vWslHttp">—</span><button class="test-chip" data-test="wsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vWslHttps">—</span><button class="test-chip" data-test="wsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">Git（git config --global）</span><span class="v" id="vWslGit">—</span><button class="test-chip" data-test="gitwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="group-cap">包管理器（各发行版用户级配置）</div>
+        <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v" id="vNpmWsl">—</span><button class="test-chip" data-test="npmwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">pip（~/.config/pip/pip.conf）</span><span class="v" id="vPipWsl">—</span><button class="test-chip" data-test="pipwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+      </div>
     </div>
   </div>
 </div>
@@ -446,13 +565,27 @@ html.maximized .grip { display: none; }
     <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7v10M5 10v4M15 4v16M19 9v6"/></svg></div>
     <div><div class="lbl">代理端口</div><div class="val" id="sbPort"><span class="dot n"></span>检测中</div></div>
   </div>
-  <div class="sb-chip" data-tip="WSL2 网络模式（.wslconfig）">
-    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
-    <div><div class="lbl">WSL 网络</div><div class="val" id="sbMode">—</div></div>
+  <div class="lane-tabs" id="laneTabs" role="tablist">
+    <button class="lane-tab active" id="tabWin" role="tab" data-tip="Windows 侧的 PowerShell / Git / npm / pip">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+      <span>Win</span><span class="cnt" id="cntWin">0/4</span>
+    </button>
+    <button class="lane-tab" id="tabWsl" role="tab" data-tip="WSL 各发行版的终端 / Git / npm / pip">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12 14h5"/></svg>
+      <span>WSL</span><span class="cnt" id="cntWsl">0/4</span>
+    </button>
   </div>
-  <div class="sb-chip" data-tip="Git 全局代理（Windows / WSL 两个独立开关）">
+  <div class="sb-chip" data-tip="当前渠道 Git 全局代理">
     <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 3-2.5 4.5-6 4.5"/></svg></div>
     <div><div class="lbl">Git 代理</div><div class="val" id="sbGit">—</div></div>
+  </div>
+  <div class="sb-chip" data-tip="当前渠道 npm 用户级代理（~/.npmrc）">
+    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5h18v7h-9v1.5h-4.5v-1.5H3z"/><path d="M7 11v2M12 11v2M17 11v2"/></svg></div>
+    <div><div class="lbl">NPM 代理</div><div class="val" id="sbNpm">—</div></div>
+  </div>
+  <div class="sb-chip" data-tip="当前渠道 pip 用户级代理（pip.ini / pip.conf）">
+    <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c4 3.4 6.5 6.6 6.5 10a6.5 6.5 0 1 1-13 0c0-3.4 2.5-6.6 6.5-10z"/><path d="M9 14a3 3 0 0 0 3 3"/></svg></div>
+    <div><div class="lbl">pip 代理</div><div class="val" id="sbPip">—</div></div>
   </div>
   <div class="grow"></div>
   <button class="btn primary small" id="sbRefresh" data-tip="重新检测所有端点状态">
@@ -521,11 +654,13 @@ const api = (() => {
   /* Browser mock so the UI can be designed/tested standalone. */
   let mockState = {
     host: "127.0.0.1", port: "7897", mode: "light", pin: false,
-    ps: true, wsl: false, gitwin: false, gitwsl: false,
+    ps: true, wsl: false, gitwin: false, gitwsl: false, npm: false, pip: false,
+    npmwsl: false, pipwsl: false,
     ports: [7890, 7892, 7897], autostart: false,
     lip: "192.168.1.146", wip: "172.24.156.88", wmode: "Mirrored",
     psHttp: "http://127.0.0.1:7897",
     wslHttp: "未设置", wslGit: "未设置", gitWinVal: "未设置",
+    npmVal: "未设置", pipVal: "未设置", npmWslVal: "未设置", pipWslVal: "未设置",
     alive: true, iface: "以太网",
   };
   const delay = (ms) => new Promise(res => setTimeout(res, ms));
@@ -534,7 +669,8 @@ const api = (() => {
     switch (name) {
       case "get_config": return { host: mockState.host, port: mockState.port,
         mode: mockState.mode, pin: mockState.pin, ports: mockState.ports,
-        autostart: mockState.autostart, bg_path: "", bg_dim: 0.45, card_alpha: 0.92 };
+        autostart: mockState.autostart, bg_path: "", bg_dim: 0.45, card_alpha: 0.92,
+        speed_full: 5 };
       case "save_config": Object.assign(mockState, args[0]); return true;
       case "refresh_item": {
         const w = args[0];
@@ -544,17 +680,30 @@ const api = (() => {
           vars: { HTTP_PROXY: mockState.wslHttp, HTTPS_PROXY: mockState.wslHttp === "未设置" ? "未设置" : mockState.wslHttp },
           git: mockState.wslGit };
         if (w === "gitwin") return mockState.gitWinVal;
+        if (w === "npm") return mockState.npmVal;
+        if (w === "pip") return mockState.pipVal;
+        if (w === "npmwsl") return mockState.npmWslVal;
+        if (w === "pipwsl") return mockState.pipWslVal;
         if (w === "ip") return mockState.lip;
         if (w === "mode") return mockState.wmode;
         return null;
       }
       case "prepare_toggle": return { ok: true };
+      case "test_channel": {
+        await delay(600);
+        return Math.random() > 0.25 ? { ok: true, ms: 120 + Math.floor(Math.random() * 300) }
+                                    : { ok: false, error: "连接超时" };
+      }
       case "do_toggle": {
         const [target, on] = args;
         if (target === "ps") { mockState.ps = on; mockState.psHttp = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
         if (target === "wsl") { mockState.wsl = on; mockState.wslHttp = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
         if (target === "gitwin") { mockState.gitwin = on; mockState.gitWinVal = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
         if (target === "gitwsl") { mockState.gitwsl = on; mockState.wslGit = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "npm") { mockState.npm = on; mockState.npmVal = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "pip") { mockState.pip = on; mockState.pipVal = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "npmwsl") { mockState.npmwsl = on; mockState.npmWslVal = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "pipwsl") { mockState.pipwsl = on; mockState.pipWslVal = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
         return { ok: true };
       }
       case "switch_port": {
@@ -564,7 +713,11 @@ const api = (() => {
         if (mockState.wsl) mockState.wslHttp = `http://${mockState.host}:${p}`;
         if (mockState.gitwin) mockState.gitWinVal = `http://${mockState.host}:${p}`;
         if (mockState.gitwsl) mockState.wslGit = `http://${mockState.host}:${p}`;
-        return { ok: true, applied: ["ps", "wsl", "gitwin", "gitwsl"].filter(t => mockState[t]) };
+        if (mockState.npm) mockState.npmVal = `http://${mockState.host}:${p}`;
+        if (mockState.pip) mockState.pipVal = `http://${mockState.host}:${p}`;
+        if (mockState.npmwsl) mockState.npmWslVal = `http://${mockState.host}:${p}`;
+        if (mockState.pipwsl) mockState.pipWslVal = `http://${mockState.host}:${p}`;
+        return { ok: true, applied: ["ps", "wsl", "gitwin", "gitwsl", "npm", "pip", "npmwsl", "pipwsl"].filter(t => mockState[t]) };
       }
       case "get_speed": {
         const n = Math.random() * 3;
@@ -656,61 +809,139 @@ const ICONS = {
   wsl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12 14h5"/></svg>',
   gitwin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 3-2.5 4.5-6 4.5"/></svg>',
   gitwsl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7"/><path d="M18 10.5c0 3-2.5 4.5-6 4.5" stroke-dasharray="2.5 2.5"/></svg>',
+  npm: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5h18v7h-9v1.5h-4.5v-1.5H3z" stroke-dasharray="0"/><path d="M7 11v2M12 11v2M17 11v2"/></svg>',
+  pip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c4 3.4 6.5 6.6 6.5 10a6.5 6.5 0 1 1-13 0c0-3.4 2.5-6.6 6.5-10z"/><path d="M9 14a3 3 0 0 0 3 3"/></svg>',
 };
 const EP_DEFS = [
-  { id: "ps",     name: "PowerShell",     desc: "写入用户环境变量，对新开的终端生效" },
-  { id: "wsl",    name: "WSL 终端",       desc: "写入各发行版 ~/.bashrc 的受管代码块" },
-  { id: "gitwin", name: "Git · Windows",  desc: "Windows 端 git config --global 代理" },
-  { id: "gitwsl", name: "Git · WSL",      desc: "WSL 各发行版 git config --global 代理" },
+  { id: "ps",     lane: "win",  name: "PowerShell",  desc: "写入用户环境变量，对新开的终端生效" },
+  { id: "gitwin", lane: "win",  name: "Git",         desc: "git config --global 代理" },
+  { id: "npm",    lane: "win",  name: "npm",         desc: "~/.npmrc 的 proxy 与 https-proxy" },
+  { id: "pip",    lane: "win",  name: "pip",         desc: "pip.ini [global] proxy，对 py -m pip 同样生效" },
+  { id: "wsl",    lane: "wsl",  name: "WSL 终端",     desc: "写入各发行版 ~/.bashrc 的受管代码块" },
+  { id: "gitwsl", lane: "wsl",  name: "Git",         desc: "各发行版 git config --global 代理" },
+  { id: "npmwsl", lane: "wsl",  name: "npm",         desc: "各发行版 ~/.npmrc 的 proxy 与 https-proxy" },
+  { id: "pipwsl", lane: "wsl",  name: "pip",         desc: "~/.config/pip/pip.conf [global] proxy" },
 ];
-const state = { ps: false, wsl: false, gitwin: false, gitwsl: false, busy: {} };
+const state = { ps: false, wsl: false, gitwin: false, gitwsl: false, npm: false, pip: false, npmwsl: false, pipwsl: false, busy: {} };
 const cfg = { ports: [], bg_path: "", bg_dim: 0.45, card_alpha: 0.92 };
 const ui = { pinned: false, maximized: false };
 
-/* ═══════════════ Endpoints render ═══════════════ */
+/* ═══════════════ Endpoints render (two channel lanes) ═══════════════ */
+function epCard(d) {
+  const on = state[d.id];
+  const badge = on ? '<span class="badge ok"><span class="dot"></span>已启用</span>'
+                   : '<span class="badge idle"><span class="dot"></span>未启用</span>';
+  const val = epValue(d.id);
+  return `<div class="card ep ${state.busy[d.id] ? "busy" : ""}" id="ep-${d.id}">
+    <div class="chip">${ICONS[d.id] || ICONS[d.id.replace(/wsl$/, "")] || ""}</div>
+    <div class="meta">
+      <div class="name-row"><span class="name">${d.name}</span>${badge}</div>
+      <div class="desc">${d.desc} · <code id="epv-${d.id}">${esc_(val)}</code></div>
+    </div>
+    <div class="tgl ${on ? "on" : ""}" id="sw-${d.id}" data-ep="${d.id}" data-tip="${on ? "点击关闭" : "点击启用"}"></div>
+  </div>`;
+}
 function renderEndpoints() {
-  $("epList").innerHTML = EP_DEFS.map((d) => {
-    const on = state[d.id];
-    const badge = on ? '<span class="badge ok"><span class="dot"></span>已启用</span>'
-                     : '<span class="badge idle"><span class="dot"></span>未启用</span>';
-    const val = epValue(d.id);
-    return `<div class="card ep ${state.busy[d.id] ? "busy" : ""}" id="ep-${d.id}">
-      <div class="chip">${ICONS[d.id]}</div>
-      <div class="meta">
-        <div class="name-row"><span class="name">${d.name}</span>${badge}</div>
-        <div class="desc">${d.desc} · <code id="epv-${d.id}">${esc_(val)}</code></div>
-      </div>
-      <div class="tgl ${on ? "on" : ""}" id="sw-${d.id}" data-ep="${d.id}" data-tip="${on ? "点击关闭" : "点击启用"}"></div>
-    </div>`;
-  }).join("");
-  document.querySelectorAll(".tgl[data-ep]").forEach((el) => {
+  const host = $("epList");
+  host.innerHTML = EP_DEFS.filter((d) => d.lane === curLane).map(epCard).join("");
+  document.querySelectorAll("#epList .tgl[data-ep]").forEach((el) => {
     el.onclick = () => toggleEndpoint(el.dataset.ep, !state[el.dataset.ep]);
   });
+  $("epCap").textContent = curLane === "win"
+    ? "参与切换的端点 · Windows 渠道"
+    : "参与切换的端点 · WSL 渠道（应用于所有用户发行版）";
+  $("epTitle").textContent = curLane === "win" ? "Windows 代理端点" : "WSL 代理端点";
   updateHero();
+}
+
+/* Page switch: endpoints + info cards + hero accent all follow the lane. */
+function setLane(lane) {
+  if (curLane === lane) return;
+  curLane = lane;
+  $("tabWin").classList.toggle("active", lane === "win");
+  $("tabWsl").classList.toggle("active", lane === "wsl");
+  $("netWin").style.display = lane === "win" ? "" : "none";
+  $("netWsl").style.display = lane === "wsl" ? "" : "none";
+  $("varsWin").style.display = lane === "win" ? "" : "none";
+  $("varsWsl").style.display = lane === "wsl" ? "" : "none";
+  renderEndpoints();  // updateHero refreshes sbGit/sbNpm/sbPip for the lane
 }
 
 /* Per-endpoint current value: git rows show what was actually detected in
    each git config; ps/wsl rows show the detected proxy URL. */
-let detected = { gitwin: "未设置", gitwsl: "未设置", ps: null, wsl_url: null };
+let detected = { gitwin: "未设置", gitwsl: "未设置", ps: null, wsl_url: null,
+                 npm: "未设置", pip: "未设置", npmwsl: "未设置", pipwsl: "未设置" };
 function epValue(id) {
-  if (id === "gitwin") return detected.gitwin;
-  if (id === "gitwsl") return detected.gitwsl;
+  if (id === "gitwin" || id === "gitwsl") return detected[id];
   if (id === "ps") return detected.ps || "未设置";
   if (id === "wsl") return state.wsl ? (detected.wsl_url || "未设置") : "未设置";
+  if (id === "npm" || id === "pip" || id === "npmwsl" || id === "pipwsl") return detected[id];
   return "未设置";
 }
 
+const EP_TOTAL = EP_DEFS.length;
+/* Channel pages: the status-bar tabs switch the whole page between the
+   Windows and WSL views; each tool appears once per page. */
+let curLane = "win";
+const LANE_EPS = {
+  win: EP_DEFS.filter((d) => d.lane === "win").map((d) => d.id),
+  wsl: EP_DEFS.filter((d) => d.lane === "wsl").map((d) => d.id),
+};
 function updateHero() {
-  const n = ["ps", "wsl", "gitwin", "gitwsl"].reduce((a, k) => a + Number(state[k]), 0);
+  const nWin = LANE_EPS.win.reduce((a, k) => a + Number(state[k]), 0);
+  const nWsl = LANE_EPS.wsl.reduce((a, k) => a + Number(state[k]), 0);
+  const n = nWin + nWsl;
+  $("cntWin").textContent = `${nWin}/${LANE_EPS.win.length}`;
+  $("cntWsl").textContent = `${nWsl}/${LANE_EPS.wsl.length}`;
+  updateVtRail();
   const badge = $("heroBadge");
-  if (n === 4) { badge.className = "badge ok"; badge.innerHTML = '<span class="dot"></span>全部启用'; }
+  if (n === EP_TOTAL) { badge.className = "badge ok"; badge.innerHTML = '<span class="dot"></span>全部启用'; }
   else if (n > 0) { badge.className = "badge warn"; badge.innerHTML = '<span class="dot"></span>部分启用'; }
   else { badge.className = "badge idle"; badge.innerHTML = '<span class="dot"></span>未启用'; }
-  $("heroLine").innerHTML = `<b>${n} / 4</b> <span class="dim">个端点已启用</span>`;
-  const gw = detected.gitwin, gl = detected.gitwsl;
+  $("heroLine").innerHTML = `<b>${n} / ${EP_TOTAL}</b> <span class="dim">个端点已启用</span>`;
+  // Status-bar proxy chips show the current lane's values (kept here because
+  // refresh updates detected.* without calling setLane).
   const fmt = (v) => UNSET.has(v) ? "未设置" : String(v).replace(/^http:\/\//, "");
-  $("sbGit").textContent = `Win ${fmt(gw)} · WSL ${fmt(gl)}`;
+  const gk = curLane === "win" ? "gitwin" : "gitwsl";
+  const nk = curLane === "win" ? "npm" : "npmwsl";
+  const pk = curLane === "win" ? "pip" : "pipwsl";
+  $("sbGit").textContent = fmt(detected[gk]);
+  $("sbNpm").textContent = fmt(detected[nk]);
+  $("sbPip").textContent = fmt(detected[pk]);
 }
+
+/* Vertical page-level toggles: two rails (全部开启 / 全部关闭). Each rail's
+   knob sits at the top while its action is the current state, else at the
+   bottom — 全部开启's rail reads "on" when the whole lane is on; 全部关闭's
+   rail reads "off" when the whole lane is off. Click runs the batch action. */
+function _vtKnobPos(rail, active) {
+  const min = 10, max = Math.max(min, rail.clientHeight - 36);
+  return (active ? min : max) + "px";
+}
+function updateVtRail() {
+  const laneIds = LANE_EPS[curLane];
+  const n = laneIds.reduce((a, k) => a + Number(state[k]), 0);
+  const allOn = n === laneIds.length, allOff = n === 0;
+  const rOn = $("vtRailOn"), rOff = $("vtRailOff");
+  if (!rOn || !rOff) return;
+  rOn.classList.toggle("on", allOn);
+  rOn.classList.toggle("partial", !allOn && !allOff);
+  rOn.dataset.tip = allOn ? "当前页端点已全部开启" : "批量开启当前页的全部端点";
+  rOff.classList.toggle("off", allOff);
+  rOff.dataset.tip = allOff ? "当前页端点已全部关闭" : "批量关闭当前页的全部端点";
+  rOn.querySelector(".vt-knob").style.top = _vtKnobPos(rOn, allOn);
+  rOff.querySelector(".vt-knob").style.top = _vtKnobPos(rOff, allOff);
+}
+async function toggleVtRail(which) {
+  const laneIds = LANE_EPS[curLane];
+  const allOn = laneIds.every((k) => state[k]);
+  // 全部开启 rail is inert while the lane is already fully on; same for off.
+  if (which === "on" && !allOn) await allEndpoints(true, curLane);
+  if (which === "off" && !allOff(laneIds)) await allEndpoints(false, curLane);
+}
+const allOff = (ids) => ids.every((k) => !state[k]);
+$("vtRailOn").addEventListener("click", () => toggleVtRail("on"));
+$("vtRailOff").addEventListener("click", () => toggleVtRail("off"));
 
 /* ═══════════════ Toggle flow (validation + confirm + apply) ═══════════════ */
 let busyAll = false;
@@ -793,7 +1024,7 @@ async function quickSwitchPort(p) {
   $("inPort").value = p;
   $("inPort").classList.remove("bad");
   if (!validateFields(true)) { $("inPort").value = oldPort; renderPorts(); return; }
-  const enabled = ["ps", "wsl", "gitwin", "gitwsl"].filter((k) => state[k]);
+  const enabled = EP_DEFS.map((d) => d.id).filter((k) => state[k]);
   if (enabled.length > 0) {
     const go = await confirmDlg(
       `已启用的 ${enabled.length} 个端点将关闭并以新端口 ${p} 重新应用，` +
@@ -819,7 +1050,15 @@ async function quickSwitchPort(p) {
 
 function setBusyAll(b) {
   busyAll = b;
-  $("btnAllOn").disabled = $("btnAllOff").disabled = b;
+  for (const rid of ["vtRailOn", "vtRailOff"]) {
+    const rail = $(rid);
+    if (rail) {
+      rail.style.opacity = b ? ".55" : "";
+      rail.style.pointerEvents = b ? "none" : "";
+    }
+  }
+  const btn = $("btnWslRestart");
+  if (btn) btn.disabled = b;
 }
 
 /* ═══════════════ Refresh (parallel, incremental) ═══════════════ */
@@ -868,8 +1107,43 @@ async function refreshAll() {
     set("vPsGit", v);
     renderEndpoints();
   }).catch(() => {}));
+  track(api.call("refresh_item", "npm").then((v) => {
+    anyOk = true;
+    detected.npm = v;
+    state.npm = !UNSET.has(v);
+    set("vNpm", v);
+    renderEndpoints();
+  }).catch(() => {}));
+  track(api.call("refresh_item", "pip").then((v) => {
+    anyOk = true;
+    detected.pip = v;
+    state.pip = !UNSET.has(v);
+    set("vPip", v);
+    renderEndpoints();
+  }).catch(() => {}));
+  track(api.call("refresh_item", "npmwsl").then((v) => {
+    anyOk = true;
+    detected.npmwsl = v;
+    state.npmwsl = !UNSET.has(v);
+    set("vNpmWsl", v);
+    renderEndpoints();
+  }).catch(() => {}));
+  track(api.call("refresh_item", "pipwsl").then((v) => {
+    anyOk = true;
+    detected.pipwsl = v;
+    state.pipwsl = !UNSET.has(v);
+    set("vPipWsl", v);
+    renderEndpoints();
+  }).catch(() => {}));
   track(api.call("refresh_item", "ip").then((v) => { set("vLip", v); }).catch(() => {}));
-  track(api.call("refresh_item", "mode").then((v) => { set("vMode", v); set("sbMode", v); }).catch(() => {}));
+  track(api.call("refresh_item", "mode").then((v) => {
+    set("vMode2", v);
+    // The NAT note only applies to NAT mode; mirrored keeps loopback.
+    const hint = $("natHint");
+    if (hint) hint.textContent = String(v).startsWith("NAT")
+      ? "NAT 模式自动使用宿主网关 IP；镜像模式保持 127.0.0.1 不变"
+      : "镜像模式下 WSL 与宿主共享网络，127.0.0.1 直接可达";
+  }).catch(() => {}));
   renderEndpoints();
 }
 
@@ -881,14 +1155,18 @@ function persistSoon() {
     api.call("save_config", {
       host: $("inHost").value.trim(), port: $("inPort").value.trim(),
       powershell: state.ps, wsl: state.wsl, git_win: state.gitwin, git_wsl: state.gitwsl,
+      npm: state.npm, pip: state.pip, npmwsl: state.npmwsl, pipwsl: state.pipwsl,
       pin: ui.pinned, mode: document.documentElement.dataset.theme,
       ports: cfg.ports, bg_dim: cfg.bg_dim, card_alpha: cfg.card_alpha,
+      speed_full: speedFullMbps,
     });
   }, 400);
 }
 
 /* ═══════════════ All on / all off ═══════════════ */
-async function allEndpoints(on) {
+/* Batch-toggle endpoints. With `lane` set (the vertical page toggle), only
+   that channel's endpoints are touched; without it (全部关闭), all of them. */
+async function allEndpoints(on, lane = null) {
   if (busyAll || Object.values(state.busy).some(Boolean)) return;
   const host = $("inHost").value.trim(), port = $("inPort").value.trim();
   if (on && !validateFields(true)) return;
@@ -896,6 +1174,7 @@ async function allEndpoints(on) {
   let hadError = false;
   try {
     for (const d of EP_DEFS) {
+      if (lane && d.lane !== lane) continue;
       if (state[d.id] === on) continue;
       if (on) {
         // Per-endpoint pre-flight (shell/git/WSL checks), deduping identical
@@ -919,7 +1198,10 @@ async function allEndpoints(on) {
         setBusy(d.id, false);
       }
     }
-    if (!hadError) toast(on ? "已启用全部端点" : "已关闭全部端点", "ok");
+    if (!hadError) {
+      const scope = lane ? (lane === "win" ? "Windows" : "WSL") + " 渠道" : "全部端点";
+      toast(`${scope}已${on ? "启用" : "关闭"}`, "ok");
+    }
   } finally {
     allEndpoints.confirmed = null;
     setBusyAll(false);
@@ -935,6 +1217,9 @@ function fmtMB(num) {
   for (const [u, f] of units) if (num >= f) { v = num / f; lbl = u + "/s"; } else break;
   return [v >= 100 ? v.toFixed(0) : v.toFixed(1), lbl];
 }
+/* Spark full-scale in bytes/sec, from the user's Mbps setting (default 5). */
+let speedFullMbps = 5;
+const MbpsToBps = (m) => m * 1000 * 1000 / 8;
 async function tickSpeed() {
   try {
     const s = await api.call("get_speed");
@@ -943,12 +1228,9 @@ async function tickSpeed() {
       $("spdDn").textContent = dn;
       document.querySelector(".metric .unit").textContent = unit;
       $("spdUp").textContent = s.up;
-      const aliveTxt = s.alive === null || s.alive === undefined ? "—"
-        : (s.alive ? "在线" : "无响应");
-      $("portAlive").textContent = aliveTxt;
-      $("portAlive").style.color = s.alive === null || s.alive === undefined
-        ? "var(--text3)" : (s.alive ? "var(--green)" : "var(--red)");
-      $("sparkBar").style.width = Math.min(100, (s.dn_num ?? 0) / (5 * 1024 * 1024) * 100) + "%";
+      $("spdDn2").textContent = `${dn} ${unit}`;
+      const full = Math.max(1, MbpsToBps(speedFullMbps));
+      $("sparkBar").style.width = Math.min(100, (s.dn_num ?? 0) / full * 100) + "%";
       const sb = $("sbPort");
       sb.innerHTML = s.alive ? '<span class="dot g"></span>在线 · ' + esc_($("inPort").value || "7897")
                              : '<span class="dot r"></span>无响应';
@@ -958,6 +1240,32 @@ async function tickSpeed() {
   setTimeout(tickSpeed, 1000);
 }
 
+/* Speed full-scale popover (anchored to the hero-right block) */
+function renderSpeedPop() { $("speedFullIn").value = String(speedFullMbps); }
+$("btnSpeedFull").onclick = (e) => {
+  e.stopPropagation();
+  renderSpeedPop();
+  const pop = $("speedPop");
+  pop.classList.toggle("show");
+  if (pop.classList.contains("show")) $("speedFullIn").focus();
+};
+$("speedFullOk").onclick = () => {
+  const v = parseFloat($("speedFullIn").value);
+  if (!isFinite(v) || v <= 0 || v > 100000) { toast("满值须为正数（Mbps）", "err"); return; }
+  speedFullMbps = Math.round(v * 10) / 10;
+  $("speedPop").classList.remove("show");
+  persistSoon();
+  toast(`网速满值已设为 ${speedFullMbps} Mbps`, "ok");
+};
+$("speedFullIn").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("speedFullOk").click();
+  if (e.key === "Escape") $("speedPop").classList.remove("show");
+});
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".speed-pop") && !e.target.closest("#btnSpeedFull"))
+    $("speedPop").classList.remove("show");
+});
+
 /* ═══════════════ Theme / pin / maximize / window controls ═══════════════ */
 function applyTheme(mode) {
   document.documentElement.dataset.theme = mode;
@@ -965,7 +1273,11 @@ function applyTheme(mode) {
   $("icoSun").style.display = mode === "dark" ? "" : "none";
 }
 async function toggleTheme() {
-  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  const mode = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  applyTheme(mode);
+  // Re-paint the native form ring (9px resize padding) to match the theme,
+  // otherwise a light-launched window keeps a bright ring in dark mode.
+  try { api.call("apply_form_back", mode); } catch (_) {}
   persistSoon();
 }
 function applyPin(on) {
@@ -1062,8 +1374,7 @@ document.addEventListener("click", async (e) => {
 });
 
 /* ═══════════════ Wiring ═══════════════ */
-$("btnAllOn").onclick = () => allEndpoints(true);
-$("btnAllOff").onclick = () => allEndpoints(false);
+/* 全部关闭 lives on the vertical rail (vtRailOff) now. */
 $("btnTheme").onclick = toggleTheme;
 $("btnPin").onclick = togglePin;
 $("btnSettings").onclick = openSettings;
@@ -1092,6 +1403,31 @@ $("sbRefresh").onclick = () => refreshAll();
 $("inHost").addEventListener("input", () => { $("inHost").classList.remove("bad"); renderEndpoints(); });
 $("inPort").addEventListener("input", () => { $("inPort").classList.remove("bad"); renderPorts(); renderEndpoints(); });
 ["inHost", "inPort"].forEach((id) => $(id).addEventListener("change", persistSoon));
+
+/* Channel page tabs (status bar) */
+$("tabWin").onclick = () => setLane("win");
+$("tabWsl").onclick = () => setLane("wsl");
+
+/* Per-variable connectivity test chips: click -> test_channel(which); the
+   chip shows 测试中… while probing, then ✓ latency (green) or ✗ reason (red),
+   reverting to 测试 after 3s. Same-source chips (e.g. HTTP/HTTPS_PROXY rows)
+   share `data-test`, so a result is mirrored onto all of them. */
+document.addEventListener("click", async (e) => {
+  const chip = e.target.closest(".test-chip");
+  if (!chip || chip.classList.contains("testing")) return;
+  const which = chip.dataset.test;
+  const chips = [...document.querySelectorAll(`.test-chip[data-test="${which}"]`)];
+  chips.forEach((c) => { c.classList.remove("ok", "fail"); c.classList.add("testing"); c.textContent = "测试中"; });
+  let r;
+  try { r = await api.call("test_channel", which); }
+  catch (err) { r = { ok: false, error: String(err) }; }
+  chips.forEach((c) => {
+    c.classList.remove("testing");
+    if (r && r.ok) { c.classList.add("ok"); c.textContent = `✓ ${r.ms}ms`; }
+    else { c.classList.add("fail"); c.textContent = r && r.error ? "✗ " + r.error.slice(0, 14) : "✗ 失败"; }
+    setTimeout(() => { c.classList.remove("ok", "fail"); c.textContent = "测试"; }, 3000);
+  });
+});
 
 /* Double-click title bar empty area toggles maximize (standard behavior). */
 $("dragRegion").addEventListener("dblclick", (e) => {
@@ -1164,6 +1500,7 @@ async function boot() {
   applyPin(!!c.pin);
   cfg.ports = (c.ports || []).map(String);
   applyAlpha(c.card_alpha ?? 0.92);
+  speedFullMbps = Math.max(0.1, +c.speed_full || 5);
   cfg.bg_dim = c.bg_dim ?? 0.45;
   if (c.bg_path) {
     const bg = await api.call("get_background");

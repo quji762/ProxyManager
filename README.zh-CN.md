@@ -1,6 +1,6 @@
 # ProxyManager
 
-Windows 代理一键管理工具：PowerShell、WSL 与两端 Git 四个端点独立开关、端口快选、实时状态，Win11 风格界面。
+Windows 代理一键管理工具：PowerShell、WSL、两端 Git、npm 与 pip 八个端点经底部 Win / WSL 页签分页独立开关、端口快选、实时状态，Win11 风格界面。
 
 [English](./README.md) | **简体中文**
 
@@ -9,26 +9,36 @@ Windows 代理一键管理工具：PowerShell、WSL 与两端 Git 四个端点�
 
 ## 项目简介
 
-ProxyManager 是一个面向终端场景的 Windows 桌面代理管理工具，通过四个独立开关分别管理以下端点：
+ProxyManager 是一个面向终端场景的 Windows 桌面代理管理工具。底部状态栏提供 **Win / WSL 页签**——每个页面只显示该系统的端点与代理变量，Git、npm、pip 等软件每页只出现一次。所有开关相互独立：
+
+**Windows 页**
 
 - **PowerShell** — 写入 Windows 用户环境变量（`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`），并向系统广播变更，新开的终端即可生效
-- **WSL 终端** — 写入各发行版 `~/.bashrc` 中的受管代码块，覆盖所有已安装的用户发行版
-- **Git · Windows** — Windows 端 `git config --global` 代理
-- **Git · WSL** — WSL 各发行版内 `git config --global` 代理
+- **Git** — Windows 端 `git config --global` 代理
+- **npm** — 用户级 `~/.npmrc` 中的 `proxy` 与 `https-proxy`
+- **pip** — 用户级 `pip.ini`（`%APPDATA%\pip\pip.ini`）中 `[global]` 段的 `proxy`，`py -m pip` 与所有解释器的 pip 均会读取
+
+**WSL 页**（应用于所有已安装的用户发行版）
+
+- **WSL 终端** — 写入 `~/.bashrc` 中的受管代码块
+- **Git** — 各发行版内 `git config --global` 代理
+- **npm** — 各发行版 `~/.npmrc` 中的 `proxy` / `https-proxy`
+- **pip** — 各发行版 `~/.config/pip/pip.conf` 中 `[global]` 段的 `proxy`；禁用时会一并清理旧版 `~/.pip/pip.conf`
 
 界面是一个零构建的单页 Web 应用（`ui/index.html`），经 pywebview 渲染在 WebView2 中；所有涉及系统的操作都在 Python 后端（`proxy_manager.py`）完成。
 
-本工具只修改终端侧的代理配置（环境变量、`~/.bashrc`、`git config --global`），不会改动 Windows 系统代理。
+本工具只修改终端侧的代理配置（环境变量、`~/.bashrc`、`git config --global`、npm/pip 用户级配置文件），不会改动 Windows 系统代理。
 
 ## 功能特性
 
-- **四端点独立开关** — 各端点可单独启停；关闭时只移除本工具写入的配置，手动设置的值不受影响。
+- **环境变量测试** — 「环境变量」卡片中每个变量（HTTP_PROXY、Git、npm、pip，Windows / WSL 两页各自独立）带「测试」按钮，点击后经对应代理源发起真实连通性请求（Windows 走 urllib、WSL 内走 curl，目标 gstatic generate_204），绿色显示延迟、红色显示失败原因。
+- **八端点 Win/WSL 分页** — 底部状态栏页签在 Windows / WSL 两个页面间切换整页内容（端点、网络信息、环境变量随之联动），为后续新渠道预留空间；端点列表右侧两条纵向开关（全部开启 / 全部关闭）批量操作当前页，各端点亦可单独启停。关闭时只移除本工具写入的配置，手动设置的值不受影响。
 - **状态即真相** — 每次操作后开关都会按实际检测到的代理状态重新同步，操作失败时开关自动弹回。
 - **端口快选** — 预设端口一键切换（默认 7890 / 7892 / 7897，可自定义增删）；切换时已启用的端点自动以新端口重新应用。
-- **NAT 自适应** — WSL2 NAT 模式下自动将 `127.0.0.1` 替换为宿主网关 IP；镜像模式保持回环地址不变。
+- **NAT 自适应** — WSL2 NAT 模式下自动将 `127.0.0.1` 替换为宿主网关 IP（bashrc 受管块与 WSL 侧 npm/pip 端点）；镜像模式保持回环地址不变。
 - **回环直连** — 自动写入 `NO_PROXY`，本地回环流量不走代理；用户已有的 `NO_PROXY` 条目会被保留。
-- **实时遥测** — 主物理网卡实时网速、代理端口连通性每秒探测、本机/WSL IP、WSL 网络模式、两端代理变量（`psutil` 为可选依赖）。
-- **启用前检查** — 代理端口无监听、WSL 默认 shell 不是 bash、未找到 `git` 时，启用前都会先行提示。
+- **实时遥测** — 主物理网卡实时网速（进度条满格值可自定义，默认 5 Mbps）、代理端口连通性每秒探测、本机/WSL IP、WSL 网络模式、当前渠道的 Git / npm / pip 代理值（`psutil` 为可选依赖）。
+- **启用前检查** — 代理端口无监听、WSL 默认 shell 不是 bash、未找到 `git` 时，启用前都会先行提示（npm/pip 直接编辑配置文件，两个工具无需在 PATH 中）。
 - **Win11 风格界面** — 无边框窗口、边缘原生缩放、双击标题栏最大化、亮/暗主题、自定义背景图与遮罩/卡片不透明度调节、窗口置顶、关闭到系统托盘、开机自启。
 - **基础能力** — 配置持久化、单实例守卫（重复启动会唤醒已有窗口）、崩溃日志、应用内确认对话框、一键重启 WSL（网关变化时自动重新应用代理）。
 
@@ -38,6 +48,7 @@ ProxyManager 是一个面向终端场景的 Windows 桌面代理管理工具，�
 | --- | --- |
 | 窗口 / 运行时 | Python + [pywebview](https://pypi.org/project/pywebview/)（WebView2） |
 | 界面 | 单文件 HTML/CSS/JS（`ui/index.html`），无构建步骤 |
+| npm/pip 配置 | 直接行级编辑 `~/.npmrc` / `pip.ini`（不依赖 CLI；WSL 侧经 wsl.exe 拉取/回写） |
 | 系统托盘 | pystray + Pillow |
 | 遥测 | psutil（可选） |
 | 打包 | PyInstaller（`--onefile --windowed`） |
@@ -50,6 +61,7 @@ ProxyManager 是一个面向终端场景的 Windows 桌面代理管理工具，�
 - 源码运行：Python 3.9+；随附的 `start.bat` 与官方构建以 Python 3.13 为目标
 - WSL 功能需已安装 WSL 且至少有一个发行版
 - Git 端点需 `git` 在 `PATH` 中
+- npm/pip 端点无需两个工具已安装：配置文件由本工具直接编辑
 
 ## 安装
 
@@ -97,6 +109,10 @@ py -3.13 app.py
 | `wsl` | bool | `true` | WSL 端点开关状态 |
 | `git_win` | bool | `false` | Git · Windows 开关状态 |
 | `git_wsl` | bool | `false` | Git · WSL 开关状态 |
+| `npm` | bool | `false` | npm（Windows）开关状态 |
+| `pip` | bool | `false` | pip（Windows）开关状态 |
+| `npmwsl` | bool | `false` | npm（WSL）开关状态 |
+| `pipwsl` | bool | `false` | pip（WSL）开关状态 |
 | `pin` | bool | `false` | 窗口置顶 |
 | `mode` | string | `light` | 主题：`light` 或 `dark` |
 | `ports` | list | `[7890, 7892, 7897]` | 端口预设（最多 12 个） |
@@ -104,6 +120,7 @@ py -3.13 app.py
 | `bg_path` | string | `""` | 自定义背景图片路径 |
 | `bg_dim` | float | `0.45` | 背景遮罩强度（0.0–0.8） |
 | `card_alpha` | float | `0.92` | 卡片不透明度（0.5–1.0） |
+| `speed_full` | float | `5` | 实时网速进度条满格值（Mbps，0.1–100000） |
 
 旧版本的 `git` 布尔键会在加载时自动迁移为 `git_win` / `git_wsl`。
 
@@ -113,6 +130,8 @@ py -3.13 app.py
 - PowerShell 端点写的是用户环境变量，对变更之后新开的终端和进程生效。
 - 仅管理 `http://` 形式的代理，写入内容固定为 `http://host:port`。
 - WSL 侧的受管代码块与 git 代理会应用到所有用户发行版；Docker 基础设施发行版会被跳过。
+- npm/pip 代理写入用户级配置文件（Windows：`~/.npmrc`、`%APPDATA%\pip\pip.ini`；WSL：`~/.npmrc`、`~/.config/pip/pip.conf`），不会触碰项目级 `.npmrc`。当开关显示为「已启用」（即文件中存在代理值）时，关闭会移除该值——包括用户先前手动写入的值，因为工具无法区分二者。
+- WSL 侧 npm/pip 端点经 `wsl.exe` 读写配置文件，每次读取/写入都是一次 wsl.exe 往返，因此 WSL 开关的状态刷新比 Windows 侧慢。
 - 「重启 WSL」会终止 WSL 内正在运行的所有进程。
 
 ## 项目结构
@@ -120,7 +139,7 @@ py -3.13 app.py
 ```text
 ProxyManager/
 ├── app.py                     # 前端入口：pywebview 窗口、JS 桥、托盘、Win32 窗口逻辑
-├── proxy_manager.py           # 后端库：注册表 / WSL / git 操作、遥测、崩溃日志
+├── proxy_manager.py           # 后端库：注册表 / WSL / git / npm / pip 操作、遥测、崩溃日志
 ├── ui/
 │   └── index.html             # 零构建单页界面（HTML/CSS/JS）
 ├── assets/

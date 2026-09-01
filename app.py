@@ -7,9 +7,10 @@ library proxy_manager.py via the js_api bridge. Run:
 
     py -3.13 app.py        (or double-click start.bat)
 
-Config (config v2): host, port, powershell, wsl, git_win, git_wsl, pin,
-mode, ports (quick-select presets), autostart, bg_path, bg_dim, card_alpha.
-A legacy {"git": bool} key migrates into git_win/git_wsl on load.
+Config (config v2): host, port, powershell, wsl, git_win, git_wsl, npm, pip,
+npmwsl, pipwsl, pin, mode, ports (quick-select presets), autostart, bg_path,
+bg_dim, card_alpha. A legacy {"git": bool} key migrates into git_win/git_wsl
+on load.
 
 Window operations avoid pywebview's set_on_top (it writes WinForms TopMost
 from the js_api worker thread and deadlocks the UI - see memory): pin and
@@ -52,6 +53,7 @@ def load_config():
     defaults = {
         "host": pm.DEFAULT_HOST, "port": pm.DEFAULT_PORT,
         "powershell": True, "wsl": True, "git_win": False, "git_wsl": False,
+        "npm": False, "pip": False, "npmwsl": False, "pipwsl": False,
         "pin": False, "mode": "light", "ports": list(DEFAULT_PORTS),
         "autostart": False, "bg_path": "", "bg_dim": 0.45, "card_alpha": 0.92,
     }
@@ -78,7 +80,8 @@ def load_config():
         out["port"] = str(int(out["port"]))
     else:
         out["port"] = defaults["port"]
-    for k in ("powershell", "wsl", "git_win", "git_wsl", "pin", "autostart"):
+    for k in ("powershell", "wsl", "git_win", "git_wsl", "npm", "pip",
+              "npmwsl", "pipwsl", "pin", "autostart"):
         out[k] = bool(cfg.get(k, defaults[k]))
     if out["mode"] not in ("light", "dark"):
         out["mode"] = "light"
@@ -105,6 +108,11 @@ def load_config():
         out["card_alpha"] = min(1.0, max(0.5, a))
     except (TypeError, ValueError):
         pass
+    try:
+        s = float(cfg.get("speed_full", 5))
+        out["speed_full"] = round(s, 1) if 0 < s <= 100000 else 5
+    except (TypeError, ValueError):
+        out["speed_full"] = 5
     return out
 
 
@@ -123,8 +131,8 @@ def save_config(cfg):
                 pass
             cur.update({k: cfg[k] for k in (
                 "host", "port", "powershell", "wsl", "git_win", "git_wsl",
-                "pin", "mode", "ports", "autostart", "bg_path", "bg_dim",
-                "card_alpha")})
+                "npm", "pip", "npmwsl", "pipwsl", "pin", "mode", "ports",
+                "autostart", "bg_path", "bg_dim", "card_alpha", "speed_full")})
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(cur, f, indent=2, ensure_ascii=False)
         except OSError:
@@ -463,6 +471,7 @@ class Api:
             "bg_path": cfg.get("bg_path", ""),
             "bg_dim": cfg.get("bg_dim", 0.45),
             "card_alpha": cfg.get("card_alpha", 0.92),
+            "speed_full": cfg.get("speed_full", 5),
         }
 
     def save_config(self, data):
@@ -480,7 +489,8 @@ class Api:
                 if pm._is_valid_port(p):
                     self.port = str(int(p))
             cfg["host"], cfg["port"] = self.host, self.port
-            for k in ("powershell", "wsl", "git_win", "git_wsl", "pin"):
+            for k in ("powershell", "wsl", "git_win", "git_wsl", "npm", "pip",
+                      "npmwsl", "pipwsl", "pin"):
                 if k in data:
                     cfg[k] = bool(data[k])
             if "mode" in data:
@@ -509,6 +519,13 @@ class Api:
                     cfg["card_alpha"] = min(1.0, max(0.5, float(data["card_alpha"])))
                 except (TypeError, ValueError):
                     pass
+            if "speed_full" in data:
+                try:
+                    v = float(data["speed_full"])
+                    if 0 < v <= 100000:
+                        cfg["speed_full"] = round(v, 1)
+                except (TypeError, ValueError):
+                    pass
             save_config(cfg)
         return True
 
@@ -523,6 +540,14 @@ class Api:
                     "vars": pm.get_wsl_proxy_vars(block), "git": wgit}
         if which == "gitwin":
             return pm.get_git_proxy_win()
+        if which == "npm":
+            return pm.get_npm_proxy()
+        if which == "pip":
+            return pm.get_pip_proxy()
+        if which == "npmwsl":
+            return pm.get_npm_proxy_wsl()
+        if which == "pipwsl":
+            return pm.get_pip_proxy_wsl()
         if which == "ip":
             return pm.get_local_ip()
         if which == "mode":
@@ -560,12 +585,22 @@ class Api:
                 return {"confirm": "shell",
                         "message": f"WSL 默认 shell 是 {shell}，而代理写入的是 ~/.bashrc"
                                    "（只有 bash 会读取它）。\n仍要继续写入吗？"}
-        if target in ("gitwsl", "all") and not pm.wsl_available():
+        if target in ("gitwsl", "npmwsl", "pipwsl", "all") and not pm.wsl_available():
             return {"error": "未检测到可用的 WSL 发行版"}
         if target in ("gitwin", "all"):
             import shutil
             if not shutil.which("git"):
                 return {"error": "未找到 git，请确认已安装 Git"}
+        if target == "npm":
+            # The config-file write itself never needs the npm CLI, but if
+            # Node.js isn't even on PATH the endpoint is probably pointless —
+            # ask instead of failing (pip is skipped: `py -m pip` etc. can't
+            # be detected reliably and the file is always honored).
+            import shutil
+            if not shutil.which("npm"):
+                return {"confirm": "npm",
+                        "message": "PATH 上未检测到 npm（Node.js）。\n"
+                                   "仍要写入 ~/.npmrc 代理配置吗？"}
         return {"ok": True}
 
     def do_toggle(self, target, on, host=None, port=None):
@@ -610,6 +645,36 @@ class Api:
                 self._git_managed[target] = None
                 if ret is not True:
                     return {"error": f"{label}: {ret}"}
+        elif target in ("npm", "pip"):
+            if not on:
+                # Surgical unset needs the URL this tool wrote, not whatever
+                # the fields hold now (the user may have edited them since):
+                # prefer the value actually in the config file.
+                cur = pm.get_npm_proxy() if target == "npm" else pm.get_pip_proxy()
+                if cur and cur.startswith("http://"):
+                    ch, _, cp = cur[len("http://"):].rpartition(":")
+                    if ch and pm._is_valid_port(cp):
+                        h, p = ch, cp
+            fn = pm.set_npm_proxy if target == "npm" else pm.set_pip_proxy
+            ret = fn(h, p, on)
+            if ret is not True:
+                return {"error": f"{target}: {ret}"}
+        elif target in ("npmwsl", "pipwsl"):
+            if on and h.lower() in pm.LOOPBACK_HOSTS \
+                    and pm.get_wsl_network_mode() != "Mirrored":
+                notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
+            if not on:
+                # Same rationale as the Windows npm/pip endpoints: unset the
+                # value actually present in the distro's config file.
+                cur = pm.get_npm_proxy_wsl() if target == "npmwsl" else pm.get_pip_proxy_wsl()
+                if cur and cur.startswith("http://"):
+                    ch, _, cp = cur[len("http://"):].rpartition(":")
+                    if ch and pm._is_valid_port(cp):
+                        h, p = ch, cp
+            fn = pm.set_npm_proxy_wsl if target == "npmwsl" else pm.set_pip_proxy_wsl
+            ret = fn(h, p, on)
+            if ret is not True:
+                return {"error": f"{target}: {ret}"}
         else:
             return {"error": f"未知端点 {target}"}
         return {"ok": True, "note": "；".join(notes) if notes else None}
@@ -652,6 +717,10 @@ class Api:
             "wsl": bool((wsl_state or {}).get("on")),
             "gitwin": pm.get_git_proxy_win() == managed_url,
             "gitwsl": (wsl_state or {}).get("git") == managed_url,
+            "npm": pm.get_npm_proxy() == managed_url,
+            "pip": pm.get_pip_proxy() == managed_url,
+            "npmwsl": pm.get_npm_proxy_wsl() == managed_url,
+            "pipwsl": pm.get_pip_proxy_wsl() == managed_url,
         }
         if not any(enabled.values()):
             self.host, self.port = old_h, new_port
@@ -677,6 +746,22 @@ class Api:
                 ret = pm.set_git_proxy(old_h, old_p, False, use_wsl=use_wsl)
                 if ret is not True:
                     dis_errs[tgt] = f"{label}: {ret}"
+        if enabled["npm"]:
+            ret = pm.set_npm_proxy(old_h, old_p, False)
+            if ret is not True:
+                dis_errs["npm"] = f"npm: {ret}"
+        if enabled["pip"]:
+            ret = pm.set_pip_proxy(old_h, old_p, False)
+            if ret is not True:
+                dis_errs["pip"] = f"pip: {ret}"
+        if enabled["npmwsl"]:
+            ret = pm.set_npm_proxy_wsl(old_h, old_p, False)
+            if ret is not True:
+                dis_errs["npmwsl"] = f"npm(WSL): {ret}"
+        if enabled["pipwsl"]:
+            ret = pm.set_pip_proxy_wsl(old_h, old_p, False)
+            if ret is not True:
+                dis_errs["pipwsl"] = f"pip(WSL): {ret}"
 
         self.host, self.port = old_h, new_port
         with _cfg_lock:
@@ -706,6 +791,30 @@ class Api:
                         self._git_managed[tgt] = (old_h, new_port)
                     else:
                         errs[tgt] = f"{label}: {ret}"
+            if enabled["npm"]:
+                ret = pm.set_npm_proxy(old_h, new_port, True)
+                if ret is True:
+                    applied.append("npm")
+                else:
+                    errs["npm"] = f"npm: {ret}"
+            if enabled["pip"]:
+                ret = pm.set_pip_proxy(old_h, new_port, True)
+                if ret is True:
+                    applied.append("pip")
+                else:
+                    errs["pip"] = f"pip: {ret}"
+            if enabled["npmwsl"]:
+                ret = pm.set_npm_proxy_wsl(old_h, new_port, True)
+                if ret is True:
+                    applied.append("npmwsl")
+                else:
+                    errs["npmwsl"] = f"npm(WSL): {ret}"
+            if enabled["pipwsl"]:
+                ret = pm.set_pip_proxy_wsl(old_h, new_port, True)
+                if ret is True:
+                    applied.append("pipwsl")
+                else:
+                    errs["pipwsl"] = f"pip(WSL): {ret}"
             if "wsl" in applied and old_h.lower() in pm.LOOPBACK_HOSTS \
                     and pm.get_wsl_network_mode() != "Mirrored":
                 notes.append("NAT 模式已自动改用宿主网关 IP。")
@@ -779,6 +888,119 @@ class Api:
                            creationflags=0x08000000, check=True)  # CREATE_NO_WINDOW
             return True
         except Exception:
+            return False
+
+    def test_channel(self, which):
+        """Connectivity probe for one proxy variable chip. which selects the
+        proxy source:
+          ps / gitwin / npm / pip  -> Windows user proxy sources
+          wsl / gitwsl / npmwsl / pipwsl -> WSL-side sources
+        The probe fetches a lightweight URL THROUGH the corresponding proxy
+        (source read from the same config files/env the tool manages) and
+        reports success + latency. Direct (no-proxy) probes are NOT done.
+        """
+        import time as _t
+        import urllib.request as _urlreq
+
+        sources = {
+            # Windows side
+            "ps":     pm.get_ps_proxy_vars,      # env vars
+            "gitwin": lambda: {"HTTP_PROXY": pm.get_git_proxy_win()},
+            "npm":    lambda: {"HTTP_PROXY": pm.get_npm_proxy()},
+            "pip":    lambda: {"HTTP_PROXY": pm.get_pip_proxy()},
+        }
+        fn = sources.get(which)
+        if fn:
+            vars_ = fn()
+            url = vars_.get("HTTP_PROXY") or vars_.get("HTTPS_PROXY")
+            if not url or not str(url).startswith("http"):
+                return {"ok": False, "error": "未设置代理，无法测试"}
+            host, _, port = str(url)[len("http://"):].rpartition(":")
+            if not host or not pm._is_valid_port(port):
+                return {"ok": False, "error": f"代理地址无效：{url}"}
+            return self._proxy_probe(host, int(port), _t, _urlreq)
+        # WSL side: the proxy URL lives inside the distro; probe THROUGH it
+        # from within WSL so the path matches what npm/pip/git will use.
+        wsl_state = self.refresh_item("wsl") if which == "gitwsl" else None
+        wsl_sources = {
+            "wsl":    lambda: pm.get_wsl_proxy_vars(),
+            "gitwsl": lambda: {"HTTP_PROXY": (wsl_state or {}).get("git", "未设置")},
+            "npmwsl": lambda: {"HTTP_PROXY": pm.get_npm_proxy_wsl()},
+            "pipwsl": lambda: {"HTTP_PROXY": pm.get_pip_proxy_wsl()},
+        }
+        wfn = wsl_sources.get(which)
+        if not wfn:
+            return {"ok": False, "error": f"未知渠道 {which}"}
+        url = (wfn() or {}).get("HTTP_PROXY")
+        if not url or not str(url).startswith("http"):
+            return {"ok": False, "error": "未设置代理，无法测试"}
+        host, _, port = str(url)[len("http://"):].rpartition(":")
+        if not host or not pm._is_valid_port(port):
+            return {"ok": False, "error": f"代理地址无效：{url}"}
+        # Probe from inside WSL (curl) so NAT/mirrored routing matches reality.
+        return self._wsl_proxy_probe(host, int(port))
+
+    def _proxy_probe(self, host, port, _t, urlreq):
+        """Fetch a generate_204 URL through host:port, returning {ok, ms} or
+        {ok: False, error}. `urlreq` is the urllib.request module."""
+        proxy = urlreq.ProxyHandler({
+            "http": f"http://{host}:{port}", "https": f"http://{host}:{port}"})
+        opener = urlreq.build_opener(proxy)
+        t0 = _t.perf_counter()
+        try:
+            req = urlreq.Request(
+                "http://www.gstatic.com/generate_204",
+                headers={"User-Agent": "ProxyManager/2"})
+            with opener.open(req, timeout=8) as resp:
+                ok = resp.status == 204
+            ms = int((_t.perf_counter() - t0) * 1000)
+            return {"ok": ok, "ms": ms} if ok else {"ok": False, "error": f"HTTP {resp.status}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:120] or "连接失败"}
+
+    def _wsl_proxy_probe(self, host, port):
+        """Same probe executed inside WSL via curl (through the proxy)."""
+        script = (f"curl -x http://{host}:{port} -s -o /dev/null -w '%{{http_code}} %{{time_total}}' "
+                  f"--max-time 8 http://www.gstatic.com/generate_204 2>/dev/null; echo")
+        try:
+            r = subprocess.run(
+                ["wsl", "-e", "bash", "-c", script],
+                capture_output=True, text=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            out = (r.stdout or "").strip().split()
+            if len(out) == 2 and out[0] == "204":
+                return {"ok": True, "ms": int(float(out[1]) * 1000)}
+            if not pm.wsl_available():
+                return {"ok": False, "error": "WSL 不可用"}
+            return {"ok": False, "error": f"HTTP {out[0]}" if out else "连接失败"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:120] or "连接失败"}
+
+    def apply_form_back(self, mode):
+        """Re-paint the WinForms Form background to match the theme. The form
+        shows through the 9px padded ring used for edge resizing; its color is
+        only chosen at window creation, so switching to dark at runtime left
+        a bright ring around the page. Same marshaling as
+        _apply_window_padding (Invoke to the UI thread)."""
+        try:
+            form = getattr(self._window, "native", None) if self._window else None
+            if form is None:
+                return False
+            from System import Type, Func  # noqa: E402
+            from System.Drawing import Color  # noqa: E402
+
+            def _set():
+                form.BackColor = Color.FromArgb(0x1B, 0x1B, 0x21) if mode == "dark" \
+                    else Color.FromArgb(0xF7, 0xF6, 0xFB)
+
+            if form.InvokeRequired:
+                form.Invoke(Func[Type](_set))
+            else:
+                _set()
+            return True
+        except Exception:
+            if os.environ.get("PM_DEBUG"):
+                print(f"[pm] form back recolor failed", flush=True)
             return False
 
     # ── custom background ──

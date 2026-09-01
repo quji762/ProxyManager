@@ -1,6 +1,6 @@
 # ProxyManager
 
-One-click proxy management for PowerShell, WSL, and Git on Windows: four independent switches, port presets, and live status in a Windows 11-style interface.
+One-click proxy management for PowerShell, WSL, Git, npm, and pip on Windows: eight independent switches across Windows and WSL channel pages, port presets, and live status in a Windows 11-style interface.
 
 **English** | [简体中文](./README.zh-CN.md)
 
@@ -9,26 +9,36 @@ One-click proxy management for PowerShell, WSL, and Git on Windows: four indepen
 
 ## Overview
 
-ProxyManager is a Windows desktop app that toggles HTTP proxy settings for terminal workflows. It manages four endpoints, each with its own on/off switch:
+ProxyManager is a Windows desktop app that toggles HTTP proxy settings for terminal workflows. The status bar hosts **Win / WSL page tabs** — each page shows that system's own endpoints and variables, so every tool (Git, npm, pip) appears exactly once per page. All switches are independent:
+
+**Windows page**
 
 - **PowerShell** — Windows user environment variables (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`), broadcast to the system so new terminals pick them up
-- **WSL terminal** — a managed block inside `~/.bashrc`, applied to every installed user distro
-- **Git · Windows** — global `git config` proxy on the Windows side
-- **Git · WSL** — global `git config` proxy inside each WSL distro
+- **Git** — global `git config` proxy on the Windows side
+- **npm** — `proxy` and `https-proxy` in the user-level `~/.npmrc`
+- **pip** — `proxy` under `[global]` in the user-level `pip.ini` (`%APPDATA%\pip\pip.ini`), so `py -m pip` and every interpreter's pip honor it too
+
+**WSL page** (applied to every installed user distro)
+
+- **WSL terminal** — a managed block inside `~/.bashrc`
+- **Git** — global `git config` proxy inside each distro
+- **npm** — `proxy` / `https-proxy` in each distro's `~/.npmrc`
+- **pip** — `proxy` under `[global]` in each distro's `~/.config/pip/pip.conf`; the legacy `~/.pip/pip.conf` is also cleaned on disable
 
 The interface is a zero-build single-page web app (`ui/index.html`) rendered in WebView2 through pywebview; all system operations run in the Python backend (`proxy_manager.py`).
 
-The tool only touches terminal-side settings (environment variables, `~/.bashrc`, `git config --global`). It never modifies the Windows system proxy.
+The tool only touches terminal-side settings (environment variables, `~/.bashrc`, `git config --global`, npm/pip user config files). It never modifies the Windows system proxy.
 
 ## Features
 
-- **Four independent switches** — enable or disable each endpoint separately; disabling removes exactly what the tool wrote and leaves manually configured values intact.
+- **Env-var connectivity test** — every variable in the "环境变量" card (HTTP_PROXY, Git, npm, pip; separate per page) carries a 测试 button that fires a real request THROUGH that proxy source (urllib on Windows, curl inside WSL, targeting gstatic's generate_204) and shows latency in green or the failure reason in red.
+- **Eight independent switches on Win/WSL pages** — the status-bar tabs switch the whole page between the Windows and WSL views (endpoints, network info, and env variables all follow), leaving room for future channels; two vertical rails beside the endpoint list (全部开启 / 全部关闭) batch-toggle the current page, and each endpoint can still be toggled separately. Disabling removes exactly what the tool wrote and leaves manually configured values intact.
 - **Switches reflect reality** — every toggle is re-synced from the actually detected proxy state, so a failed operation reverts the switch automatically.
 - **Port quick-switch** — one-click switching between preset ports (7890 / 7892 / 7897 by default, fully customizable); enabled endpoints are re-applied with the new port automatically.
-- **NAT-aware WSL proxy** — in WSL2 NAT mode, `127.0.0.1` is automatically replaced with the host gateway IP; mirrored mode keeps the loopback address unchanged.
+- **NAT-aware WSL proxy** — in WSL2 NAT mode, `127.0.0.1` is automatically replaced with the host gateway IP (bashrc block and WSL npm/pip endpoints); mirrored mode keeps the loopback address unchanged.
 - **Loopback bypass** — `NO_PROXY` is written automatically so local traffic stays direct; your existing `NO_PROXY` entries are preserved.
-- **Live telemetry** — real-time network speed of the primary physical interface, proxy-port connectivity probe every second, local/WSL IP, WSL networking mode, and current proxy variables on both sides (`psutil` optional).
-- **Pre-flight checks** — warns before enabling when nothing listens on the proxy port, when the WSL default shell is not bash, or when `git` is missing.
+- **Live telemetry** — real-time network speed of the primary physical interface (spark-bar full scale customizable, 5 Mbps by default), proxy-port connectivity probe every second, local/WSL IP, WSL networking mode, and the current lane's Git / npm / pip proxy values (`psutil` optional).
+- **Pre-flight checks** — warns before enabling when nothing listens on the proxy port, when the WSL default shell is not bash, or when `git` is missing (npm/pip config files are written directly, so neither tool needs to be on `PATH`).
 - **Windows 11-style UI** — frameless window with native edge resizing, double-click title bar to maximize, light/dark themes, custom background image with dimming and card opacity controls, always-on-top, close-to-tray, and autostart at login.
 - **Under the hood** — config persistence, single-instance guard (a second launch wakes the existing window), crash logging, in-app confirm dialogs, and a one-click WSL restart that re-applies the proxy when the NAT gateway changes.
 
@@ -38,6 +48,7 @@ The tool only touches terminal-side settings (environment variables, `~/.bashrc`
 | --- | --- |
 | Window / runtime | Python + [pywebview](https://pypi.org/project/pywebview/) on WebView2 |
 | UI | Single-file HTML/CSS/JS (`ui/index.html`), no build step |
+| npm/pip config | Direct INI editing of `~/.npmrc` / `pip.ini` (no CLI dependency; WSL side pulled/pushed over wsl.exe) |
 | Tray icon | pystray + Pillow |
 | Telemetry | psutil (optional) |
 | Packaging | PyInstaller (`--onefile --windowed`) |
@@ -50,6 +61,7 @@ The tool only touches terminal-side settings (environment variables, `~/.bashrc`
 - Running from source: Python 3.9+; the bundled `start.bat` and the official builds target Python 3.13
 - WSL with at least one distro installed — only needed for the WSL endpoints
 - Git on `PATH` — only needed for the Git endpoints
+- npm/pip endpoints work without either tool installed: the config files are edited directly
 
 ## Installation
 
@@ -97,6 +109,10 @@ The app stores its settings in `%APPDATA%\ProxyManager\config.json` and manages 
 | `wsl` | bool | `true` | WSL endpoint switch state |
 | `git_win` | bool | `false` | Git · Windows switch state |
 | `git_wsl` | bool | `false` | Git · WSL switch state |
+| `npm` | bool | `false` | npm (Windows) switch state |
+| `pip` | bool | `false` | pip (Windows) switch state |
+| `npmwsl` | bool | `false` | npm (WSL) switch state |
+| `pipwsl` | bool | `false` | pip (WSL) switch state |
 | `pin` | bool | `false` | Always-on-top window |
 | `mode` | string | `light` | Theme: `light` or `dark` |
 | `ports` | list | `[7890, 7892, 7897]` | Port presets (up to 12) |
@@ -104,6 +120,7 @@ The app stores its settings in `%APPDATA%\ProxyManager\config.json` and manages 
 | `bg_path` | string | `""` | Custom background image path |
 | `bg_dim` | float | `0.45` | Background dimming (0.0–0.8) |
 | `card_alpha` | float | `0.92` | Card opacity (0.5–1.0) |
+| `speed_full` | float | `5` | Spark-bar full-scale speed in Mbps (0.1–100000) |
 
 A legacy `git` boolean key from older versions is migrated into `git_win` / `git_wsl` automatically on load.
 
@@ -113,6 +130,8 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 - The PowerShell endpoint sets user environment variables, which apply to terminals and processes started after the change.
 - Only `http://` proxy URLs are managed; the tool writes `http://host:port` exactly.
 - In WSL, the managed block and git proxy are applied to every user distro; Docker infrastructure distros are skipped.
+- npm/pip proxies are written to the user-level config files (`~/.npmrc`, `%APPDATA%\pip\pip.ini` on Windows; `~/.npmrc`, `~/.config/pip/pip.conf` in WSL). Project-level `.npmrc` files are never touched. When a switch reads as "on" (i.e. the file contains a proxy value), turning it off removes that value — including one you entered by hand before, since the tool cannot tell them apart.
+- The WSL npm/pip endpoints read back and modify config files over `wsl.exe`; every read/write round-trip costs a wsl.exe call, so the WSL switches refresh a bit slower than the Windows ones.
 - **Restart WSL** terminates all processes running inside WSL.
 
 ## Project Structure
@@ -120,7 +139,7 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 ```text
 ProxyManager/
 ├── app.py                     # Front-end entry: pywebview window, JS bridge, tray, Win32 window logic
-├── proxy_manager.py           # Back-end library: registry / WSL / git operations, telemetry, crash log
+├── proxy_manager.py           # Back-end library: registry / WSL / git / npm / pip operations, telemetry, crash log
 ├── ui/
 │   └── index.html             # Zero-build single-page UI (HTML/CSS/JS)
 ├── assets/

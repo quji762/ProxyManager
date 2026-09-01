@@ -681,6 +681,339 @@ def get_git_proxy_win():
         return "未检测到"
 
 
+# ─── npm / pip endpoints ──────────────────────────────────────────────────────
+# Both tools are configured by editing their user-level INI-style config file
+# directly (npm: ~/.npmrc, pip: %APPDATA%\pip\pip.ini) instead of shelling out
+# to `npm config` / `pip config`: no PATH dependency, no multi-second CLI
+# startup, and every byte we don't own (comments, registry lines, other keys)
+# survives untouched. Same disable contract as the git endpoints: only values
+# equal to this tool's managed URL are removed, so a proxy the user set by
+# hand for another endpoint is never clobbered.
+
+NPM_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".npmrc")
+NPM_PROXY_KEYS = ("proxy", "https-proxy")
+
+
+def _pip_config_path():
+    """pip's Windows user config (%APPDATA%\\pip\\pip.ini). The legacy
+    %USERPROFILE%\\pip\\pip.ini is left alone — pip itself still reads it,
+    but the APPDATA path is what modern pip writes and what users expect."""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "pip", "pip.ini")
+
+
+def _read_ini(path):
+    """Read an INI-ish file as (text, encoding). Tries UTF-8 (BOM optional)
+    then the ANSI codepage: pip reads its config with the locale encoding, so
+    a hand-edited pip.ini with GBK comments must round-trip as GBK instead of
+    being force-converted. The returned encoding is reused on write."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        return raw.decode("utf-8-sig"), "utf-8-sig"
+    except UnicodeDecodeError:
+        return raw.decode("mbcs", errors="replace"), "mbcs"
+
+
+def _ini_get(text, key):
+    """Value of `key` in flat INI text, or None when absent. Quotes stripped."""
+    m = re.search(rf"(?im)^[ \t]*{re.escape(key)}[ \t]*[:=][ \t]*(.*?)[ \t]*$",
+                  text)
+    if not m:
+        return None
+    return m.group(1).strip().strip('"').strip("'") or None
+
+
+def _ini_edit(text, keys, url, equals, section=None, eol="\n"):
+    """Rewrite `keys` lines in INI text: set them to `url`, or (url=None)
+    remove each line whose value equals `equals` — surgical removal, so a
+    user-set proxy for a different endpoint survives a disable. Keys absent
+    from the file are appended right after the `[section]` header when one is
+    named (pip reads proxy from a section), else at the end (npm's .npmrc is
+    flat). Every other line, key style (`:` vs `=`), quoting and line ending
+    is preserved; appended lines use `eol` (the file's own dominant ending).
+    Returns the new text."""
+    line_re = re.compile(
+        r"^([ \t]*)(" + "|".join(re.escape(k) for k in keys)
+        + r")([ \t]*[:=][ \t]*)(.*?)([ \t]*)$", re.IGNORECASE)
+    sec_re = re.compile(rf"^[ \t]*\[{re.escape(section)}\][ \t]*$",
+                        re.IGNORECASE) if section else None
+    out, seen, sec_at = [], set(), None
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if sec_re and sec_re.match(body):
+            sec_at = len(out)
+        m = line_re.match(body)
+        if not m:
+            out.append(line)
+            continue
+        seen.add(m.group(2).lower())
+        cur = m.group(4).strip().strip('"').strip("'")
+        if url is None:
+            if cur and cur != equals:
+                out.append(line)  # user's own value: untouched
+                continue
+            continue              # our line: dropped entirely
+        q = m.group(4)[:1] if m.group(4)[:1] in "\"'" else ""
+        out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{q}{url}{q}"
+                   f"{line[len(body):]}")
+    missing = [k for k in keys if k not in seen]
+    if url is not None and missing:
+        add = "".join(f"{k} = {url}{eol}" for k in missing)
+        if sec_at is not None:
+            if not out[sec_at].endswith(("\n", "\r")):
+                out[sec_at] += eol
+            out.insert(sec_at + 1, add)
+        else:
+            if out and not out[-1].endswith(("\n", "\r")):
+                out[-1] += eol
+            if section:
+                out.append(f"{eol if out else ''}[{section}]{eol}{add}")
+            else:
+                out.append(add)
+    return "".join(out)
+
+
+def _eol_of(text):
+    """Dominant line ending of an INI text (CRLF wins when present)."""
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def get_npm_proxy():
+    """npm's user-level proxy ('未设置' when no config/no key, '未检测到' when
+    the file exists but can't be read)."""
+    try:
+        text, _enc = _read_ini(NPM_CONFIG_PATH)
+    except FileNotFoundError:
+        return "未设置"
+    except OSError:
+        return "未检测到"
+    return _ini_get(text, "proxy") or "未设置"
+
+
+def set_npm_proxy(host, port, enable=True):
+    """Write/clear npm's proxy + https-proxy in ~/.npmrc. npm re-reads this
+    file on every invocation, so the next npm command picks the change up.
+    Disable is best-effort: a missing file means nothing to clean up."""
+    url = f"http://{host}:{port}"
+    try:
+        try:
+            text, _enc = _read_ini(NPM_CONFIG_PATH)
+        except FileNotFoundError:
+            if not enable:
+                return True
+            text = ""
+        new = _ini_edit(text, NPM_PROXY_KEYS, url if enable else None,
+                        equals=url, eol=_eol_of(text))
+        if new != text:
+            os.makedirs(os.path.dirname(NPM_CONFIG_PATH), exist_ok=True)
+            # newline="" keeps \r\n verbatim (text mode would translate \n
+            # to \r\n and double the \r on CRLF files). Always plain UTF-8:
+            # it's the only encoding npm reads.
+            with open(NPM_CONFIG_PATH, "w", encoding="utf-8", newline="") as f:
+                f.write(new)
+        return True
+    except OSError as e:
+        return True if not enable else str(e)
+
+
+def get_pip_proxy():
+    """pip's user-config proxy ('未设置' / '未检测到', same semantics as npm)."""
+    try:
+        text, _enc = _read_ini(_pip_config_path())
+    except FileNotFoundError:
+        return "未设置"
+    except OSError:
+        return "未检测到"
+    return _ini_get(text, "proxy") or "未设置"
+
+
+def set_pip_proxy(host, port, enable=True):
+    """Write/clear the proxy key pip reads: `proxy` under [global] (--proxy is
+    a general option in pip, so global.proxy applies to every pip command,
+    not just `pip install`). File-based, so it applies to every interpreter's
+    pip including `py -m pip` without pip.exe on PATH. Disable is
+    best-effort."""
+    url = f"http://{host}:{port}"
+    path = _pip_config_path()
+    try:
+        try:
+            text, enc = _read_ini(path)
+        except FileNotFoundError:
+            if not enable:
+                return True
+            text, enc = "", "utf-8"
+        new = _ini_edit(text, ("proxy",), url if enable else None,
+                        equals=url, section="global", eol=_eol_of(text))
+        if new != text:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding=enc, newline="") as f:
+                f.write(new)
+        return True
+    except OSError as e:
+        return True if not enable else str(e)
+
+
+# ─── npm / pip inside WSL ─────────────────────────────────────────────────────
+# Same contract as every other endpoint, but the config files live inside each
+# distro. Reads pull the file back over wsl.exe stdout and edits happen on the
+# Windows side with the same _ini_edit used for the Windows files; writes push
+# the bytes back over stdin (never through shell interpolation — same channel
+# the ~/.bashrc block uses). Linux config paths differ from Windows:
+#   npm: ~/.npmrc (same name)
+#   pip: ~/.config/pip/pip.conf (XDG); the legacy ~/.pip/pip.conf is also
+#        cleaned surgically on disable, but only the XDG path is written.
+
+_NPMrc_PATH_WSL = "~/.npmrc"
+_PIP_CONF_PATH_WSL = "~/.config/pip/pip.conf"
+_PIP_CONF_LEGACY_WSL = "~/.pip/pip.conf"
+
+
+def _wsl_pull_file(distro, path):
+    """Read a file from a distro, or None when it doesn't exist. Output is
+    raw bytes so binary-ish content (GBK comments, BOM) round-trips."""
+    cmd = (f'if [ -f "{path}" ]; then cat "{path}"; else exit 3; fi')
+    r = subprocess.run(
+        ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", cmd],
+        capture_output=True, timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    if r.returncode == 3:
+        return None
+    if r.returncode != 0:
+        raise OSError(f"读取 {path} 失败（exit {r.returncode}）")
+    return r.stdout
+
+
+def _wsl_push_file(distro, path, data: bytes):
+    """Atomically replace a file in a distro with `data` (arrives on stdin)."""
+    script = (f'tmp=$(mktemp) && cat > "$tmp" && '
+              f'mkdir -p "$(dirname "{path}")" && cat "$tmp" > "{path}" && rm -f "$tmp"')
+    r = subprocess.run(
+        ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", script],
+        input=data, capture_output=True, timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    if r.returncode != 0:
+        raise OSError(f"写入 {path} 失败（exit {r.returncode}）")
+
+
+def _wsl_edit_ini(distro, path, keys, url, equals, section=None):
+    """Pull → _ini_edit → push one config file in one distro. Returns False
+    (no error) when the file doesn't exist on a disable; True when changed or
+    identical; raises OSError on wsl failures."""
+    data = _wsl_pull_file(distro, path)
+    if data is None:
+        if url is None:
+            return False
+        text, enc, eol = "", "utf-8", "\n"
+    else:
+        text = data.decode("utf-8-sig")
+        enc, eol = "utf-8-sig" if data[:3] == b"\xef\xbb\xbf" else "utf-8", _eol_of(text)
+    new = _ini_edit(text, keys, url, equals=equals, section=section, eol=eol)
+    if new == text:
+        return True
+    _wsl_push_file(distro, path, new.encode(enc))
+    return True
+
+
+def get_npm_proxy_wsl(distro=None):
+    """npm proxy inside the distro(s). Reads every user distro and returns
+    the first proxy found (multi-distro setups are rare and usually kept in
+    sync; the badge shows one URL). '未设置' / '未检测到' as elsewhere."""
+    try:
+        for d in (_wsl_distros() or [""]):
+            try:
+                data = _wsl_pull_file(d, _NPMrc_PATH_WSL)
+            except OSError:
+                return "未检测到"
+            if data is None:
+                continue
+            v = _ini_get(data.decode("utf-8-sig"), "proxy")
+            if v:
+                return v
+        return "未设置"
+    except Exception:
+        return "未检测到"
+
+
+def get_pip_proxy_wsl(distro=None):
+    """pip proxy inside the distro(s): XDG pip.conf first, then the legacy
+    ~/.pip/pip.conf (both are read by pip itself, in that order)."""
+    try:
+        for d in (_wsl_distros() or [""]):
+            for path in (_PIP_CONF_PATH_WSL, _PIP_CONF_LEGACY_WSL):
+                try:
+                    data = _wsl_pull_file(d, path)
+                except OSError:
+                    return "未检测到"
+                if data is None:
+                    continue
+                v = _ini_get(data.decode("utf-8-sig"), "proxy")
+                if v:
+                    return v
+        return "未设置"
+    except Exception:
+        return "未检测到"
+
+
+def set_npm_proxy_wsl(host, port, enable=True):
+    """Write/clear npm's proxy + https-proxy in every user distro's ~/.npmrc.
+    Same disable contract as the Windows npm endpoint. NAT mode swaps a
+    loopback host for the Windows gateway IP, same as the ~/.bashrc block."""
+    url = f"http://{host}:{port}"
+    if enable and host.lower() in LOOPBACK_HOSTS \
+            and get_wsl_network_mode() != "Mirrored":
+        gw = _get_wsl_gateway_ip()
+        if gw:
+            url = f"http://{gw}:{port}"
+    try:
+        errs = []
+        for d in (_wsl_distros() or [""]):
+            label = f"WSL({d})" if d else "WSL"
+            try:
+                _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
+                              url if enable else None, equals=url)
+            except OSError as e:
+                if enable:
+                    errs.append(f"{label}: {e}")
+        if enable and errs:
+            return "; ".join(errs)
+        return True
+    except Exception:
+        return True if not enable else "WSL 操作失败"
+
+
+def set_pip_proxy_wsl(host, port, enable=True):
+    """Write/clear `proxy` under [global] in every user distro's XDG
+    pip.conf; disable also cleans the legacy ~/.pip/pip.conf. NAT mode swaps
+    a loopback host for the Windows gateway IP."""
+    url = f"http://{host}:{port}"
+    if enable and host.lower() in LOOPBACK_HOSTS \
+            and get_wsl_network_mode() != "Mirrored":
+        gw = _get_wsl_gateway_ip()
+        if gw:
+            url = f"http://{gw}:{port}"
+    try:
+        errs = []
+        for d in (_wsl_distros() or [""]):
+            label = f"WSL({d})" if d else "WSL"
+            try:
+                _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
+                              url if enable else None, equals=url,
+                              section="global")
+                if not enable:
+                    # Legacy path: surgical clean only, never written.
+                    _wsl_edit_ini(d, _PIP_CONF_LEGACY_WSL, ("proxy",),
+                                  None, equals=url)
+            except OSError as e:
+                if enable:
+                    errs.append(f"{label}: {e}")
+        if enable and errs:
+            return "; ".join(errs)
+        return True
+    except Exception:
+        return True if not enable else "WSL 操作失败"
+
+
 def restart_wsl():
     try:
         subprocess.run(["wsl", "--shutdown"],
