@@ -430,7 +430,7 @@ html.maximized .grip { display: none; }
 
 <!-- ════════ Title bar ════════ -->
 <div class="titlebar">
-  <div class="pywebview-drag-region" id="dragRegion" style="display:flex;align-items:center;gap:9px;flex:1;min-width:0">
+  <div id="dragRegion" style="display:flex;align-items:center;gap:9px;flex:1;min-width:0;app-region:drag">
     <div class="app-icon">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7l-5 5 5 5"/><path d="M16 7l5 5-5 5"/></svg>
     </div>
@@ -467,7 +467,7 @@ html.maximized .grip { display: none; }
         <span class="badge idle" id="heroBadge"><span class="dot"></span>检测中</span>
       </div>
       <div class="hero-row">
-        <div class="hero-line" id="heroLine"><b>0 / 8</b> <span class="dim">个端点已启用</span></div>
+        <div class="hero-line" id="heroLine"><b>0 / 9</b> <span class="dim">个端点已启用</span></div>
         <div class="cfg-row">
           <div class="field"><label>代理地址</label><input id="inHost" spellcheck="false" autocomplete="off"></div>
           <div class="field"><label>端口</label><input id="inPort" spellcheck="false" autocomplete="off" style="width:92px"></div>
@@ -484,6 +484,7 @@ html.maximized .grip { display: none; }
           </div>
         </div>
       </div>
+      <div class="hero-desc" id="heroHint">终端侧代理（环境变量 / git / npm / pip）。系统代理开关会改浏览器；已打开的终端需新开窗口后生效。点 X 隐藏到托盘，代理保持。</div>
     </div>
 
     <div class="hero-right">
@@ -504,10 +505,10 @@ html.maximized .grip { display: none; }
       <div class="spark"><i id="sparkBar"></i></div>
       <div class="speed-pop" id="speedPop">
         <h5>自定义网速满值</h5>
-        <div class="desc">进度条满格对应的网速。带宽换算：100 Mbps ≈ 12.5 MB/s。</div>
+        <div class="desc">进度条满格对应的下载速度，与上方数字单位相同。100 Mbps ≈ 12.5 MB/s。</div>
         <div class="addrow">
           <input id="speedFullIn" spellcheck="false" inputmode="decimal" placeholder="5">
-          <span class="unit-lbl">Mbps</span>
+          <span class="unit-lbl">MB/s</span>
           <button class="btn tiny primary" id="speedFullOk">确定</button>
         </div>
       </div>
@@ -549,13 +550,14 @@ html.maximized .grip { display: none; }
         <div class="group-cap">POWERSHELL（用户环境变量）</div>
         <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vPsHttp">—</span><button class="test-chip" data-test="ps" data-tip="通过该代理发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vPsHttps">—</span><button class="test-chip" data-test="ps" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">系统代理（WinINET）</span><span class="v" id="vSys">—</span><button class="test-chip" data-test="sys" data-tip="通过系统代理发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">Git（git config --global）</span><span class="v" id="vPsGit">—</span><button class="test-chip" data-test="gitwin" data-tip="通过该代理发起连通性测试">测试</button></div>
         <div class="group-cap">包管理器（用户级配置文件）</div>
         <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v" id="vNpm">—</span><button class="test-chip" data-test="npm" data-tip="通过该代理发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">pip（pip.ini）</span><span class="v" id="vPip">—</span><button class="test-chip" data-test="pip" data-tip="通过该代理发起连通性测试">测试</button></div>
       </div>
       <div id="varsWsl" style="display:none">
-        <div class="group-cap">WSL 终端（~/.bashrc 受管块）</div>
+        <div class="group-cap">WSL 终端（~/.bashrc / ~/.zshrc / fish）</div>
         <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vWslHttp">—</span><button class="test-chip" data-test="wsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vWslHttps">—</span><button class="test-chip" data-test="wsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">Git（git config --global）</span><span class="v" id="vWslGit">—</span><button class="test-chip" data-test="gitwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
@@ -576,7 +578,7 @@ html.maximized .grip { display: none; }
   <div class="lane-tabs" id="laneTabs" role="tablist">
     <button class="lane-tab active" id="tabWin" role="tab" data-tip="Windows 侧的 PowerShell / Git / npm / pip">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
-      <span>Win</span><span class="cnt" id="cntWin">0/4</span>
+      <span>Win</span><span class="cnt" id="cntWin">0/5</span>
     </button>
     <button class="lane-tab" id="tabWsl" role="tab" data-tip="WSL 各发行版的终端 / Git / npm / pip">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12 14h5"/></svg>
@@ -640,8 +642,16 @@ html.maximized .grip { display: none; }
       <span class="range-val" id="rgAlphaVal">92%</span>
     </div>
     <div class="set-row">
-      <div class="lbl"><b>开机自动启动</b><span>写入当前用户注册表 Run 键</span></div>
+      <div class="lbl"><b>开机自动启动</b><span>登录后在托盘运行，不弹出主窗口</span></div>
       <div class="tgl" id="tglAuto"></div>
+    </div>
+    <div class="set-row">
+      <div class="lbl"><b>退出时关闭代理</b><span>托盘「退出」时关闭本工具写入的代理，并恢复覆盖前的值</span></div>
+      <div class="tgl" id="tglQuitClear"></div>
+    </div>
+    <div class="set-row">
+      <div class="lbl"><b>WSL 应用到所有发行版</b><span>关闭后只写入默认发行版</span></div>
+      <div class="tgl" id="tglWslAll"></div>
     </div>
 
     <div class="dlg-btns">
@@ -667,7 +677,7 @@ const api = (() => {
   let mockState = {
     host: "127.0.0.1", port: "7897", mode: "light", pin: false,
     ps: true, wsl: false, gitwin: false, gitwsl: false, npm: false, pip: false,
-    npmwsl: false, pipwsl: false,
+    npmwsl: false, pipwsl: false, sys: false,
     ports: [7890, 7892, 7897], autostart: false,
     lip: "192.168.1.146", wip: "172.24.156.88", wmode: "Mirrored",
     psHttp: "http://127.0.0.1:7897",
@@ -682,7 +692,7 @@ const api = (() => {
       case "get_config": return { host: mockState.host, port: mockState.port,
         mode: mockState.mode, pin: mockState.pin, ports: mockState.ports,
         autostart: mockState.autostart, bg_path: "", bg_dim: 0.45, card_alpha: 0.92,
-        speed_full: 5 };
+        speed_full: 5, quit_clear: false, wsl_all_distros: true, close_hint_done: false };
       case "save_config": Object.assign(mockState, args[0]); return true;
       case "refresh_item": {
         const w = args[0];
@@ -694,6 +704,7 @@ const api = (() => {
         if (w === "gitwin") return mockState.gitWinVal;
         if (w === "npm") return mockState.npmVal;
         if (w === "pip") return mockState.pipVal;
+        if (w === "sys") return mockState.ps ? mockState.psHttp : "未设置";
         if (w === "npmwsl") return mockState.npmWslVal;
         if (w === "pipwsl") return mockState.pipWslVal;
         if (w === "ip") return mockState.lip;
@@ -709,6 +720,7 @@ const api = (() => {
       case "do_toggle": {
         const [target, on] = args;
         if (target === "ps") { mockState.ps = on; mockState.psHttp = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
+        if (target === "sys") { mockState.sys = on; }
         if (target === "wsl") { mockState.wsl = on; mockState.wslHttp = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
         if (target === "gitwin") { mockState.gitwin = on; mockState.gitWinVal = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
         if (target === "gitwsl") { mockState.gitwsl = on; mockState.wslGit = on ? `http://${mockState.host}:${mockState.port}` : "未设置"; }
@@ -729,7 +741,7 @@ const api = (() => {
         if (mockState.pip) mockState.pipVal = `http://${mockState.host}:${p}`;
         if (mockState.npmwsl) mockState.npmWslVal = `http://${mockState.host}:${p}`;
         if (mockState.pipwsl) mockState.pipWslVal = `http://${mockState.host}:${p}`;
-        return { ok: true, applied: ["ps", "wsl", "gitwin", "gitwsl", "npm", "pip", "npmwsl", "pipwsl"].filter(t => mockState[t]) };
+        return { ok: true, applied: ["ps", "sys", "wsl", "gitwin", "gitwsl", "npm", "pip", "npmwsl", "pipwsl"].filter(t => mockState[t]) };
       }
       case "get_speed": {
         const n = Math.random() * 3;
@@ -823,19 +835,21 @@ const ICONS = {
   gitwsl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7"/><path d="M18 10.5c0 3-2.5 4.5-6 4.5" stroke-dasharray="2.5 2.5"/></svg>',
   npm: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5h18v7h-9v1.5h-4.5v-1.5H3z" stroke-dasharray="0"/><path d="M7 11v2M12 11v2M17 11v2"/></svg>',
   pip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c4 3.4 6.5 6.6 6.5 10a6.5 6.5 0 1 1-13 0c0-3.4 2.5-6.6 6.5-10z"/><path d="M9 14a3 3 0 0 0 3 3"/></svg>',
+  sys: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
 };
 const EP_DEFS = [
   { id: "ps",     lane: "win",  name: "PowerShell",  desc: "写入用户环境变量，对新开的终端生效" },
+  { id: "sys",    lane: "win",  name: "系统代理",     desc: "Windows 设置中的代理，浏览器等会走它" },
   { id: "gitwin", lane: "win",  name: "Git",         desc: "git config --global 代理" },
   { id: "npm",    lane: "win",  name: "npm",         desc: "~/.npmrc 的 proxy 与 https-proxy" },
   { id: "pip",    lane: "win",  name: "pip",         desc: "pip.ini [global] proxy，对 py -m pip 同样生效" },
-  { id: "wsl",    lane: "wsl",  name: "WSL 终端",     desc: "写入各发行版 ~/.bashrc 的受管代码块" },
+  { id: "wsl",    lane: "wsl",  name: "WSL 终端",     desc: "写入 ~/.bashrc、~/.zshrc 与 fish conf.d" },
   { id: "gitwsl", lane: "wsl",  name: "Git",         desc: "各发行版 git config --global 代理" },
   { id: "npmwsl", lane: "wsl",  name: "npm",         desc: "各发行版 ~/.npmrc 的 proxy 与 https-proxy" },
   { id: "pipwsl", lane: "wsl",  name: "pip",         desc: "~/.config/pip/pip.conf [global] proxy" },
 ];
-const state = { ps: false, wsl: false, gitwin: false, gitwsl: false, npm: false, pip: false, npmwsl: false, pipwsl: false, busy: {} };
-const cfg = { ports: [], bg_path: "", bg_dim: 0.45, card_alpha: 0.92 };
+const state = { ps: false, sys: false, wsl: false, gitwin: false, gitwsl: false, npm: false, pip: false, npmwsl: false, pipwsl: false, busy: {} };
+const cfg = { ports: [], bg_path: "", bg_dim: 0.45, card_alpha: 0.92, close_hint_done: false, quit_clear: false, wsl_all_distros: true };
 const ui = { pinned: false, maximized: false };
 
 /* ═══════════════ Endpoints render (two channel lanes) ═══════════════ */
@@ -856,12 +870,13 @@ function epCard(d) {
 function renderEndpoints() {
   const host = $("epList");
   host.innerHTML = EP_DEFS.filter((d) => d.lane === curLane).map(epCard).join("");
-  document.querySelectorAll("#epList .tgl[data-ep]").forEach((el) => {
-    el.onclick = () => toggleEndpoint(el.dataset.ep, !state[el.dataset.ep]);
-  });
+  // Click handlers are delegated on #epList (see Wiring section) so they
+  // survive innerHTML replacement during refreshAll without stale closures.
   $("epCap").textContent = curLane === "win"
     ? "参与切换的端点 · Windows 渠道"
-    : "参与切换的端点 · WSL 渠道（应用于所有用户发行版）";
+    : (cfg.wsl_all_distros !== false
+        ? "参与切换的端点 · WSL 渠道（应用于所有用户发行版）"
+        : "参与切换的端点 · WSL 渠道（仅默认发行版）");
   $("epTitle").textContent = curLane === "win" ? "Windows 代理端点" : "WSL 代理端点";
   updateHero();
 }
@@ -884,11 +899,12 @@ function setLane(lane) {
 
 /* Per-endpoint current value: git rows show what was actually detected in
    each git config; ps/wsl rows show the detected proxy URL. */
-let detected = { gitwin: "未设置", gitwsl: "未设置", ps: null, wsl_url: null,
+let detected = { gitwin: "未设置", gitwsl: "未设置", ps: null, sys: "未设置", wsl_url: null,
                  npm: "未设置", pip: "未设置", npmwsl: "未设置", pipwsl: "未设置" };
 function epValue(id) {
   if (id === "gitwin" || id === "gitwsl") return detected[id];
   if (id === "ps") return detected.ps || "未设置";
+  if (id === "sys") return detected.sys || "未设置";
   if (id === "wsl") return state.wsl ? (detected.wsl_url || "未设置") : "未设置";
   if (id === "npm" || id === "pip" || id === "npmwsl" || id === "pipwsl") return detected[id];
   return "未设置";
@@ -980,8 +996,12 @@ async function toggleEndpoint(ep, on) {
   try {
     const r = await api.call("do_toggle", ep, on, host, port);
     if (r && r.error) toast(r.error, "err");
-    else if (r && r.note) toast(r.note);
-    else toast(`${epName(ep)} 已${on ? "启用" : "关闭"}`, "ok");
+    else if (r && r.note) toast(r.note, "ok");
+    else {
+      let msg = `${epName(ep)} 已${on ? "启用" : "关闭"}`;
+      if (on && (ep === "ps" || ep === "wsl")) msg += "，请新开终端后生效";
+      toast(msg, "ok");
+    }
   } finally {
     setBusy(ep, false);
     refreshAll();
@@ -1031,36 +1051,71 @@ function renderPortPop() {
   });
 }
 
-async function quickSwitchPort(p) {
-  if (busyAll || Object.values(state.busy).some(Boolean) || refreshing) return;
-  p = String(p);
-  const oldPort = $("inPort").value.trim();
-  if (p === oldPort) return;
-  $("inPort").value = p;
+let lastApplied = { host: "", port: "" };
+let pendingApply = null;  // {host, port, oldHost, oldPort} queued while busy/refreshing
+
+async function applyAddress(newHost, newPort, oldHost, oldPort) {
+  newHost = String(newHost).trim();
+  newPort = String(newPort).trim();
+  if (newHost === lastApplied.host && newPort === lastApplied.port) return;
+  if (busyAll || Object.values(state.busy).some(Boolean) || refreshing) {
+    pendingApply = { host: newHost, port: newPort, oldHost, oldPort };
+    toast("正在处理，完成后自动应用新地址", "");
+    return;
+  }
+  $("inHost").value = newHost;
+  $("inPort").value = newPort;
+  $("inHost").classList.remove("bad");
   $("inPort").classList.remove("bad");
-  if (!validateFields(true)) { $("inPort").value = oldPort; renderPorts(); return; }
+  if (!validateFields(true)) {
+    if (oldHost != null) $("inHost").value = oldHost;
+    if (oldPort != null) $("inPort").value = oldPort;
+    renderPorts();
+    return;
+  }
   const enabled = EP_DEFS.map((d) => d.id).filter((k) => state[k]);
   if (enabled.length > 0) {
     const go = await confirmDlg(
-      "已启用的端点（含另一渠道页）将关闭并以新端口 " + p + " 重新应用，" +
-      "期间终端代理会短暂中断。\n确认切换？", "切换端口");
-    if (!go) { $("inPort").value = oldPort; renderPorts(); return; }
-    setBusyAll(true);
-    try {
-      /* No pre-flush: switch_port compares against the still-old cached port
-         and persists the new one itself once endpoints are re-applied. */
-      const r = await api.call("switch_port", p, $("inHost").value.trim());
-      if (r && r.error) toast(r.error, "err");
-      else toast(`端口已切换为 ${p}，${(r.applied || []).length} 个端点已重新应用`, "ok");
-    } catch (e) {
-      toast("端口切换失败: " + e, "err");
-    } finally { setBusyAll(false); }
-  } else {
-    persistSoon();
-    toast(`端口已设为 ${p}`, "ok");
+      "已启用的端点（含另一渠道页）将以新地址 " + newHost + ":" + newPort +
+      " 重新应用，期间终端代理会短暂中断。\n确认？", "应用");
+    if (!go) {
+      if (oldHost != null) $("inHost").value = oldHost;
+      if (oldPort != null) $("inPort").value = oldPort;
+      renderPorts();
+      return;
+    }
   }
+  setBusyAll(true);
+  try {
+    const r = await api.call("switch_port", newPort, newHost);
+    if (r && r.error) {
+      toast(r.error, "err");
+      if (!(r.applied && r.applied.length)) {
+        if (oldHost != null) $("inHost").value = oldHost;
+        if (oldPort != null) $("inPort").value = oldPort;
+      } else {
+        lastApplied = { host: newHost, port: newPort };
+      }
+    } else {
+      lastApplied = { host: newHost, port: newPort };
+      const n = (r && r.applied || []).length;
+      toast(n ? `已切换为 ${newHost}:${newPort}，${n} 个端点已重新应用`
+              : `地址已设为 ${newHost}:${newPort}`, "ok");
+    }
+  } catch (e) {
+    toast("地址切换失败: " + e, "err");
+  } finally { setBusyAll(false); }
   renderPorts();
   refreshAll();
+}
+
+async function quickSwitchPort(p) {
+  const oldPort = $("inPort").value.trim();
+  const host = $("inHost").value.trim();
+  if (String(p) === oldPort) return;
+  $("inPort").value = String(p);
+  renderPorts();
+  await applyAddress(host, String(p), host, oldPort);
 }
 
 function setBusyAll(b) {
@@ -1078,22 +1133,27 @@ function setBusyAll(b) {
 
 /* ═══════════════ Refresh (parallel, lane-aware) ═══════════════ */
 let refreshing = false;
+let refreshQueued = false;
 async function refreshAll() {
-  if (refreshing) return;
+  if (refreshing) { refreshQueued = true; return; }
   refreshing = true;
+  refreshQueued = false;
   const spin = $("sbRefreshIco");
   spin.classList.add("spin");
   $("sbRefresh").disabled = true;
   let pending = 0;
   const settle = () => {
     if (--pending === 0) {
+      const needAgain = (curLane !== lane) || refreshQueued;
+      refreshQueued = false;
       refreshing = false;
       spin.classList.remove("spin");
       $("sbRefresh").disabled = false;
       if (anyOk) persistSoon();
-      // The user may have switched lanes mid-refresh (this run then probed
-      // the OLD lane) — re-run once so the visible page reflects reality.
-      if (curLane !== lane) refreshAll();
+      if (pendingApply) {
+        const p = pendingApply; pendingApply = null;
+        applyAddress(p.host, p.port, p.oldHost, p.oldPort);
+      } else if (needAgain) refreshAll();
     }
   };
   const track = (p) => { pending++; p.finally(settle); };
@@ -1109,9 +1169,18 @@ async function refreshAll() {
   const lane = curLane;
   if (lane === "win") track(api.call("refresh_item", "ps").then((r) => {
     anyOk = true;
-    state.ps = !!r.status;
+    const expect = `http://${$("inHost").value.trim()}:${$("inPort").value.trim()}`;
+    state.ps = !!r.status && String(r.status) === expect;
     detected.ps = r.status ? r.vars.HTTP_PROXY : null;
     set("vPsHttp", r.vars.HTTP_PROXY); set("vPsHttps", r.vars.HTTPS_PROXY);
+    renderEndpoints();
+  }).catch(() => {}));
+  if (lane === "win") track(api.call("refresh_item", "sys").then((v) => {
+    anyOk = true;
+    const expect = `http://${$("inHost").value.trim()}:${$("inPort").value.trim()}`;
+    detected.sys = v;
+    state.sys = String(v) === expect;
+    set("vSys", v);
     renderEndpoints();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "wsl").then((r) => {
@@ -1165,9 +1234,12 @@ async function refreshAll() {
     set("vMode2", v);
     // The NAT note only applies to NAT mode; mirrored keeps loopback.
     const hint = $("natHint");
-    if (hint) hint.textContent = String(v).startsWith("NAT")
-      ? "NAT 模式自动使用宿主网关 IP；镜像模式保持 127.0.0.1 不变"
-      : "镜像模式下 WSL 与宿主共享网络，127.0.0.1 直接可达";
+    if (hint) {
+      const mirrored = /^mirrored$/i.test(String(v).trim());
+      hint.textContent = mirrored
+        ? "镜像模式下 WSL 与宿主共享网络，127.0.0.1 直接可达"
+        : "NAT 模式自动使用宿主网关 IP；镜像模式保持 127.0.0.1 不变";
+    }
   }).catch(() => {}));
   renderEndpoints();
 }
@@ -1177,14 +1249,21 @@ let persistTimer = null;
 function persistSoon() {
   clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
-    api.call("save_config", {
+    const payload = {
       host: $("inHost").value.trim(), port: $("inPort").value.trim(),
       powershell: state.ps, wsl: state.wsl, git_win: state.gitwin, git_wsl: state.gitwsl,
       npm: state.npm, pip: state.pip, npmwsl: state.npmwsl, pipwsl: state.pipwsl,
       pin: ui.pinned, mode: document.documentElement.dataset.theme,
       ports: cfg.ports, bg_dim: cfg.bg_dim, card_alpha: cfg.card_alpha,
-      speed_full: speedFullMbps,
-    });
+      quit_clear: cfg.quit_clear, wsl_all_distros: cfg.wsl_all_distros,
+      close_hint_done: cfg.close_hint_done,
+    };
+    // Skip speed_full until boot() has loaded the saved value — the pre-boot
+    // default (null) would otherwise overwrite the user's config.
+    if (speedFullMbps != null) payload.speed_full = speedFullMbps;
+    api.call("save_config", payload).then((ok) => {
+      if (ok === false) toast("配置保存失败（磁盘已满或权限不足）", "err");
+    }).catch(() => {});
   }, 400);
 }
 
@@ -1196,7 +1275,7 @@ async function allEndpoints(on, lane = null) {
   const host = $("inHost").value.trim(), port = $("inPort").value.trim();
   if (on && !validateFields(true)) return;
   setBusyAll(true);
-  let hadError = false;
+  let hadError = false, cancelled = false;
   try {
     for (const d of EP_DEFS) {
       if (lane && d.lane !== lane) continue;
@@ -1207,7 +1286,7 @@ async function allEndpoints(on, lane = null) {
         const pre = await api.call("prepare_toggle", d.id, true, host, port);
         if (pre && pre.confirm) {
           if (!allEndpoints.confirmed?.has(pre.confirm)) {
-            if (!(await confirmDlg(pre.message))) continue;
+            if (!(await confirmDlg(pre.message))) { cancelled = true; break; }
             (allEndpoints.confirmed ??= new Set()).add(pre.confirm);
           }
         } else if (pre && pre.error) {
@@ -1223,9 +1302,11 @@ async function allEndpoints(on, lane = null) {
         setBusy(d.id, false);
       }
     }
-    if (!hadError) {
+    if (!hadError && !cancelled) {
       const scope = lane ? (lane === "win" ? "Windows" : "WSL") + " 渠道" : "全部端点";
-      toast(`${scope}已${on ? "启用" : "关闭"}`, "ok");
+      let msg = `${scope}已${on ? "启用" : "关闭"}`;
+      if (on) msg += "。环境变量类端点请新开终端后生效";
+      toast(msg, "ok");
     }
   } finally {
     allEndpoints.confirmed = null;
@@ -1236,14 +1317,16 @@ async function allEndpoints(on, lane = null) {
 
 /* ═══════════════ Speed ticker ═══════════════ */
 function fmtMB(num) {
-  if (num < 1024) return [num.toFixed(0), "B/s"];
-  const units = [["KB", 1024], ["MB", 1024 ** 2], ["GB", 1024 ** 3]];
+  if (num < 1000) return [num.toFixed(0), "B/s"];
+  const units = [["KB", 1e3], ["MB", 1e6], ["GB", 1e9]];
   let v = num, lbl = "KB/s";
   for (const [u, f] of units) if (num >= f) { v = num / f; lbl = u + "/s"; } else break;
   return [v >= 100 ? v.toFixed(0) : v.toFixed(1), lbl];
 }
-/* Spark full-scale in bytes/sec, from the user's Mbps setting (default 5). */
-let speedFullMbps = 5;
+/* Spark full-scale in bytes/sec, from the user's Mbps setting (default 5).
+   Starts as null until boot() loads the saved value; persistSoon skips it
+   while null so a pre-boot debounce never overwrites the config. */
+let speedFullMbps = null;
 const MbpsToBps = (m) => m * 1000 * 1000 / 8;
 async function tickSpeed() {
   try {
@@ -1253,7 +1336,7 @@ async function tickSpeed() {
       $("spdDn").textContent = dn;
       document.querySelector(".metric .unit").textContent = unit;
       $("spdUp").textContent = s.up;
-      const full = Math.max(1, MbpsToBps(speedFullMbps));
+      const full = Math.max(1, MbpsToBps(speedFullMbps ?? 5));
       $("sparkBar").style.width = Math.min(100, (s.dn_num ?? 0) / full * 100) + "%";
       const sb = $("sbPort");
       sb.innerHTML = s.alive ? '<span class="dot g"></span>在线 · ' + esc_($("inPort").value || "7897")
@@ -1265,7 +1348,9 @@ async function tickSpeed() {
 }
 
 /* Speed full-scale popover (anchored to the hero-right block) */
-function renderSpeedPop() { $("speedFullIn").value = String(speedFullMbps); }
+function mbpsToMBps(m) { return (Number(m) || 0) / 8; }
+function mBpsToMbps(v) { return v * 8; }
+function renderSpeedPop() { $("speedFullIn").value = String(Math.round(mbpsToMBps(speedFullMbps ?? 5) * 10) / 10); }
 $("btnSpeedFull").onclick = (e) => {
   e.stopPropagation();
   renderSpeedPop();
@@ -1275,11 +1360,11 @@ $("btnSpeedFull").onclick = (e) => {
 };
 $("speedFullOk").onclick = () => {
   const v = parseFloat($("speedFullIn").value);
-  if (!isFinite(v) || v <= 0 || v > 100000) { toast("满值须为正数（Mbps）", "err"); return; }
-  speedFullMbps = Math.round(v * 10) / 10;
+  if (!isFinite(v) || v <= 0 || v > 12500) { toast("满值须为正数（MB/s）", "err"); return; }
+  speedFullMbps = Math.round(mBpsToMbps(v) * 10) / 10;
   $("speedPop").classList.remove("show");
   persistSoon();
-  toast(`网速满值已设为 ${speedFullMbps} Mbps`, "ok");
+  toast(`网速满值已设为 ${Math.round(v * 10) / 10} MB/s`, "ok");
 };
 $("speedFullIn").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("speedFullOk").click();
@@ -1362,8 +1447,11 @@ async function openSettings() {
   $("rgAlpha").value = Math.round(cfg.card_alpha * 100);
   $("rgAlphaVal").textContent = $("rgAlpha").value + "%";
   $("tglAuto").classList.toggle("on", !!c.autostart);
+  $("tglQuitClear").classList.toggle("on", !!c.quit_clear);
+  $("tglWslAll").classList.toggle("on", c.wsl_all_distros !== false);
   if (c.bg_path) {
     const bg = await api.call("get_background");
+    if (bg && bg.error) toast(bg.error, "err");
     applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
   } else applyBg("", null, cfg.bg_dim);
   $("settingsOv").classList.add("show");
@@ -1398,6 +1486,12 @@ document.addEventListener("click", async (e) => {
 });
 
 /* ═══════════════ Wiring ═══════════════ */
+/* Endpoint toggle: delegated on #epList so clicks survive innerHTML
+   replacement during refreshAll (no stale closures on detached nodes). */
+$("epList").addEventListener("click", (e) => {
+  const el = e.target.closest(".tgl[data-ep]");
+  if (el) toggleEndpoint(el.dataset.ep, !state[el.dataset.ep]);
+});
 /* 全部关闭 lives on the vertical rail (vtRailOff) now. */
 $("btnTheme").onclick = toggleTheme;
 $("btnPin").onclick = togglePin;
@@ -1405,7 +1499,17 @@ $("btnSettings").onclick = openSettings;
 $("settingsClose").onclick = closeSettings;
 $("btnMin").onclick = () => api.call("window_control", "minimize");
 $("btnMax").onclick = toggleMaximize;
-$("btnClose").onclick = () => api.call("window_control", "close");
+$("btnClose").onclick = async () => {
+  if (!cfg.close_hint_done) {
+    const go = await confirmDlg(
+      "关闭窗口会隐藏到托盘，代理保持生效。\n从托盘图标可以恢复窗口；选「退出」才真正结束。",
+      "隐藏到托盘");
+    if (!go) return;
+    cfg.close_hint_done = true;
+    api.call("save_config", { close_hint_done: true });
+  }
+  api.call("window_control", "close");
+};
 $("btnWslRestart").onclick = async () => {
   if (busyAll || Object.values(state.busy).some(Boolean)) return;
   const go = await confirmDlg("将立即终止 WSL 中的所有进程，未保存的工作会丢失。确定重启？", "重启");
@@ -1426,7 +1530,10 @@ $("btnWslRestart").onclick = async () => {
 $("sbRefresh").onclick = () => refreshAll();
 $("inHost").addEventListener("input", () => { $("inHost").classList.remove("bad"); renderEndpoints(); });
 $("inPort").addEventListener("input", () => { $("inPort").classList.remove("bad"); renderPorts(); renderEndpoints(); });
-["inHost", "inPort"].forEach((id) => $(id).addEventListener("change", persistSoon));
+["inHost", "inPort"].forEach((id) => $(id).addEventListener("change", () => {
+  applyAddress($("inHost").value.trim(), $("inPort").value.trim(),
+               lastApplied.host, lastApplied.port);
+}));
 
 /* Channel page tabs (status bar) */
 $("tabWin").onclick = () => setLane("win");
@@ -1447,15 +1554,32 @@ document.addEventListener("click", async (e) => {
   catch (err) { r = { ok: false, error: String(err) }; }
   chips.forEach((c) => {
     c.classList.remove("testing");
-    if (r && r.ok) { c.classList.add("ok"); c.textContent = `✓ ${r.ms}ms`; }
-    else { c.classList.add("fail"); c.textContent = r && r.error ? "✗ " + r.error.slice(0, 14) : "✗ 失败"; }
+    if (r && r.ok) { c.classList.add("ok"); c.textContent = `✓ ${r.ms}ms`; c.title = ""; }
+    else { c.classList.add("fail"); c.textContent = r && r.error ? "✗ " + r.error.slice(0, 40) : "✗ 失败"; c.title = (r && r.error) || ""; }
     setTimeout(() => { c.classList.remove("ok", "fail"); c.textContent = "测试"; }, 3000);
   });
 });
 
-/* Double-click title bar empty area toggles maximize (standard behavior). */
-$("dragRegion").addEventListener("dblclick", (e) => {
-  if (!e.target.closest(".tb-btn")) toggleMaximize();
+/* Title-bar drag + double-click: native-first. Python enables WebView2's
+   IsNonClientRegionSupportEnabled and #dragRegion carries app-region: drag,
+   so the browser hit-tests a press here as HTCAPTION and the OS runs its
+   move loop in the very mousedown message — 1:1 tracking, and the OS itself
+   decides double-click maximizes and edge-snapping (same channel as
+   IssueCapture's Tauri native title bar). Presses claimed as non-client
+   never reach the DOM, so this handler only fires when the native path is
+   not in effect — it then injects drag_move as the fallback (kept because
+   the two paths fight over nothing: whichever claims the press first owns
+   the gesture). */
+let _tbLastDown = 0;
+$("dragRegion").addEventListener("mousedown", (e) => {
+  if (e.button !== 0 || e.target.closest(".tb-btn, .app-icon")) return;
+  const now = Date.now();
+  if (now - _tbLastDown < 500) {
+    _tbLastDown = 0;   // second click of a double-click: the OS will post
+    return;            // WM_NCLBUTTONDBLCLK; do not restart the move loop
+  }
+  _tbLastDown = now;
+  api.call("window_control", "drag_move");
 });
 
 /* Port preset popover: add / close-on-outside-click */
@@ -1483,6 +1607,7 @@ $("bgPick").onclick = async () => {
   if (r && r.ok) {
     cfg.bg_path = r.path || cfg.bg_path; // Python persisted the new path; mirror it
     const bg = await api.call("get_background");
+    if (bg && bg.error) toast(bg.error, "err");
     applyBg(cfg.bg_path, bg && bg.data, cfg.bg_dim);
     saveSettings();
   }
@@ -1507,8 +1632,23 @@ $("rgAlpha").addEventListener("input", (e) => {
 $("tglAuto").onclick = async () => {
   const on = !$("tglAuto").classList.contains("on");
   const r = await api.call("set_autostart", on);
-  if (r && r.ok) { $("tglAuto").classList.toggle("on", on); toast(on ? "已开启开机自启" : "已关闭开机自启", "ok"); }
+  if (r && r.ok) { $("tglAuto").classList.toggle("on", on); toast(on ? "已开启开机自启（登录后在托盘运行）" : "已关闭开机自启", "ok"); }
   else toast("设置失败: " + ((r && r.error) || "未知错误"), "err");
+};
+$("tglQuitClear").onclick = () => {
+  const on = !$("tglQuitClear").classList.contains("on");
+  $("tglQuitClear").classList.toggle("on", on);
+  cfg.quit_clear = on;
+  api.call("save_config", { quit_clear: on });
+  toast(on ? "退出时将关闭代理并恢复覆盖前的值" : "退出时保留代理设置", "ok");
+};
+$("tglWslAll").onclick = () => {
+  const on = !$("tglWslAll").classList.contains("on");
+  $("tglWslAll").classList.toggle("on", on);
+  cfg.wsl_all_distros = on;
+  api.call("save_config", { wsl_all_distros: on });
+  toast(on ? "WSL 将写入所有发行版" : "WSL 只写入默认发行版", "ok");
+  if (curLane === "wsl") renderEndpoints();
 };
 
 function esc_(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -1520,14 +1660,19 @@ async function boot() {
   booted = true;
   const c = await api.call("get_config");
   $("inHost").value = c.host; $("inPort").value = c.port;
+  lastApplied = { host: String(c.host || ""), port: String(c.port || "") };
   applyTheme(c.mode || "light");
   applyPin(!!c.pin);
   cfg.ports = (c.ports || []).map(String);
+  cfg.close_hint_done = !!c.close_hint_done;
+  cfg.quit_clear = !!c.quit_clear;
+  cfg.wsl_all_distros = c.wsl_all_distros !== false;
   applyAlpha(c.card_alpha ?? 0.92);
   speedFullMbps = Math.max(0.1, +c.speed_full || 5);
   cfg.bg_dim = c.bg_dim ?? 0.45;
   if (c.bg_path) {
     const bg = await api.call("get_background");
+    if (bg && bg.error) toast(bg.error, "err");
     applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
   }
   /* Sync the maximize affordance with reality (a renderer reload resets it
@@ -1539,7 +1684,29 @@ async function boot() {
   renderPorts();
   renderEndpoints();
   refreshAll();
+  probeWslCounts();
   tickSpeed();
+}
+
+function probeWslCounts() {
+  /* Background probe so the WSL tab badge isn't stuck at 0/4 until opened. */
+  api.call("refresh_item", "wsl").then((r) => {
+    if (!r) return;
+    state.wsl = !!r.on;
+    detected.gitwsl = r.git;
+    state.gitwsl = !UNSET.has(r.git);
+    detected.wsl_url = state.wsl ? r.vars.HTTP_PROXY : null;
+    updateHero();
+    if (curLane === "wsl") renderEndpoints();
+  }).catch(() => {});
+  api.call("refresh_item", "npmwsl").then((v) => {
+    detected.npmwsl = v; state.npmwsl = !UNSET.has(v); updateHero();
+    if (curLane === "wsl") renderEndpoints();
+  }).catch(() => {});
+  api.call("refresh_item", "pipwsl").then((v) => {
+    detected.pipwsl = v; state.pipwsl = !UNSET.has(v); updateHero();
+    if (curLane === "wsl") renderEndpoints();
+  }).catch(() => {});
 }
 if (HAS_BRIDGE()) boot();
 else window.addEventListener("pywebviewready", boot);

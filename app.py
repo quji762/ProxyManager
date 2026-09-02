@@ -9,8 +9,8 @@ library proxy_manager.py via the js_api bridge. Run:
 
 Config (config v2): host, port, powershell, wsl, git_win, git_wsl, npm, pip,
 npmwsl, pipwsl, pin, mode, ports (quick-select presets), autostart, bg_path,
-bg_dim, card_alpha. A legacy {"git": bool} key migrates into git_win/git_wsl
-on load.
+bg_dim, card_alpha, quit_clear, wsl_all_distros, close_hint_done, restore.
+A legacy {"git": bool} key migrates into git_win/git_wsl on load.
 
 Window operations avoid pywebview's set_on_top (it writes WinForms TopMost
 from the js_api worker thread and deadlocks the UI - see memory): pin and
@@ -47,6 +47,15 @@ AUTOSTART_RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "ProxyManager"
 
 DEFAULT_PORTS = [7890, 7892, 7897]
+_MAX_BG_BYTES = 8 * 1024 * 1024  # custom wallpaper cap (data-URL'd into the page)
+# Connectivity test: gstatic is often poisoned/blocked in CN; try several.
+_PROBE_URLS = (
+    "http://www.msftconnecttest.com/connecttest.txt",
+    "http://captive.apple.com/hotspot-detect.html",
+    "http://connect.rom.miui.com/generate_204",
+    "http://www.gstatic.com/generate_204",
+)
+_START_HIDDEN = any(a in ("--tray", "--hidden") for a in sys.argv[1:])
 
 
 # ─── Config v2 (superset + legacy migration) ─────────────────────────────────
@@ -57,6 +66,8 @@ def load_config():
         "npm": False, "pip": False, "npmwsl": False, "pipwsl": False,
         "pin": False, "mode": "light", "ports": list(DEFAULT_PORTS),
         "autostart": False, "bg_path": "", "bg_dim": 0.45, "card_alpha": 0.92,
+        "quit_clear": False, "wsl_all_distros": True, "close_hint_done": False,
+        "restore": {},
     }
     cfg = {}
     try:
@@ -82,7 +93,8 @@ def load_config():
     else:
         out["port"] = defaults["port"]
     for k in ("powershell", "wsl", "git_win", "git_wsl", "npm", "pip",
-              "npmwsl", "pipwsl", "pin", "autostart"):
+              "npmwsl", "pipwsl", "pin", "autostart", "quit_clear",
+              "wsl_all_distros", "close_hint_done"):
         out[k] = bool(cfg.get(k, defaults[k]))
     if out["mode"] not in ("light", "dark"):
         out["mode"] = "light"
@@ -114,11 +126,14 @@ def load_config():
         out["speed_full"] = round(s, 1) if 0 < s <= 100000 else 5
     except (TypeError, ValueError):
         out["speed_full"] = 5
+    restore = cfg.get("restore")
+    out["restore"] = restore if isinstance(restore, dict) else {}
     return out
 
 
 def save_config(cfg):
-    """Write the full superset; unknown keys from future versions survive."""
+    """Write the full superset; unknown keys from future versions survive.
+    Returns True on success, False if the write failed."""
     with _cfg_lock:
         try:
             os.makedirs(APP_DIR, exist_ok=True)
@@ -133,11 +148,14 @@ def save_config(cfg):
             cur.update({k: cfg[k] for k in (
                 "host", "port", "powershell", "wsl", "git_win", "git_wsl",
                 "npm", "pip", "npmwsl", "pipwsl", "pin", "mode", "ports",
-                "autostart", "bg_path", "bg_dim", "card_alpha", "speed_full")})
+                "autostart", "bg_path", "bg_dim", "card_alpha", "speed_full",
+                "quit_clear", "wsl_all_distros", "close_hint_done", "restore")
+                if k in cfg})
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(cur, f, indent=2, ensure_ascii=False)
+            return True
         except OSError:
-            pass
+            return False
 
 
 _cfg_lock = threading.RLock()  # reentrant: Api.save_config nests into save_config
@@ -152,11 +170,12 @@ def _valid_host(h):
 
 # ─── Autostart (HKCU Run key) ────────────────────────────────────────────────
 def _autostart_command():
+    # --tray: start hidden in the notification area so login isn't a popup.
     if getattr(sys, "frozen", False):
         # PyInstaller --onefile: __file__ is a per-run temp path that would
         # never match after extraction; the exe path is stable.
-        return f'"{sys.executable}"'
-    return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        return f'"{sys.executable}" --tray'
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}" --tray'
 
 
 def autostart_enabled():
@@ -167,8 +186,10 @@ def autostart_enabled():
         try:
             v, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
             winreg.CloseKey(key)
-            return str(_autostart_command()) in str(v) or (
-                getattr(sys, "frozen", False) and sys.executable in str(v))
+            val = str(v)
+            return str(_autostart_command()) in val or (
+                getattr(sys, "frozen", False) and sys.executable in val) or (
+                os.path.abspath(__file__) in val)
         except FileNotFoundError:
             winreg.CloseKey(key)
             return False
@@ -242,11 +263,28 @@ user32.CallWindowProcW.argtypes = [
     ctypes.c_ssize_t, ctypes.c_ssize_t]
 user32.GetDpiForWindow.restype = ctypes.c_uint
 user32.GetDpiForWindow.argtypes = [ctypes.c_ssize_t]
+user32.GetWindowThreadProcessId.argtypes = [
+    ctypes.c_ssize_t, ctypes.POINTER(ctypes.c_uint)]
+user32.GetWindowThreadProcessId.restype = ctypes.c_uint
+user32.IsIconic.argtypes = [ctypes.c_ssize_t]
+user32.IsIconic.restype = ctypes.c_int
+user32.ShowWindow.argtypes = [ctypes.c_ssize_t, ctypes.c_int]
+user32.ShowWindow.restype = ctypes.c_int
+user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+user32.FindWindowW.restype = ctypes.c_ssize_t
+user32.SetForegroundWindow.argtypes = [ctypes.c_ssize_t]
+user32.SetForegroundWindow.restype = ctypes.c_int
+user32.AllowSetForegroundWindow.argtypes = [ctypes.c_uint]
+user32.AllowSetForegroundWindow.restype = ctypes.c_int
 _SW_RESTORE = 9
 
 
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
+user32.GetCursorPos.restype = ctypes.c_int
 
 
 class _MINMAXINFO(ctypes.Structure):
@@ -274,6 +312,9 @@ _padded_hwnd = 0             # hwnd whose ring has been applied
 _resize_maximized = False
 _resize_hook_lock = threading.RLock()
 _restore_callback = None   # set by main(): restores fake-maximized bounds
+_clear_maximized_cb = None # set by main(): clears the fake-max state after
+                           # a native caption drag/snap restored the window
+                           # behind our back (instance flag + global + icon)
 _page_window_ref = None    # set by main(): pywebview window (UI-thread use only)
 
 
@@ -295,6 +336,23 @@ def _sync_maximized_icon():
             pass
 
     threading.Thread(target=_push, daemon=True).start()
+
+
+def _clear_fake_maximized():
+    """Reconcile state after a NATIVE caption drag/snap restored the window
+    behind our back (drag off the top edge, Aero snap). Sets the module
+    global, resets Api._maximized (the maximize BUTTON reads the instance
+    flag — leaving it stale makes the next click restore stale prev bounds
+    instead of maximizing), and pushes the icon sync. WndProc context:
+    still no evaluate_js here — the sync runs on its worker thread."""
+    global _resize_maximized
+    _resize_maximized = False
+    if _clear_maximized_cb is not None:
+        try:
+            _clear_maximized_cb()
+        except Exception:
+            pass
+    _sync_maximized_icon()
 _MIN_W, _MIN_H = 920, 620    # logical px, same as pywebview min_size
 _BORDER_PX = 9               # form-owned ring around the webview (logical px)
 
@@ -359,9 +417,22 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
         # taskbar-button click: SC_MINIMIZE / SC_RESTORE arrive only when
         # those styles (or a system menu entry) exist. Handle them ourselves
         # so clicking the taskbar icon minimizes/restores in every state.
+        # SC_MAXIMIZE arrives from the native caption drag (app-region drag
+        # + IsNonClientRegionSupportEnabled): Windows snaps the title-bar
+        # drag to the top edge / corners and issues maximize commands that
+        # a fake-maximized frameless window must route through
+        # _toggle_maximize to keep the JS icon state in sync.
         sc = wparam & 0xFFF0
         if sc == 0xF020:  # SC_MINIMIZE
             user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            return 0
+        if sc == 0xF030:  # SC_MAXIMIZE
+            if not _resize_maximized and _restore_callback is not None:
+                try:
+                    _restore_callback()
+                    _sync_maximized_icon()
+                except Exception:
+                    pass
             return 0
         if sc == 0xF120:  # SC_RESTORE
             was_iconic = bool(user32.IsIconic(hwnd))
@@ -378,6 +449,37 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
                 except Exception:
                     pass
             return 0
+    elif msg == 0x0005:  # WM_SIZE
+        # A native caption drag can restore a maximized (fake-maximized)
+        # window by pulling it off the top edge; Windows resizes it to the
+        # dragged bounds without any SC_RESTORE. Reconcile the fake-maximize
+        # state so the JS icon doesn't claim "maximized" while it isn't.
+        # The bounds guard matters: un-minimizing ALSO arrives as
+        # SIZE_RESTORED, and that path must keep the maximized state (the
+        # window returns to the work area — bounds still match, so we skip).
+        if wparam == 0 and _resize_maximized:  # SIZE_RESTORED
+            r = _RECT()
+            wa = _RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(r))
+            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+            if (r.left, r.top, r.right, r.bottom) != \
+                    (wa.left, wa.top, wa.right, wa.bottom):
+                _clear_fake_maximized()
+    elif msg == 0x0232:  # WM_EXITSIZEMOVE
+        # Dragging the caption of a fake-maximized window: the system move
+        # loop just MOVES it (it doesn't know the window is "maximized"), so
+        # no WM_SIZE/SC_RESTORE fires and the state would go stale. When the
+        # loop ends and the bounds no longer match the work area, the user
+        # really dragged it off — collapse the fake-max state. (A plain
+        # caption click also enters/exits the loop, but bounds still match.)
+        if _resize_maximized and _restore_callback is not None:
+            r = _RECT()
+            wa = _RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(r))
+            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+            if (r.left, r.top, r.right, r.bottom) != \
+                    (wa.left, wa.top, wa.right, wa.bottom):
+                _clear_fake_maximized()
     elif msg == WM_GETMINMAXINFO:
         # Enforce the minimum window size for the native resize loop.
         try:
@@ -482,6 +584,52 @@ def set_resize_maximized(v):
     _resize_maximized = bool(v)
 
 
+def ensure_nonclient_drag(window=None):
+    """Enable WebView2's native non-client region support on the embedded
+    browser control. With it on, elements styled `app-region: drag` are
+    hit-tested as HTCAPTION *inside* the browser: the physical mousedown
+    enters the system move loop in the same message, exactly like a real
+    Win32 caption (the mechanism IssueCapture gets for free from Tauri's
+    native title bar). The JS→IPC→SendMessage injection ("drag_move") is
+    inherently racy — Chromium owns the mouse capture, so a press-and-drag
+    usually releases before the injected loop starts, which read as "the
+    drag does nothing most of the time".
+
+    The two paths are naturally exclusive: presses WebView2 claims as
+    non-client never reach the DOM, so the JS mousedown fallback can only
+    fire when this setting is not actually in effect. No capability flag
+    needs to cross the bridge.
+
+    Idempotent and re-entrant: called from the loaded event and the resize
+    watchdog, because WinForms can recreate the form handle at any time and
+    a fresh browser control needs the setting re-applied. CoreWebView2 has
+    thread affinity, so the access is marshaled to the UI thread via
+    form.Invoke (same pattern as _apply_window_padding)."""
+    try:
+        form = getattr(window, "native", None) if window is not None else None
+        if form is None:
+            return False
+        from System import Type, Func  # noqa: E402  (pythonnet)
+
+        def _set():
+            browser = getattr(form, "browser", None)  # EdgeChrome instance
+            core = getattr(getattr(browser, "webview", None),
+                           "CoreWebView2", None)
+            if core is not None and \
+                    not core.Settings.IsNonClientRegionSupportEnabled:
+                core.Settings.IsNonClientRegionSupportEnabled = True
+
+        if form.InvokeRequired:
+            form.Invoke(Func[Type](_set))
+        else:
+            _set()
+        return True
+    except Exception as e:
+        if os.environ.get("PM_DEBUG"):
+            print(f"[pm] nonclient drag: {e}", flush=True)
+        return False
+
+
 def _enum_windows(match):
     found = []
     my_pid = os.getpid()
@@ -531,6 +679,8 @@ class Api:
         # the user edited host/port still unsets the old value.
         self._git_managed = {"gitwin": None, "gitwsl": None}
         self._tray_ok = False  # close falls back to quit when no tray exists
+        self._restore = dict(cfg.get("restore") or {})
+        pm.set_wsl_apply_all(cfg.get("wsl_all_distros", True))
         threading.Thread(target=self._speed_loop, daemon=True).start()
 
     # ── config ──
@@ -545,6 +695,9 @@ class Api:
             "bg_dim": cfg.get("bg_dim", 0.45),
             "card_alpha": cfg.get("card_alpha", 0.92),
             "speed_full": cfg.get("speed_full", 5),
+            "quit_clear": bool(cfg.get("quit_clear", False)),
+            "wsl_all_distros": bool(cfg.get("wsl_all_distros", True)),
+            "close_hint_done": bool(cfg.get("close_hint_done", False)),
         }
 
     def save_config(self, data):
@@ -599,7 +752,19 @@ class Api:
                         cfg["speed_full"] = round(v, 1)
                 except (TypeError, ValueError):
                     pass
-            save_config(cfg)
+            if "quit_clear" in data:
+                cfg["quit_clear"] = bool(data["quit_clear"])
+            if "wsl_all_distros" in data:
+                cfg["wsl_all_distros"] = bool(data["wsl_all_distros"])
+                pm.set_wsl_apply_all(cfg["wsl_all_distros"])
+            if "close_hint_done" in data:
+                cfg["close_hint_done"] = bool(data["close_hint_done"])
+            if "restore" in data and isinstance(data["restore"], dict):
+                cfg["restore"] = data["restore"]
+                self._restore = dict(data["restore"])
+            cfg["restore"] = self._restore
+            if not save_config(cfg):
+                return False
         return True
 
     # ── status refresh: one call per slice, fired in parallel by the UI ──
@@ -607,6 +772,8 @@ class Api:
         if which == "ps":
             return {"status": pm.get_ps_status(),
                     "vars": pm.get_ps_proxy_vars()}
+        if which == "sys":
+            return pm.get_sys_proxy()
         if which == "wsl":
             ip, block, wgit = pm.get_wsl_ip_and_block()
             return {"ip": ip, "on": bool(pm.get_wsl_status(block)),
@@ -654,10 +821,10 @@ class Api:
                                "继续启用会导致终端联网失败。\n仍要继续吗？"}
         if target in ("wsl", "all"):
             shell = pm.wsl_default_shell()
-            if shell and shell != "bash":
+            if shell and shell not in ("bash", "zsh", "fish", "sh"):
                 return {"confirm": "shell",
-                        "message": f"WSL 默认 shell 是 {shell}，而代理写入的是 ~/.bashrc"
-                                   "（只有 bash 会读取它）。\n仍要继续写入吗？"}
+                        "message": f"WSL 默认 shell 是 {shell}，本工具写入 ~/.bashrc、"
+                                   "~/.zshrc 和 fish conf.d。\n仍要继续写入吗？"}
         if target in ("gitwsl", "npmwsl", "pipwsl", "all") and not pm.wsl_available():
             return {"error": "未检测到可用的 WSL 发行版"}
         if target in ("gitwin", "all"):
@@ -676,7 +843,73 @@ class Api:
                                    "仍要写入 ~/.npmrc 代理配置吗？"}
         return {"ok": True}
 
-    def do_toggle(self, target, on, host=None, port=None):
+    def _persist_restore(self):
+        with _cfg_lock:
+            cfg = load_config()
+            cfg["restore"] = self._restore
+            save_config(cfg)
+
+    def _detected_url(self, target):
+        if target == "ps":
+            v = pm.get_ps_status()
+        elif target == "sys":
+            v = pm.get_sys_proxy()
+        elif target == "gitwin":
+            v = pm.get_git_proxy_win()
+        elif target == "gitwsl":
+            v = (self.refresh_item("wsl") or {}).get("git")
+        elif target == "npm":
+            v = pm.get_npm_proxy()
+        elif target == "pip":
+            v = pm.get_pip_proxy()
+        elif target == "npmwsl":
+            v = pm.get_npm_proxy_wsl()
+        elif target == "pipwsl":
+            v = pm.get_pip_proxy_wsl()
+        else:
+            return None
+        if not v or v in ("未设置", "未检测到"):
+            return None
+        s = str(v).strip()
+        return s if s.startswith("http://") else None
+
+    def _stash_previous(self, target, new_url):
+        """Remember a pre-existing proxy so disable can put it back."""
+        if target == "wsl" or self._restore.get(target):
+            return
+        cur = self._detected_url(target)
+        if cur and cur != new_url:
+            self._restore[target] = cur
+            self._persist_restore()
+
+    def _restore_previous(self, target):
+        prev = self._restore.get(target)
+        if not prev or not str(prev).startswith("http://"):
+            return None
+        ph, _, pp = str(prev)[len("http://"):].rpartition(":")
+        if not ph or not pm._is_valid_port(pp):
+            return None
+        r = self.do_toggle(target, True, ph, pp, _restoring=True)
+        if isinstance(r, dict) and r.get("ok"):
+            self._restore.pop(target, None)
+            self._persist_restore()
+            extra = "已恢复覆盖前的代理"
+            r["note"] = (r["note"] + "；" + extra) if r.get("note") else extra
+            return r
+        return r if isinstance(r, dict) else {"error": "恢复覆盖前的代理失败"}
+
+    def clear_all_endpoints(self):
+        """Disable every endpoint (used by 退出时关闭代理). Restores stashed
+        values when we had overwritten them."""
+        for t in ("ps", "sys", "wsl", "gitwin", "gitwsl", "npm", "pip",
+                  "npmwsl", "pipwsl"):
+            try:
+                self.do_toggle(t, False)
+            except Exception:
+                pass
+        return True
+
+    def do_toggle(self, target, on, host=None, port=None, _restoring=False):
         # Enabling requires a valid address; disabling must never be blocked
         # by one (ps/wsl removal ignores the address, and git falls back to
         # the managed/detected URL), so only validate on the enable path.
@@ -689,12 +922,26 @@ class Api:
             h, p = addr if addr else (self.host, self.port)
         # Keep the cache in sync so later calls without explicit address
         # (speed probe, restart_wsl) act on the address just applied.
-        self.host, self.port = h, p
+        # Restoring a previous proxy must not overwrite the UI's current fields.
+        if not _restoring:
+            self.host, self.port = h, p
         notes = []
+        if on and not _restoring:
+            self._stash_previous(target, f"http://{h}:{p}")
+        if (not on) and (not _restoring):
+            restored = self._restore_previous(target)
+            if restored is not None:
+                return restored
         if target == "ps":
             ret = pm.set_ps_proxy(h, p, on)
             if ret is not True:
                 return {"error": f"PowerShell: {ret}"}
+            if on:
+                notes.append("请新开一个终端后生效")
+        elif target == "sys":
+            ret = pm.set_sys_proxy(h, p, on)
+            if ret is not True:
+                return {"error": f"系统代理: {ret}"}
         elif target == "wsl":
             if on and h.lower() in pm.LOOPBACK_HOSTS \
                     and pm.get_wsl_network_mode() != "Mirrored":
@@ -702,6 +949,8 @@ class Api:
             ret = pm.set_wsl_proxy(h, p, on)
             if ret is not True:
                 return {"error": f"WSL: {ret}"}
+            if on:
+                notes.append("已写入 ~/.bashrc、~/.zshrc 与 fish conf.d，请新开终端后生效")
         elif target in ("gitwin", "gitwsl"):
             label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
             use_wsl = target == "gitwsl"
@@ -791,13 +1040,17 @@ class Api:
         if not pm._is_valid_port(new_port):
             return {"error": "端口须为 1-65535 的整数"}
         new_port = str(int(new_port))
-        host = str(host).strip() if host else self.host
-        if not _valid_host(host):
+        new_host = str(host).strip() if host else self.host
+        if not _valid_host(new_host):
             return {"error": "代理地址不合法，请先修正"}
-        if new_port == self.port and host == self.host:
+        if new_port == self.port and new_host == self.host:
             return {"ok": True, "applied": []}
 
-        old_h, old_p = host, self.port
+        # Match currently-applied endpoints against the CACHED address, not
+        # the (possibly just-edited) field host. Re-enable uses new_host.
+        old_h, old_p = self.host, str(self.port)
+        if not _valid_host(old_h) or not pm._is_valid_port(old_p):
+            old_h, old_p = new_host, old_p if pm._is_valid_port(old_p) else new_port
         managed_url = f"http://{old_h}:{old_p}"
         # The WSL npm/pip endpoints write the gateway URL in NAT mode, so the
         # "is this ours" comparison must use the same substituted URL.
@@ -813,6 +1066,7 @@ class Api:
         wsl_state = self.refresh_item("wsl")
         enabled = {
             "ps": pm.get_ps_status() == managed_url,
+            "sys": pm.get_sys_proxy() == managed_url,
             "wsl": bool((wsl_state or {}).get("on")),
             "gitwin": pm.get_git_proxy_win() == managed_url,
             "gitwsl": (wsl_state or {}).get("git") == wsl_managed_url,
@@ -822,9 +1076,10 @@ class Api:
             "pipwsl": pm.get_pip_proxy_wsl() == wsl_managed_url,
         }
         if not any(enabled.values()):
-            self.host, self.port = old_h, new_port
+            self.host, self.port = new_host, new_port
             with _cfg_lock:
-                save_config(self._cfg_with_port(new_port))
+                if not save_config(self._cfg_with_port(new_port)):
+                    return {"ok": False, "error": "配置文件写入失败（磁盘已满或权限不足）"}
             return {"ok": True, "applied": []}
 
         errs, notes = {}, []
@@ -835,6 +1090,10 @@ class Api:
             ret = pm.set_ps_proxy(old_h, old_p, False)
             if ret is not True:
                 dis_errs["ps"] = f"PowerShell: {ret}"
+        if enabled["sys"]:
+            ret = pm.set_sys_proxy(old_h, old_p, False)
+            if ret is not True:
+                dis_errs["sys"] = f"系统代理: {ret}"
         if enabled["wsl"]:
             ret = pm.set_wsl_proxy(old_h, old_p, False)
             if ret is not True:
@@ -863,86 +1122,103 @@ class Api:
             ret = pm.set_pip_proxy(old_h, old_p, False)
             if ret is not True:
                 dis_errs["pip"] = f"pip: {ret}"
-        if enabled["npmwsl"] or enabled["pipwsl"]:
+        if enabled["npmwsl"]:
             # In NAT mode the file holds the gateway URL, so the surgical
             # disable must target the substituted host, not the fields'.
             wh, wp = old_h, old_p
-            cur = pm.get_npm_proxy_wsl() if enabled["npmwsl"] else pm.get_pip_proxy_wsl()
+            cur = pm.get_npm_proxy_wsl()
             if cur and cur.startswith("http://"):
                 ch, _, cp = cur[len("http://"):].rpartition(":")
                 if ch and pm._is_valid_port(cp):
                     wh, wp = ch, cp
-            if enabled["npmwsl"]:
-                ret = pm.set_npm_proxy_wsl(wh, wp, False)
-                if ret is not True:
-                    dis_errs["npmwsl"] = f"npm(WSL): {ret}"
-            if enabled["pipwsl"]:
-                ret = pm.set_pip_proxy_wsl(wh, wp, False)
-                if ret is not True:
-                    dis_errs["pipwsl"] = f"pip(WSL): {ret}"
+            ret = pm.set_npm_proxy_wsl(wh, wp, False)
+            if ret is not True:
+                dis_errs["npmwsl"] = f"npm(WSL): {ret}"
+        if enabled["pipwsl"]:
+            wh, wp = old_h, old_p
+            cur = pm.get_pip_proxy_wsl()
+            if cur and cur.startswith("http://"):
+                ch, _, cp = cur[len("http://"):].rpartition(":")
+                if ch and pm._is_valid_port(cp):
+                    wh, wp = ch, cp
+            ret = pm.set_pip_proxy_wsl(wh, wp, False)
+            if ret is not True:
+                dis_errs["pipwsl"] = f"pip(WSL): {ret}"
 
-        self.host, self.port = old_h, new_port
+        if dis_errs:
+            return {"ok": False, "applied": [],
+                    "error": "；".join(dis_errs.values()), "note": None}
+
+        self.host, self.port = new_host, new_port
+        cfg_err = None
         with _cfg_lock:
-            save_config(self._cfg_with_port(new_port))
+            if not save_config(self._cfg_with_port(new_port)):
+                cfg_err = "配置文件写入失败（磁盘已满或权限不足）"
 
         applied = []
-        if not dis_errs:
-            if enabled["wsl"]:
-                pm._invalidate_wsl_network_mode_cache()
-                ret = pm.set_wsl_proxy(old_h, new_port, True)
+        if enabled["wsl"]:
+            pm._invalidate_wsl_network_mode_cache()
+            ret = pm.set_wsl_proxy(new_host, new_port, True)
+            if ret is True:
+                applied.append("wsl")
+            else:
+                errs["wsl"] = f"WSL: {ret}"
+        if enabled["ps"]:
+            ret = pm.set_ps_proxy(new_host, new_port, True)
+            if ret is True:
+                applied.append("ps")
+            else:
+                errs["ps"] = f"PowerShell: {ret}"
+        if enabled["sys"]:
+            ret = pm.set_sys_proxy(new_host, new_port, True)
+            if ret is True:
+                applied.append("sys")
+            else:
+                errs["sys"] = f"系统代理: {ret}"
+        for tgt, label, use_wsl in (("gitwin", "Git(Windows)", False),
+                                    ("gitwsl", "Git(WSL)", True)):
+            if enabled[tgt]:
+                # NAT: Git(WSL) must re-enable with the gateway URL
+                # (set_git_proxy writes verbatim — no pm-side swap).
+                gh, gp = self._wsl_url_target(new_host, new_port) \
+                    if use_wsl else (new_host, new_port)
+                ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl)
                 if ret is True:
-                    applied.append("wsl")
+                    applied.append(tgt)
+                    self._git_managed[tgt] = (gh, gp)
                 else:
-                    errs["wsl"] = f"WSL: {ret}"
-            if enabled["ps"]:
-                ret = pm.set_ps_proxy(old_h, new_port, True)
-                if ret is True:
-                    applied.append("ps")
-                else:
-                    errs["ps"] = f"PowerShell: {ret}"
-            for tgt, label, use_wsl in (("gitwin", "Git(Windows)", False),
-                                        ("gitwsl", "Git(WSL)", True)):
-                if enabled[tgt]:
-                    # NAT: Git(WSL) must re-enable with the gateway URL
-                    # (set_git_proxy writes verbatim — no pm-side swap).
-                    gh, gp = self._wsl_url_target(old_h, new_port) \
-                        if use_wsl else (old_h, new_port)
-                    ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl)
-                    if ret is True:
-                        applied.append(tgt)
-                        self._git_managed[tgt] = (gh, gp)
-                    else:
-                        errs[tgt] = f"{label}: {ret}"
-            if enabled["npm"]:
-                ret = pm.set_npm_proxy(old_h, new_port, True)
-                if ret is True:
-                    applied.append("npm")
-                else:
-                    errs["npm"] = f"npm: {ret}"
-            if enabled["pip"]:
-                ret = pm.set_pip_proxy(old_h, new_port, True)
-                if ret is True:
-                    applied.append("pip")
-                else:
-                    errs["pip"] = f"pip: {ret}"
-            if enabled["npmwsl"]:
-                ret = pm.set_npm_proxy_wsl(old_h, new_port, True)
-                if ret is True:
-                    applied.append("npmwsl")
-                else:
-                    errs["npmwsl"] = f"npm(WSL): {ret}"
-            if enabled["pipwsl"]:
-                ret = pm.set_pip_proxy_wsl(old_h, new_port, True)
-                if ret is True:
-                    applied.append("pipwsl")
-                else:
-                    errs["pipwsl"] = f"pip(WSL): {ret}"
-            if "wsl" in applied or "npmwsl" in applied or "pipwsl" in applied:
-                if old_h.lower() in pm.LOOPBACK_HOSTS \
-                        and pm.get_wsl_network_mode() != "Mirrored":
-                    notes.append("NAT 模式已自动改用宿主网关 IP。")
-        else:
-            errs = dis_errs
+                    errs[tgt] = f"{label}: {ret}"
+        if enabled["npm"]:
+            ret = pm.set_npm_proxy(new_host, new_port, True)
+            if ret is True:
+                applied.append("npm")
+            else:
+                errs["npm"] = f"npm: {ret}"
+        if enabled["pip"]:
+            ret = pm.set_pip_proxy(new_host, new_port, True)
+            if ret is True:
+                applied.append("pip")
+            else:
+                errs["pip"] = f"pip: {ret}"
+        if enabled["npmwsl"]:
+            ret = pm.set_npm_proxy_wsl(new_host, new_port, True)
+            if ret is True:
+                applied.append("npmwsl")
+            else:
+                errs["npmwsl"] = f"npm(WSL): {ret}"
+        if enabled["pipwsl"]:
+            ret = pm.set_pip_proxy_wsl(new_host, new_port, True)
+            if ret is True:
+                applied.append("pipwsl")
+            else:
+                errs["pipwsl"] = f"pip(WSL): {ret}"
+        if "wsl" in applied or "npmwsl" in applied or "pipwsl" in applied \
+                or "gitwsl" in applied:
+            if new_host.lower() in pm.LOOPBACK_HOSTS \
+                    and pm.get_wsl_network_mode() != "Mirrored":
+                notes.append("NAT 模式已自动改用宿主网关 IP。")
+        if cfg_err:
+            errs["config"] = cfg_err
         ok = not errs
         return {"ok": ok, "applied": applied,
                 "error": "；".join(errs.values()) if errs else None,
@@ -955,23 +1231,35 @@ class Api:
 
     # ── live speed + port probe (sampled on a background thread) ──
     def _speed_loop(self):
+        last_t = time.monotonic()
         while True:
+            time.sleep(1.0)
             try:
+                now = time.monotonic()
+                dt = max(now - last_t, 1e-3)
+                last_t = now
                 cur = pm.get_net_counters()
+                # Snapshot host/port atomically: do_toggle writes them as a
+                # pair on another thread without this lock.
+                host, port = self.host, self.port
+                up_str = dn_str = None
+                dn_num = 0.0
                 with self._speed_lock:
-                    up_str = dn_str = None
-                    dn_num = 0.0
                     if cur is not None and self._speed_prev is not None:
-                        up = cur[0] - self._speed_prev[0]
-                        dn = cur[1] - self._speed_prev[1]
+                        up = (cur[0] - self._speed_prev[0]) / dt
+                        dn = (cur[1] - self._speed_prev[1]) / dt
                         if 0 <= up <= 100 * 1024 * 1024:
                             up_str = pm.format_speed(up)
                         if 0 <= dn <= 100 * 1024 * 1024:
                             dn_str = pm.format_speed(dn)
                             dn_num = float(dn)
                     self._speed_prev = cur if cur is not None else self._speed_prev
-                    alive = pm.proxy_port_alive(self.host, self.port) \
-                        if (self.host and pm._is_valid_port(self.port)) else None
+                # TCP probe can block ~1.5s when the proxy is down — keep it
+                # off the speed lock so get_speed() stays responsive.
+                alive = None
+                if host and pm._is_valid_port(port):
+                    alive = pm.proxy_port_alive(host, port)
+                with self._speed_lock:
                     self._speed = {
                         "up": up_str or "—", "dn": dn_str or "—",
                         "dn_num": dn_num,
@@ -980,7 +1268,6 @@ class Api:
                     }
             except Exception:
                 pass  # never let the sampler thread die
-            time.sleep(1.0)
 
     def get_speed(self):
         with self._speed_lock:
@@ -991,14 +1278,27 @@ class Api:
         pm._invalidate_wsl_network_mode_cache()
         ret = pm.restart_wsl()
         # A WSL restart can move the NAT subnet; refresh the gateway IP baked
-        # into the bashrc block when the proxy is on with a loopback host.
-        if ret is True:
+        # into every WSL-side endpoint (bashrc, git, npm, pip) when the proxy
+        # is on with a loopback host.
+        if ret is True \
+                and self.host.lower() in pm.LOOPBACK_HOSTS \
+                and pm._is_valid_port(self.port) \
+                and pm.get_wsl_network_mode() != "Mirrored":
+            h, p = self.host, str(int(self.port))
             wsl_state = self.refresh_item("wsl")
-            if wsl_state and wsl_state.get("on") \
-                    and self.host.lower() in pm.LOOPBACK_HOSTS \
-                    and pm._is_valid_port(self.port) \
-                    and pm.get_wsl_network_mode() != "Mirrored":
-                pm.set_wsl_proxy(self.host, str(int(self.port)), True)
+            if wsl_state and wsl_state.get("on"):
+                pm.set_wsl_proxy(h, p, True)
+            git = (wsl_state or {}).get("git")
+            if git and str(git).startswith("http://"):
+                gh, gp = self._wsl_url_target(h, p)
+                pm.set_git_proxy(gh, gp, True, use_wsl=True)
+                self._git_managed["gitwsl"] = (gh, gp)
+            npm = pm.get_npm_proxy_wsl()
+            if npm and str(npm).startswith("http://"):
+                pm.set_npm_proxy_wsl(h, p, True)
+            pipv = pm.get_pip_proxy_wsl()
+            if pipv and str(pipv).startswith("http://"):
+                pm.set_pip_proxy_wsl(h, p, True)
         return {"ok": ret is True, "error": None if ret is True else str(ret)}
 
     def copy(self, text):
@@ -1028,6 +1328,7 @@ class Api:
         sources = {
             # Windows side
             "ps":     pm.get_ps_proxy_vars,      # env vars
+            "sys":    lambda: {"HTTP_PROXY": pm.get_sys_proxy()},
             "gitwin": lambda: {"HTTP_PROXY": pm.get_git_proxy_win()},
             "npm":    lambda: {"HTTP_PROXY": pm.get_npm_proxy()},
             "pip":    lambda: {"HTTP_PROXY": pm.get_pip_proxy()},
@@ -1064,34 +1365,46 @@ class Api:
         return self._wsl_proxy_probe(host, int(port))
 
     def _proxy_probe(self, host, port, _t, urlreq):
-        """Fetch a generate_204 URL through host:port, returning {ok, ms} or
-        {ok: False, error}. `urlreq` is the urllib.request module."""
+        """Fetch a lightweight URL through host:port, returning {ok, ms} or
+        {ok: False, error}. Tries several endpoints so a blocked gstatic
+        does not look like a dead proxy. `urlreq` is urllib.request."""
         proxy = urlreq.ProxyHandler({
             "http": f"http://{host}:{port}", "https": f"http://{host}:{port}"})
         opener = urlreq.build_opener(proxy)
+        last_err = "连接失败"
         t0 = _t.perf_counter()
-        try:
-            req = urlreq.Request(
-                "http://www.gstatic.com/generate_204",
-                headers={"User-Agent": "ProxyManager/2"})
-            with opener.open(req, timeout=8) as resp:
-                ok = resp.status == 204
-            ms = int((_t.perf_counter() - t0) * 1000)
-            return {"ok": ok, "ms": ms} if ok else {"ok": False, "error": f"HTTP {resp.status}"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)[:120] or "连接失败"}
+        for dest in _PROBE_URLS:
+            try:
+                req = urlreq.Request(
+                    dest, headers={"User-Agent": "ProxyManager/2"})
+                with opener.open(req, timeout=5) as resp:
+                    ok = resp.status in (200, 204)
+                ms = int((_t.perf_counter() - t0) * 1000)
+                if ok:
+                    return {"ok": True, "ms": ms}
+                last_err = f"HTTP {resp.status}"
+            except Exception as e:
+                last_err = str(e)[:160] or "连接失败"
+        return {"ok": False, "error": last_err}
 
     def _wsl_proxy_probe(self, host, port):
         """Same probe executed inside WSL via curl (through the proxy)."""
-        script = (f"curl -x http://{host}:{port} -s -o /dev/null -w '%{{http_code}} %{{time_total}}' "
-                  f"--max-time 8 http://www.gstatic.com/generate_204 2>/dev/null; echo")
+        urls = " ".join(_PROBE_URLS)
+        script = (
+            f"for u in {urls}; do "
+            f"out=$(curl -x http://{host}:{port} -s -o /dev/null "
+            f"-w '%{{http_code}} %{{time_total}}' --max-time 5 \"$u\" 2>/dev/null); "
+            "code=${out%% *}; "
+            "if [ \"$code\" = 204 ] || [ \"$code\" = 200 ]; then echo \"$out\"; exit 0; fi; "
+            "done; echo FAIL; echo"
+        )
         try:
             r = subprocess.run(
                 ["wsl", "-e", "bash", "-c", script],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=25,
                 creationflags=subprocess.CREATE_NO_WINDOW)
             out = (r.stdout or "").strip().split()
-            if len(out) == 2 and out[0] == "204":
+            if len(out) >= 2 and out[0] in ("204", "200"):
                 return {"ok": True, "ms": int(float(out[1]) * 1000)}
             if not pm.wsl_available():
                 return {"ok": False, "error": "WSL 不可用"}
@@ -1131,6 +1444,10 @@ class Api:
         """Native file picker via PowerShell (process-isolated, so no COM
         apartment headaches inside the pywebview process). stdout is forced
         to UTF-8 so Chinese paths survive the console round-trip."""
+        # A topmost window would cover the dialog (it is another process).
+        was_pin = self._pinned
+        if was_pin:
+            self._apply_topmost(False)
         ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
               "Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
               "$f = New-Object System.Windows.Forms.OpenFileDialog; "
@@ -1146,10 +1463,19 @@ class Api:
             path = path[-1].strip() if path else ""
             if not path or not os.path.isfile(path):
                 return {"ok": False}  # user cancelled
-            self.save_config({"bg_path": path})
+            try:
+                if os.path.getsize(path) > _MAX_BG_BYTES:
+                    return {"ok": False, "error": "图片超过 8MB，请选择更小的文件"}
+            except OSError as e:
+                return {"ok": False, "error": str(e)}
+            if not self.save_config({"bg_path": path}):
+                return {"ok": False, "error": "配置文件写入失败（磁盘已满或权限不足）"}
             return {"ok": True, "path": path, "name": os.path.basename(path)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+        finally:
+            if was_pin:
+                self._apply_topmost(True)
 
     def clear_background(self):
         self.save_config({"bg_path": ""})
@@ -1168,6 +1494,8 @@ class Api:
             key = (path, stat.st_mtime_ns, stat.st_size)
         except OSError:
             return None
+        if stat.st_size > _MAX_BG_BYTES:
+            return {"error": "图片超过 8MB，请选择更小的文件"}
         if self._bg_cache and self._bg_cache[0] == key:
             return {"data": self._bg_cache[1]}
         ext = os.path.splitext(path)[1].lower().lstrip(".")
@@ -1202,6 +1530,45 @@ class Api:
             w.minimize()
         elif cmd == "maximize":
             self._toggle_maximize()
+        elif cmd == "drag_move":
+            # JS starts the NATIVE move loop on mousedown (like a real
+            # caption): drag works with zero delay, and a fast second click
+            # becomes WM_NCLBUTTONDBLCLK (handled in _resize_hook_proc) —
+            # both behaviors come from the system, not from JS timers.
+            # lParam MUST carry the real cursor position (0,0 would make the
+            # move loop compute offsets from the top-left corner and the
+            # window would jump). Must run on the UI thread.
+            try:
+                form = getattr(w, "native", None)
+                if form is None:
+                    return {"ok": False}
+                from System import Type, Func  # noqa: E402
+
+                def _move():
+                    if _resize_maximized:
+                        return  # dragging a maximized window is a no-op
+                    hwnd = self._hwnd()
+                    if not hwnd:
+                        return
+                    pt = _POINT()
+                    if not user32.GetCursorPos(ctypes.byref(pt)):
+                        return
+                    # ReleaseCapture so the move loop owns the mouse.
+                    user32.ReleaseCapture()
+                    lp = ((pt.y & 0xFFFF) << 16) | (pt.x & 0xFFFF)
+                    if lp & 0x80000000:
+                        lp -= 0x100000000  # sign-extend (negative coords)
+                    # WM_NCLBUTTONDOWN with HTCAPTION enters the system move
+                    # loop; it returns when the button is released.
+                    user32.SendMessageW(hwnd, 0x00A1, 2, lp)
+
+                if form.InvokeRequired:
+                    form.Invoke(Func[Type](_move))
+                else:
+                    _move()
+            except Exception:
+                pass
+            return {"ok": True}
         elif cmd == "close":
             if self._tray_ok:
                 w.hide()  # hide to tray, mirroring the tkinter app
@@ -1256,6 +1623,12 @@ class Api:
                 user32.SetWindowPos(hwnd, 0, l, t, r - l, b - t, 0x0004)
             self._maximized = False
         set_resize_maximized(self._maximized)
+
+    def _clear_maximized_state(self):
+        """Called from the WndProc hook (via _clear_fake_maximized) when a
+        native caption drag restored the window behind our back: the bounds
+        are already correct, only the instance flag must follow."""
+        self._maximized = False
 
 
 def _tray_executable_matches(executable):
@@ -1340,6 +1713,7 @@ def _promote_tray_icon(retries=6, icon=None):
         if targets:
             promoted = 0
             for sub in targets:
+                key = None
                 try:
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                          base + "\\" + sub, 0,
@@ -1352,9 +1726,11 @@ def _promote_tray_icon(retries=6, icon=None):
                         winreg.SetValueEx(key, "IsPromoted", 0,
                                           winreg.REG_DWORD, 1)
                     promoted += 1
-                    winreg.CloseKey(key)
                 except OSError:
                     pass
+                finally:
+                    if key is not None:
+                        winreg.CloseKey(key)
             if promoted:
                 # Re-register the live icon so Explorer applies the new
                 # promotion state right now instead of on next launch.
@@ -1406,6 +1782,11 @@ def _make_tray(api, window):
         # and cancels destruction, leaving an invisible process holding the
         # singleton mutex after the tray has already stopped.
         api._tray_ok = False
+        try:
+            if load_config().get("quit_clear"):
+                api.clear_all_endpoints()
+        except Exception:
+            pass
         try:
             icon.stop()
         finally:
@@ -1487,12 +1868,12 @@ def _wake_or_exit():
         hwnd = user32.FindWindowW(None, pm.APP_TITLE)
         if hwnd:
             user32.ShowWindow(hwnd, _SW_RESTORE)
-            ctypes.windll.user32.AllowSetForegroundWindow(-1)
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            user32.AllowSetForegroundWindow(0xFFFFFFFF)
+            user32.SetForegroundWindow(hwnd)
         else:
             for h in _our_hwnds(other_pid=True):
                 user32.ShowWindow(h, _SW_RESTORE)
-                ctypes.windll.user32.SetForegroundWindow(h)
+                user32.SetForegroundWindow(h)
         if mutex:
             kernel32.CloseHandle(mutex)
         return None
@@ -1538,8 +1919,9 @@ def main():
     api._window = window
     # Taskbar SC_RESTORE on a fake-maximized window needs the Api's
     # prev-bounds restore; the WndProc hook lives outside the Api class.
-    global _restore_callback, _page_window_ref
+    global _restore_callback, _clear_maximized_cb, _page_window_ref
     _restore_callback = api._toggle_maximize
+    _clear_maximized_cb = api._clear_maximized_state
     _page_window_ref = window
 
     # Tray icon lives for the whole process (like the tkinter build): the
@@ -1564,6 +1946,12 @@ def main():
     # so Explorer applies the promoted state immediately.
     def _on_loaded():
         ensure_resize_hook(window)
+        ensure_nonclient_drag(window)
+        if _START_HIDDEN:
+            try:
+                window.hide()
+            except Exception:
+                pass
     window.events.loaded += _on_loaded
 
     # Alt+F4 on the frameless window should behave like the X button: hide to
@@ -1583,6 +1971,7 @@ def main():
         while True:
             try:
                 ensure_resize_hook(window)
+                ensure_nonclient_drag(window)
             except Exception:
                 import traceback
                 traceback.print_exc()

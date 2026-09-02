@@ -2,9 +2,9 @@
 ProxyManager - backend library.
 
 All system-touching logic used by the web UI (app.py + ui/index.html):
-Windows user-environment proxy (registry), WSL ~/.bashrc injection across
-distros, git global proxy on both ends, network/speed telemetry, WSL restart,
-crash logging. No UI code lives here.
+Windows user-environment proxy (registry), WinINET system proxy, WSL
+bashrc/zshrc/fish injection across distros, git global proxy on both ends,
+network/speed telemetry, WSL restart, crash logging. No UI code lives here.
 
 Front-end entry point: app.py (pywebview + WebView2).
 """
@@ -93,26 +93,29 @@ NO_PROXY_VALUE  = "localhost,127.0.0.1,::1"
 LOOPBACK_HOSTS  = {"127.0.0.1", "localhost", "::1", "::"}
 
 
-def _is_valid_port(p: str) -> bool:
+def _is_valid_port(p) -> bool:
     """ASCII digits only — str.isdigit() also accepts superscripts etc. that
-    int() then rejects."""
-    return p.isascii() and p.isdigit() and 1 <= int(p) <= 65535
+    int() then rejects. Accepts int as well as str (callers mix both)."""
+    if isinstance(p, bool) or p is None:
+        return False
+    if isinstance(p, int):
+        return 1 <= p <= 65535
+    s = str(p).strip()
+    return s.isascii() and s.isdigit() and 1 <= int(s) <= 65535
 
 
 # ─── Network Info ─────────────────────────────────────────────────────────────
 def get_local_ip():
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
     except Exception:
         return "未检测到"
 
 
 def get_wsl_ip_and_block():
-    """Fetch WSL IP, the proxy-manager bashrc block, and the WSL git proxy in
+    """Fetch WSL IP, the proxy-manager shell block, and the WSL git proxy in
     a single wsl.exe call.
 
     Each wsl.exe invocation costs ~5s of process-startup overhead on a cold
@@ -126,7 +129,8 @@ def get_wsl_ip_and_block():
         cmd = (
             "hostname -I 2>/dev/null | awk '{print $1}';"
             f"echo '{sep1}';"
-            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null;"
+            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc ~/.zshrc 2>/dev/null; "
+            "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null;"
             f"echo '{sep2}';"
             "git config --global --get http.proxy 2>/dev/null;"
             # git --get exits 1 when the key is unset, so the raw exit code can't
@@ -181,8 +185,9 @@ def get_wsl_network_mode():
     try:
         p = os.path.expanduser(r"~\.wslconfig")
         mtime = os.path.getmtime(p) if os.path.exists(p) else None
-        if _wsl_network_mode_cache is not None:
-            cached_mtime, cached_mode = _wsl_network_mode_cache
+        cached = _wsl_network_mode_cache  # snapshot: another thread may clear it
+        if cached is not None:
+            cached_mtime, cached_mode = cached
             # Cache hit only if .wslconfig is unchanged since we parsed it.
             if cached_mtime == mtime:
                 return cached_mode
@@ -201,7 +206,14 @@ def get_wsl_network_mode():
                 if in_wsl2:
                     m = re.match(r"^networkingMode\s*=\s*(\S+)\s*$", line, re.IGNORECASE)
                     if m:
-                        mode = m.group(1).capitalize()
+                        raw = m.group(1).strip().strip('"').strip("'")
+                        low = raw.lower()
+                        if low == "mirrored":
+                            mode = "Mirrored"
+                        elif low == "nat":
+                            mode = "NAT"
+                        else:
+                            mode = raw.capitalize()
                         _wsl_network_mode_cache = (mtime, mode)
                         return mode
         _wsl_network_mode_cache = (mtime, "默认(NAT)")
@@ -280,12 +292,12 @@ def get_net_counters():
 
 
 def format_speed(bytes_per_sec: float) -> str:
-    """Human-readable rate, e.g. 1.2 MB/s."""
-    if bytes_per_sec < 1024:
+    """Human-readable rate, e.g. 1.2 MB/s (SI, same scale as the Mbps setting)."""
+    if bytes_per_sec < 1000:
         return f"{bytes_per_sec:.0f} B/s"
     val = bytes_per_sec
     label = "KB"
-    for lbl, factor in (("KB", 1024), ("MB", 1024 ** 2), ("GB", 1024 ** 3)):
+    for lbl, factor in (("KB", 1000), ("MB", 1000 ** 2), ("GB", 1000 ** 3)):
         if bytes_per_sec >= factor:
             val = bytes_per_sec / factor
             label = lbl
@@ -327,13 +339,15 @@ def get_ps_proxy_vars():
 
 
 def _read_wsl_block() -> str:
-    """Return the text between the proxy-manager markers in ~/.bashrc (empty
-    if absent). Scoping reads to this block avoids mis-picking up commented or
-    user-written export lines elsewhere in the file."""
+    """Return the text between the proxy-manager markers in ~/.bashrc,
+    ~/.zshrc, and the fish conf.d file (empty if absent). Scoping reads to
+    this block avoids mis-picking up commented or user-written export lines
+    elsewhere in the file."""
     try:
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c",
-             f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null"],
+             f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc ~/.zshrc 2>/dev/null; "
+             "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         return r.stdout
@@ -342,9 +356,15 @@ def _read_wsl_block() -> str:
 
 
 def _parse_export(block: str, name: str):
-    """Pull the value of `export NAME="..."` from the marker block."""
+    """Pull NAME from a POSIX `export NAME=` line or a fish `set -gx NAME`."""
     m = re.search(
         r'^export\s+' + re.escape(name) + r'\s*=\s*["\']?([^"\'\n]+)["\']?\s*$',
+        block, re.MULTILINE,
+    )
+    if m:
+        return m.group(1).strip()
+    m = re.search(
+        r'^set\s+-gx\s+' + re.escape(name) + r'\s+["\']?([^"\'\n]+)["\']?\s*$',
         block, re.MULTILINE,
     )
     return m.group(1).strip() if m else None
@@ -412,24 +432,34 @@ def set_ps_proxy(host, port, enable=True):
             winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ,
                               _merged_no_proxy(prev))
         else:
+            # Surgical: only drop values equal to the URL this tool manages.
+            # A proxy the user set by hand for another endpoint survives.
+            removed = False
             for n in ("HTTP_PROXY", "HTTPS_PROXY"):
                 try:
-                    winreg.DeleteValue(key, n)
+                    cur, _ = winreg.QueryValueEx(key, n)
                 except FileNotFoundError:
-                    pass
-            try:
-                prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
-            except FileNotFoundError:
-                prev = None
-            if prev is not None:
-                kept = _stripped_no_proxy(prev)
-                if kept:
-                    winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, kept)
-                else:
+                    continue
+                if cur == url:
                     try:
-                        winreg.DeleteValue(key, "NO_PROXY")
+                        winreg.DeleteValue(key, n)
+                        removed = True
                     except FileNotFoundError:
                         pass
+            if removed:
+                try:
+                    prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
+                except FileNotFoundError:
+                    prev = None
+                if prev is not None:
+                    kept = _stripped_no_proxy(prev)
+                    if kept:
+                        winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, kept)
+                    else:
+                        try:
+                            winreg.DeleteValue(key, "NO_PROXY")
+                        except FileNotFoundError:
+                            pass
         winreg.CloseKey(key)
         # Broadcast env change so already-running processes pick it up.
         ret = ctypes.c_long()
@@ -437,6 +467,102 @@ def set_ps_proxy(host, port, enable=True):
             HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
             0x0002, 5000, ctypes.byref(ret),
         )
+        return True
+    except OSError as e:
+        return str(e)
+
+
+INET_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+
+def _wininet_notify():
+    """Ask WinINET to re-read Internet Settings so browsers pick the change up."""
+    try:
+        wininet = ctypes.WinDLL("wininet")
+        wininet.InternetSetOptionW.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        wininet.InternetSetOptionW.restype = ctypes.c_int
+        wininet.InternetSetOptionW(None, 39, None, 0)  # SETTINGS_CHANGED
+        wininet.InternetSetOptionW(None, 37, None, 0)  # REFRESH
+    except Exception:
+        pass
+
+
+def _sys_proxy_server_to_url(server: str):
+    s = (server or "").strip()
+    if not s:
+        return None
+    if "=" in s:
+        picked = None
+        for part in s.split(";"):
+            pl = part.lower()
+            if pl.startswith("http=") and not pl.startswith("https="):
+                picked = part.split("=", 1)[1]
+                break
+            if pl.startswith("https=") and picked is None:
+                picked = part.split("=", 1)[1]
+        s = (picked or s.split("=", 1)[-1]).strip()
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    return f"http://{s}"
+
+
+def get_sys_proxy():
+    """WinINET user proxy ('未设置' when disabled / empty)."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
+                             winreg.KEY_READ)
+        try:
+            enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+        except FileNotFoundError:
+            enable = 0
+        try:
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+        except FileNotFoundError:
+            server = ""
+        winreg.CloseKey(key)
+        if not enable:
+            return "未设置"
+        return _sys_proxy_server_to_url(str(server)) or "未设置"
+    except OSError:
+        return "未检测到"
+
+
+def set_sys_proxy(host, port, enable=True):
+    """Write/clear Windows system proxy (Internet Options / WinINET).
+    Disable is surgical: only turns it off when the current server is ours."""
+    server = f"{host}:{port}"
+    url = f"http://{host}:{port}"
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
+                             winreg.KEY_SET_VALUE | winreg.KEY_READ)
+        if enable:
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
+            try:
+                prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
+            except FileNotFoundError:
+                prev = ""
+            entries = [e.strip() for e in str(prev).split(";") if e.strip()]
+            for e in ("localhost", "127.0.0.1", "<local>"):
+                if e not in entries:
+                    entries.append(e)
+            winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
+                              ";".join(entries))
+        else:
+            try:
+                cur, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except FileNotFoundError:
+                cur = ""
+            cur_url = _sys_proxy_server_to_url(str(cur)) if cur else None
+            if cur_url == url or str(cur).strip() == server:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                try:
+                    winreg.DeleteValue(key, "ProxyServer")
+                except FileNotFoundError:
+                    pass
+        winreg.CloseKey(key)
+        _wininet_notify()
         return True
     except OSError as e:
         return str(e)
@@ -476,16 +602,15 @@ def proxy_port_alive(host, port, timeout=1.5):
     """TCP connect probe: catches 'proxy app not running / wrong port' before
     enabling, which otherwise silently breaks all terminal networking."""
     try:
-        s = socket.create_connection((host, int(port)), timeout=timeout)
-        s.close()
-        return True
-    except OSError:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
         return False
 
 
 def wsl_default_shell():
     """Basename of the default distro user's login shell, or None if WSL is
-    unusable. Anything other than bash never reads ~/.bashrc."""
+    unusable. bash/zsh/fish/sh are written to; anything else is warned."""
     try:
         r = subprocess.run(["wsl", "-e", "bash", "-c", 'basename "${SHELL:-bash}"'],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
@@ -513,6 +638,21 @@ def _wsl_distros():
         return []
 
 
+_wsl_apply_all = True  # True: every user distro; False: default distro only
+
+
+def set_wsl_apply_all(enabled: bool) -> None:
+    global _wsl_apply_all
+    _wsl_apply_all = bool(enabled)
+
+
+def _wsl_targets():
+    """Distro names to read/write. Empty string = WSL's default distro."""
+    if _wsl_apply_all:
+        return _wsl_distros() or [""]
+    return [""]
+
+
 def _wsl_write_failure(r, distro):
     """Classify a failed `wsl -e bash` run without echoing wsl's own console
     text (redirected output may be UTF-16 and decodes as mojibake)."""
@@ -521,8 +661,8 @@ def _wsl_write_failure(r, distro):
     detail = (r.stderr or "").strip().splitlines()
     detail = detail[0].strip() if detail else ""
     if detail and detail.isascii():
-        return f"写入 ~/.bashrc 失败：{detail}"
-    return "写入 ~/.bashrc 失败（权限不足或磁盘已满？）"
+        return f"写入 WSL 代理配置失败：{detail}"
+    return "写入 WSL 代理配置失败（权限不足或磁盘已满？）"
 
 
 def set_wsl_proxy(host, port, enable=True):
@@ -535,34 +675,81 @@ def set_wsl_proxy(host, port, enable=True):
         gw = _get_wsl_gateway_ip()
         if gw:
             url = f"http://{gw}:{port}"
+    # Merge loopback bypass entries into whatever NO_PROXY the user already
+    # exported earlier in bashrc / the environment, instead of overwriting.
     block = f"""{WSL_PROXY_BEGIN}
 export HTTP_PROXY="{url}"
 export HTTPS_PROXY="{url}"
 export http_proxy="{url}"
 export https_proxy="{url}"
-export NO_PROXY="{NO_PROXY_VALUE}"
+_pm_np="${{NO_PROXY:-}}"
+for _pm_e in localhost 127.0.0.1 ::1; do
+  case ",${{_pm_np}}," in
+    *",${{_pm_e}},"*) ;;
+    *) _pm_np="${{_pm_np:+${{_pm_np}},}}${{_pm_e}}" ;;
+  esac
+done
+export NO_PROXY="$_pm_np"
 export no_proxy="$NO_PROXY"
+unset _pm_np _pm_e
 {WSL_PROXY_END}"""
     try:
-        # One bash call per distro: repair a missing trailing newline, strip
-        # the managed block, then (on enable) append the fresh one. The strip
-        # result goes through `cat file > ~/.bashrc`, which writes THROUGH a
-        # symlink — `sed -i` would replace a stow/chezmoi-managed link with a
-        # plain file. The block arrives on stdin (no shell interpolation).
+        # One bash call per distro: strip the managed block from bashrc AND
+        # zshrc (same POSIX exports), then (on enable) append a fresh copy.
+        # Writes THROUGH the file (not sed -i) so stow/chezmoi symlinks stay
+        # links. The POSIX block arrives on stdin (no shell interpolation).
+        # fish gets its own conf.d file (different syntax).
         begin, end = re.escape(WSL_PROXY_BEGIN), re.escape(WSL_PROXY_END)
+        create = '[ -f "$f" ] || : > "$f"; ' if enable else '[ -f "$f" ] || return; '
+        append = 'cat "$block" >> "$f"; ' if enable else ''
         script = (
-            '[ -f ~/.bashrc ] && { '
-            '[ -n "$(tail -c1 ~/.bashrc 2>/dev/null)" ] && printf \'\\n\' >> ~/.bashrc; '
-            f'tmp=$(mktemp) && sed \'/{begin}/,/{end}/d\' ~/.bashrc > "$tmp" '
-            '&& cat "$tmp" > ~/.bashrc; rm -f "$tmp"; }'
+            ('block=$(mktemp); cat > "$block"; ' if enable else '')
+            + 'apply_posix() { f="$1"; ' + create
+            + '[ -n "$(tail -c1 "$f" 2>/dev/null)" ] && printf \'\\n\' >> "$f"; '
+            + f'tmp=$(mktemp) && sed \'/{begin}/,/{end}/d\' "$f" > "$tmp" '
+            + '&& cat "$tmp" > "$f"; rm -f "$tmp"; '
+            + append
+            + '}; '
+            + 'apply_posix "$HOME/.bashrc"; apply_posix "$HOME/.zshrc"; '
         )
         if enable:
-            script += "\ncat >> ~/.bashrc\n"
+            import base64 as _b64
+            fish_text = (
+                f"{WSL_PROXY_BEGIN}\n"
+                f'set -gx HTTP_PROXY "{url}"\n'
+                f'set -gx HTTPS_PROXY "{url}"\n'
+                f'set -gx http_proxy "{url}"\n'
+                f'set -gx https_proxy "{url}"\n'
+                "if not set -q NO_PROXY\n"
+                "    set -gx NO_PROXY\n"
+                "end\n"
+                "for _pm_e in localhost 127.0.0.1 ::1\n"
+                "    if not contains -- $_pm_e (string split -- , \"$NO_PROXY\")\n"
+                '        if test -n "$NO_PROXY"\n'
+                '            set -gx NO_PROXY "$NO_PROXY,$_pm_e"\n'
+                "        else\n"
+                '            set -gx NO_PROXY "$_pm_e"\n'
+                "        end\n"
+                "    end\n"
+                "end\n"
+                'set -gx no_proxy "$NO_PROXY"\n'
+                "set -e _pm_e\n"
+                f"{WSL_PROXY_END}\n"
+            )
+            b64 = _b64.b64encode(fish_text.encode("utf-8")).decode("ascii")
+            script += (
+                'mkdir -p "$HOME/.config/fish/conf.d"; '
+                f'echo {b64} | (base64 -d 2>/dev/null || base64 --decode) '
+                '> "$HOME/.config/fish/conf.d/proxy-manager.fish"; '
+                'rm -f "$block"'
+            )
+        else:
+            script += 'rm -f "$HOME/.config/fish/conf.d/proxy-manager.fish"'
 
         # Apply to every user distro (multi-distro setups), skipping Docker's
         # infra distros. Enable fails loudly; disable is best-effort.
         errs = []
-        for d in (_wsl_distros() or [""]):
+        for d in (_wsl_targets()):
             label = f"WSL({d})" if d else "WSL"
             try:
                 cmd = ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", script]
@@ -580,10 +767,39 @@ export no_proxy="$NO_PROXY"
         if enable and errs:
             return "; ".join(errs)
         return True
-    except Exception:
+    except Exception as e:
         # Disabling is best-effort cleanup: a missing/broken WSL has nothing
         # to clean, and reporting it would block the whole disable flow.
-        return True
+        if not enable:
+            return True
+        return str(e) or "WSL 操作失败"
+
+
+def _git_win_unset(url: str) -> None:
+    """Remove one exact git proxy URL on Windows. --fixed-value needs Git
+    2.33+; fall back to a regex unset so older Git still disables."""
+    for key in ("http.proxy", "https.proxy"):
+        r = subprocess.run(
+            ["git", "config", "--global", "--fixed-value", "--unset-all", key, url],
+            capture_output=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode in (0, 5):
+            continue
+        subprocess.run(
+            ["git", "config", "--global", "--unset-all", key, re.escape(url)],
+            capture_output=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def _git_wsl_unset_cmd(url: str) -> str:
+    """Bash snippet: surgical unset with --fixed-value, regex fallback."""
+    esc = re.escape(url)
+    return (
+        f"(git config --global --fixed-value --unset-all http.proxy '{url}' "
+        f"|| git config --global --unset-all http.proxy '{esc}') 2>/dev/null; "
+        f"(git config --global --fixed-value --unset-all https.proxy '{url}' "
+        f"|| git config --global --unset-all https.proxy '{esc}') 2>/dev/null; true"
+    )
 
 
 def set_git_proxy(host, port, enable=True, use_wsl=False):
@@ -598,7 +814,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
     try:
         if use_wsl:
             errs = []
-            for d in (_wsl_distros() or [""]):
+            for d in (_wsl_targets()):
                 label = f"WSL({d})" if d else "WSL"
                 try:
                     if enable:
@@ -607,9 +823,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
                     elif host or port:
                         # Remove only values equal to the URL this tool manages;
                         # any proxy value the user set themselves survives.
-                        u = re.escape(url)
-                        cmd = (f"git config --global --unset-all http.proxy '{u}' 2>/dev/null; "
-                               f"git config --global --unset-all https.proxy '{u}' 2>/dev/null; true")
+                        cmd = _git_wsl_unset_cmd(url)
                     else:
                         # Address/port fields were cleared: the managed URL is
                         # unknown, fall back to clearing the keys entirely.
@@ -646,10 +860,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
                     # Surgical: remove only the value this tool set, so a
                     # proxy the user configured by hand for another endpoint
                     # survives a disable.
-                    for key in ("http.proxy", "https.proxy"):
-                        subprocess.run(["git", "config", "--global", "--unset-all", key, re.escape(url)],
-                                       capture_output=True, timeout=15,
-                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                    _git_win_unset(url)
                 else:
                     # Address/port fields were cleared: managed URL unknown.
                     for key in ("http.proxy", "https.proxy"):
@@ -859,7 +1070,7 @@ def set_pip_proxy(host, port, enable=True):
 # distro. Reads pull the file back over wsl.exe stdout and edits happen on the
 # Windows side with the same _ini_edit used for the Windows files; writes push
 # the bytes back over stdin (never through shell interpolation — same channel
-# the ~/.bashrc block uses). Linux config paths differ from Windows:
+# the WSL shell block uses). Linux config paths differ from Windows:
 #   npm: ~/.npmrc (same name)
 #   pip: ~/.config/pip/pip.conf (XDG); the legacy ~/.pip/pip.conf is also
 #        cleaned surgically on disable, but only the XDG path is written.
@@ -931,7 +1142,7 @@ def get_npm_proxy_wsl(distro=None):
     the first proxy found (multi-distro setups are rare and usually kept in
     sync; the badge shows one URL). '未设置' / '未检测到' as elsewhere."""
     try:
-        for d in (_wsl_distros() or [""]):
+        for d in (_wsl_targets()):
             try:
                 data = _wsl_pull_file(d, _NPMrc_PATH_WSL)
             except OSError:
@@ -950,7 +1161,7 @@ def get_pip_proxy_wsl(distro=None):
     """pip proxy inside the distro(s): XDG pip.conf first, then the legacy
     ~/.pip/pip.conf (both are read by pip itself, in that order)."""
     try:
-        for d in (_wsl_distros() or [""]):
+        for d in (_wsl_targets()):
             for path in (_PIP_CONF_PATH_WSL, _PIP_CONF_LEGACY_WSL):
                 try:
                     data = _wsl_pull_file(d, path)
@@ -969,7 +1180,7 @@ def get_pip_proxy_wsl(distro=None):
 def set_npm_proxy_wsl(host, port, enable=True):
     """Write/clear npm's proxy + https-proxy in every user distro's ~/.npmrc.
     Same disable contract as the Windows npm endpoint. NAT mode swaps a
-    loopback host for the Windows gateway IP, same as the ~/.bashrc block."""
+    loopback host for the Windows gateway IP, same as the WSL shell block."""
     url = f"http://{host}:{port}"
     if enable and host.lower() in LOOPBACK_HOSTS \
             and get_wsl_network_mode() != "Mirrored":
@@ -978,7 +1189,7 @@ def set_npm_proxy_wsl(host, port, enable=True):
             url = f"http://{gw}:{port}"
     try:
         errs = []
-        for d in (_wsl_distros() or [""]):
+        for d in (_wsl_targets()):
             label = f"WSL({d})" if d else "WSL"
             try:
                 _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
@@ -1005,7 +1216,7 @@ def set_pip_proxy_wsl(host, port, enable=True):
             url = f"http://{gw}:{port}"
     try:
         errs = []
-        for d in (_wsl_distros() or [""]):
+        for d in (_wsl_targets()):
             label = f"WSL({d})" if d else "WSL"
             try:
                 _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
