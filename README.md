@@ -32,8 +32,8 @@ Terminal-side endpoints write environment variables, shell rc files, `git config
 
 ## Features
 
-- **Env-var connectivity test** — every variable in the "环境变量" card (HTTP_PROXY, system proxy, Git, npm, pip; separate per page) carries a 测试 button that fires a real request THROUGH that proxy source (urllib on Windows, curl inside WSL). Several captive-portal URLs are tried in order so a blocked gstatic does not look like a dead proxy; latency is green, the failure reason is red (full text on hover).
-- **Nine independent switches on Win/WSL pages** — the status-bar tabs switch the whole page between the Windows and WSL views (endpoints, network info, and env variables all follow); two vertical rails beside the endpoint list (全部开启 / 全部关闭) batch-toggle the current page, and each endpoint can still be toggled separately. Disabling removes exactly what the tool wrote, or restores the value it overwrote.
+- **Env-var connectivity test** — every variable in the environment-variables card (HTTP_PROXY, system proxy, Git, npm, pip; separate per page) carries a **Test** button that fires a real request THROUGH that proxy source (urllib on Windows, curl inside WSL). Several captive-portal URLs are tried in order so a blocked gstatic does not look like a dead proxy; latency is green, the failure reason is red (full text on hover).
+- **Nine independent switches on Win/WSL pages** — the status-bar tabs switch the whole page between the Windows and WSL views (endpoints, network info, and env variables all follow); two vertical rails beside the endpoint list (**Enable all / Disable all**) batch-toggle the current page, and each endpoint can still be toggled separately. Disabling removes exactly what the tool wrote, or restores the value it overwrote.
 - **Switches reflect reality** — every toggle is re-synced from the actually detected proxy state, so a failed operation reverts the switch automatically.
 - **Port quick-switch** — one-click switching between preset ports (7890 / 7892 / 7897 by default, fully customizable); enabled endpoints are re-applied with the new port automatically.
 - **NAT-aware WSL proxy** — in WSL2 NAT mode, `127.0.0.1` is automatically replaced with the host gateway IP (bashrc block and WSL npm/pip endpoints); mirrored mode keeps the loopback address unchanged.
@@ -121,11 +121,13 @@ The app stores its settings in `%APPDATA%\ProxyManager\config.json` and manages 
 | `bg_path` | string | `""` | Custom background image path |
 | `bg_dim` | float | `0.45` | Background dimming (0.0–0.8) |
 | `card_alpha` | float | `0.92` | Card opacity (0.5–1.0) |
-| `speed_full` | float | `5` | Spark-bar full-scale speed in Mbps (0.1–100000); the UI shows MB/s |
+| `speed_full` | float | `40` | Spark-bar full-scale speed in Mbps (0.1–100000); the UI shows MB/s |
 | `quit_clear` | bool | `false` | On tray Quit, disable this tool's proxies and restore overwritten values |
 | `wsl_all_distros` | bool | `true` | Write WSL endpoints to every user distro (`false` = default distro only) |
 | `close_hint_done` | bool | `false` | First-close “hides to tray” hint has been shown |
 | `restore` | object | `{}` | Stashed pre-overwrite proxy URLs, keyed by endpoint |
+| `win_rect` | list | `null` | Last normal window bounds (physical pixels); restored on launch |
+| `win_max` | bool | `false` | Start with the window maximized |
 
 A legacy `git` boolean key from older versions is migrated into `git_win` / `git_wsl` automatically on load.
 
@@ -135,7 +137,7 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 - The PowerShell endpoint sets user environment variables, which apply to terminals and processes started after the change. Already-open windows keep their old environment until you open a new one.
 - Only `http://` proxy URLs are managed; the tool writes `http://host:port` exactly.
 - In WSL, the managed block and git/npm/pip proxies are applied to every user distro by default (Settings can limit this to the default distro); Docker infrastructure distros are skipped.
-- Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **退出时关闭代理** is on). npm/pip switches still read as "on" whenever the file contains any proxy value.
+- Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **quit-clears-proxy** is on). npm/pip switches still read as "on" whenever the file contains any proxy value.
 - The WSL npm/pip endpoints read back and modify config files over `wsl.exe`; every read/write round-trip costs a wsl.exe call, so the WSL switches refresh a bit slower than the Windows ones.
 - **Restart WSL** terminates all processes running inside WSL.
 
