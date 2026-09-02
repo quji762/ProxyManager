@@ -990,6 +990,19 @@ def _eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
 
 
+def _decode_ini_bytes(data: bytes):
+    """Decode INI file bytes as (text, encoding). Tries UTF-8 (BOM optional)
+    then the ANSI codepage — a .npmrc / pip.conf hand-saved with GBK comments
+    must not make the WSL reads/writes raise UnicodeDecodeError (which is not
+    an OSError, so it slipped past every endpoint's error handling). The
+    returned encoding is reused on write so the file round-trips."""
+    try:
+        enc = "utf-8-sig" if data[:3] == b"\xef\xbb\xbf" else "utf-8"
+        return data.decode("utf-8-sig"), enc
+    except UnicodeDecodeError:
+        return data.decode("mbcs", errors="replace"), "mbcs"
+
+
 def get_npm_proxy():
     """npm's user-level proxy ('未设置' when no config/no key, '未检测到' when
     the file exists but can't be read)."""
@@ -1108,8 +1121,9 @@ def _wsl_push_file(distro, path, data: bytes):
     """Atomically replace a file in a distro with `data` (arrives on stdin)."""
     shown = path
     path = _bash_path(path)
-    script = (f'tmp=$(mktemp) && cat > "$tmp" && '
-              f'mkdir -p "$(dirname "{path}")" && cat "$tmp" > "{path}" && rm -f "$tmp"')
+    # mkdir first: a failure here must not strand the mktemp file mid-pipeline.
+    script = (f'mkdir -p "$(dirname "{path}")" && tmp=$(mktemp) && cat > "$tmp" && '
+              f'cat "$tmp" > "{path}" && rm -f "$tmp"')
     r = subprocess.run(
         ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", script],
         input=data, capture_output=True, timeout=15,
@@ -1128,8 +1142,8 @@ def _wsl_edit_ini(distro, path, keys, url, equals, section=None):
             return False
         text, enc, eol = "", "utf-8", "\n"
     else:
-        text = data.decode("utf-8-sig")
-        enc, eol = "utf-8-sig" if data[:3] == b"\xef\xbb\xbf" else "utf-8", _eol_of(text)
+        text, enc = _decode_ini_bytes(data)
+        eol = _eol_of(text)
     new = _ini_edit(text, keys, url, equals=equals, section=section, eol=eol)
     if new == text:
         return True
@@ -1149,7 +1163,7 @@ def get_npm_proxy_wsl(distro=None):
                 return "未检测到"
             if data is None:
                 continue
-            v = _ini_get(data.decode("utf-8-sig"), "proxy")
+            v = _ini_get(_decode_ini_bytes(data)[0], "proxy")
             if v:
                 return v
         return "未设置"
@@ -1169,7 +1183,7 @@ def get_pip_proxy_wsl(distro=None):
                     return "未检测到"
                 if data is None:
                     continue
-                v = _ini_get(data.decode("utf-8-sig"), "proxy")
+                v = _ini_get(_decode_ini_bytes(data)[0], "proxy")
                 if v:
                     return v
         return "未设置"

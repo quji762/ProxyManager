@@ -122,10 +122,24 @@ def load_config():
     except (TypeError, ValueError):
         pass
     try:
-        s = float(cfg.get("speed_full", 5))
-        out["speed_full"] = round(s, 1) if 0 < s <= 100000 else 5
+        # Pre-2.1 default was 5 (Mbps = 0.625 MB/s): the spark bar saturated
+        # almost immediately while the settings popover speaks MB/s. The
+        # untouched default migrates to 40 Mbps (= 5 MB/s); hand-set values
+        # (always MB/s × 8 from the old popover) pass through untouched.
+        if cfg.get("speed_full") == 5:
+            cfg["speed_full"] = 40
+        s = float(cfg.get("speed_full", 40))
+        out["speed_full"] = round(s, 1) if 0 < s <= 100000 else 40
     except (TypeError, ValueError):
-        out["speed_full"] = 5
+        out["speed_full"] = 40
+    rect = cfg.get("win_rect")
+    out["win_rect"] = None
+    if isinstance(rect, list) and len(rect) == 4:
+        try:
+            out["win_rect"] = [int(v) for v in rect]
+        except (TypeError, ValueError):
+            pass
+    out["win_max"] = bool(cfg.get("win_max", False))
     restore = cfg.get("restore")
     out["restore"] = restore if isinstance(restore, dict) else {}
     return out
@@ -149,7 +163,8 @@ def save_config(cfg):
                 "host", "port", "powershell", "wsl", "git_win", "git_wsl",
                 "npm", "pip", "npmwsl", "pipwsl", "pin", "mode", "ports",
                 "autostart", "bg_path", "bg_dim", "card_alpha", "speed_full",
-                "quit_clear", "wsl_all_distros", "close_hint_done", "restore")
+                "quit_clear", "wsl_all_distros", "close_hint_done", "restore",
+                "win_rect", "win_max")
                 if k in cfg})
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(cur, f, indent=2, ensure_ascii=False)
@@ -263,6 +278,7 @@ user32.CallWindowProcW.argtypes = [
     ctypes.c_ssize_t, ctypes.c_ssize_t]
 user32.GetDpiForWindow.restype = ctypes.c_uint
 user32.GetDpiForWindow.argtypes = [ctypes.c_ssize_t]
+user32.GetDpiForSystem.restype = ctypes.c_uint
 user32.GetWindowThreadProcessId.argtypes = [
     ctypes.c_ssize_t, ctypes.POINTER(ctypes.c_uint)]
 user32.GetWindowThreadProcessId.restype = ctypes.c_uint
@@ -485,8 +501,14 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
         try:
             mmi = _MINMAXINFO.from_address(lparam)
             dpi = user32.GetDpiForWindow(hwnd) or 96
-            mmi.ptMinTrackSize.x = _MIN_W * dpi // 96
-            mmi.ptMinTrackSize.y = _MIN_H * dpi // 96
+            # Never demand a minimum larger than the work area: a 920x620
+            # logical minimum overflows a 1366x768 laptop at 150% DPI.
+            wa = _RECT()
+            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+            max_w = max(320, wa.right - wa.left)
+            max_h = max(240, wa.bottom - wa.top)
+            mmi.ptMinTrackSize.x = min(_MIN_W * dpi // 96, max_w)
+            mmi.ptMinTrackSize.y = min(_MIN_H * dpi // 96, max_h)
             return 0
         except Exception:
             pass
@@ -668,13 +690,16 @@ class Api:
         self._speed_lock = threading.Lock()
         self._speed_prev = pm.get_net_counters()
         self._speed = {"up": "0 B/s", "dn": "0 B/s", "dn_num": 0.0,
-                       "iface": pm._primary_iface or "", "alive": None}
+                       "iface": pm._primary_iface or "", "alive": None,
+                       "port": ""}
         self._window = None
         self._icon = None
         self._pinned = cfg.get("pin", False)
         self._maximized = False
         self._prev_bounds = None
         self._bg_cache = None  # (path, data_url)
+        self._win_rect = cfg.get("win_rect")      # last normal bounds (physical px)
+        self._win_max = bool(cfg.get("win_max", False))
         # Last URL this tool wrote to each git endpoint, so a disable after
         # the user edited host/port still unsets the old value.
         self._git_managed = {"gitwin": None, "gitwsl": None}
@@ -694,7 +719,7 @@ class Api:
             "bg_path": cfg.get("bg_path", ""),
             "bg_dim": cfg.get("bg_dim", 0.45),
             "card_alpha": cfg.get("card_alpha", 0.92),
-            "speed_full": cfg.get("speed_full", 5),
+            "speed_full": cfg.get("speed_full", 40),
             "quit_clear": bool(cfg.get("quit_clear", False)),
             "wsl_all_distros": bool(cfg.get("wsl_all_distros", True)),
             "close_hint_done": bool(cfg.get("close_hint_done", False)),
@@ -762,6 +787,17 @@ class Api:
             if "restore" in data and isinstance(data["restore"], dict):
                 cfg["restore"] = data["restore"]
                 self._restore = dict(data["restore"])
+            if "win_rect" in data and isinstance(data["win_rect"], list) \
+                    and len(data["win_rect"]) == 4:
+                try:
+                    rect = [int(v) for v in data["win_rect"]]
+                    cfg["win_rect"] = rect
+                    self._win_rect = rect
+                except (TypeError, ValueError):
+                    pass
+            if "win_max" in data:
+                cfg["win_max"] = bool(data["win_max"])
+                self._win_max = bool(data["win_max"])
             cfg["restore"] = self._restore
             if not save_config(cfg):
                 return False
@@ -819,14 +855,17 @@ class Api:
             return {"confirm": "port",
                     "message": f"{host}:{port} 上没有程序在监听（代理软件可能没有运行）。\n"
                                "继续启用会导致终端联网失败。\n仍要继续吗？"}
+        if target in ("wsl", "gitwsl", "npmwsl", "pipwsl", "all") \
+                and not pm.wsl_available():
+            # Fail before any write attempt: a broken WSL would otherwise sit
+            # through the full 15s subprocess timeout inside set_wsl_proxy.
+            return {"error": "未检测到可用的 WSL 发行版"}
         if target in ("wsl", "all"):
             shell = pm.wsl_default_shell()
             if shell and shell not in ("bash", "zsh", "fish", "sh"):
                 return {"confirm": "shell",
                         "message": f"WSL 默认 shell 是 {shell}，本工具写入 ~/.bashrc、"
                                    "~/.zshrc 和 fish conf.d。\n仍要继续写入吗？"}
-        if target in ("gitwsl", "npmwsl", "pipwsl", "all") and not pm.wsl_available():
-            return {"error": "未检测到可用的 WSL 发行版"}
         if target in ("gitwin", "all"):
             import shutil
             if not shutil.which("git"):
@@ -933,12 +972,29 @@ class Api:
             if restored is not None:
                 return restored
         if target == "ps":
+            if not on:
+                # Surgical removal only drops the URL it is given, so use the
+                # value actually in the registry (the user may have edited the
+                # fields since enabling — same contract as npm/pip below).
+                cur = pm.get_ps_status()
+                if cur and str(cur).startswith("http://"):
+                    ch, _, cp = str(cur)[len("http://"):].rpartition(":")
+                    if ch and pm._is_valid_port(cp):
+                        h, p = ch, cp
             ret = pm.set_ps_proxy(h, p, on)
             if ret is not True:
                 return {"error": f"PowerShell: {ret}"}
             if on:
                 notes.append("请新开一个终端后生效")
         elif target == "sys":
+            if not on:
+                # Same rationale as ps: unset the URL actually configured,
+                # not whatever the (possibly re-edited) fields hold now.
+                cur = pm.get_sys_proxy()
+                if cur and str(cur).startswith("http://"):
+                    ch, _, cp = str(cur)[len("http://"):].rpartition(":")
+                    if ch and pm._is_valid_port(cp):
+                        h, p = ch, cp
             ret = pm.set_sys_proxy(h, p, on)
             if ret is not True:
                 return {"error": f"系统代理: {ret}"}
@@ -1257,14 +1313,17 @@ class Api:
                 # TCP probe can block ~1.5s when the proxy is down — keep it
                 # off the speed lock so get_speed() stays responsive.
                 alive = None
+                probed_port = ""
                 if host and pm._is_valid_port(port):
                     alive = pm.proxy_port_alive(host, port)
+                    probed_port = str(int(port))
                 with self._speed_lock:
                     self._speed = {
                         "up": up_str or "—", "dn": dn_str or "—",
                         "dn_num": dn_num,
                         "iface": pm._primary_iface or "",
                         "alive": alive,
+                        "port": probed_port,
                     }
             except Exception:
                 pass  # never let the sampler thread die
@@ -1326,8 +1385,12 @@ class Api:
         import urllib.request as _urlreq
 
         sources = {
-            # Windows side
-            "ps":     pm.get_ps_proxy_vars,      # env vars
+            # Windows side. The _https variants probe the HTTPS_PROXY variable
+            # itself, so a hand-configured https:// proxy is tested as such
+            # instead of silently reporting the HTTP row's result.
+            "ps":     pm.get_ps_proxy_vars,      # env vars (HTTP_PROXY)
+            "ps_https": lambda: {"HTTPS_PROXY":
+                                 pm.get_ps_proxy_vars()["HTTPS_PROXY"]},
             "sys":    lambda: {"HTTP_PROXY": pm.get_sys_proxy()},
             "gitwin": lambda: {"HTTP_PROXY": pm.get_git_proxy_win()},
             "npm":    lambda: {"HTTP_PROXY": pm.get_npm_proxy()},
@@ -1348,6 +1411,8 @@ class Api:
         wsl_state = self.refresh_item("wsl") if which == "gitwsl" else None
         wsl_sources = {
             "wsl":    lambda: pm.get_wsl_proxy_vars(),
+            "wsl_https": lambda: {"HTTPS_PROXY":
+                                  pm.get_wsl_proxy_vars()["HTTPS_PROXY"]},
             "gitwsl": lambda: {"HTTP_PROXY": (wsl_state or {}).get("git", "未设置")},
             "npmwsl": lambda: {"HTTP_PROXY": pm.get_npm_proxy_wsl()},
             "pipwsl": lambda: {"HTTP_PROXY": pm.get_pip_proxy_wsl()},
@@ -1571,9 +1636,18 @@ class Api:
             return {"ok": True}
         elif cmd == "close":
             if self._tray_ok:
+                self._save_geometry()
                 w.hide()  # hide to tray, mirroring the tkinter app
             else:
-                w.destroy()  # no tray: hiding would orphan the process
+                # No tray: hiding would orphan the process. Honor 退出时关闭
+                # 代理 here too — the tray 退出 path must not be the only one.
+                try:
+                    self._save_geometry()
+                    if load_config().get("quit_clear"):
+                        self.clear_all_endpoints()
+                except Exception:
+                    pass
+                w.destroy()
         elif cmd == "pin":
             self._pinned = bool(arg)
             self._apply_topmost(self._pinned)
@@ -1623,6 +1697,28 @@ class Api:
                 user32.SetWindowPos(hwnd, 0, l, t, r - l, b - t, 0x0004)
             self._maximized = False
         set_resize_maximized(self._maximized)
+        self._save_geometry()
+
+    def _save_geometry(self):
+        """Persist window bounds so the next launch reopens in place. While
+        fake-maximized, the PRE-maximize bounds are saved alongside win_max
+        so a fresh start maximizes directly and a restore lands correctly."""
+        try:
+            hwnd = self._hwnd()
+            if not hwnd:
+                return
+            r = _RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                return
+            self._win_max = bool(self._maximized)
+            if self._win_max and self._prev_bounds:
+                rect = [int(v) for v in self._prev_bounds]
+            else:
+                rect = [r.left, r.top, r.right, r.bottom]
+            self._win_rect = rect
+            save_config({"win_rect": rect, "win_max": self._win_max})
+        except Exception:
+            pass
 
     def _clear_maximized_state(self):
         """Called from the WndProc hook (via _clear_fake_maximized) when a
@@ -1752,6 +1848,35 @@ def _promote_tray_icon_async(icon=None):
                      daemon=True).start()
 
 
+_geometry_restored = False   # bounds are reapplied only on the first loaded
+
+
+def _restore_window_geometry(api):
+    """Reapply the previous session's window bounds (or fake-maximize) once,
+    after the native handle exists. Physical px via SetWindowPos — passing
+    them as create_window's logical width/height would double-scale on
+    high-DPI displays."""
+    global _geometry_restored
+    if _geometry_restored or api._window is None:
+        return
+    _geometry_restored = True
+    hwnd = api._hwnd()
+    if not hwnd:
+        return
+    try:
+        if api._win_max:
+            api._toggle_maximize()  # sizes to the work area; prev bounds kept
+            _sync_maximized_icon()
+            return
+        r = api._win_rect
+        if r and all(isinstance(v, int) for v in r) \
+                and (r[2] - r[0]) >= 200 and (r[3] - r[1]) >= 150:
+            user32.SetWindowPos(hwnd, 0, r[0], r[1],
+                                r[2] - r[0], r[3] - r[1], 0x0004)
+    except Exception:
+        pass
+
+
 def _show_main_window(api):
     """Show, restore from minimized, and raise to the foreground. show() alone
     unhides the window BEHIND whatever is active, which reads as 'the tray
@@ -1783,7 +1908,20 @@ def _make_tray(api, window):
         # singleton mutex after the tray has already stopped.
         api._tray_ok = False
         try:
+            api._save_geometry()
+        except Exception:
+            pass
+        try:
             if load_config().get("quit_clear"):
+                # clear_all_endpoints serializes 9 endpoints (WSL ones take
+                # seconds each) — a balloon is the only feedback the user
+                # gets while the tray menu is unresponsive.
+                try:
+                    if icon is not None:
+                        icon.notify("正在关闭本工具写入的代理，请稍候…",
+                                    pm.APP_TITLE)
+                except Exception:
+                    pass
                 api.clear_all_endpoints()
         except Exception:
             pass
@@ -1910,11 +2048,21 @@ def main():
     # pass runs after _make_tray has confirmed NIM_ADD completed.
     _promote_tray_icon(retries=1)
 
+    # Cap the initial window to the primary work area at the system DPI: a
+    # fixed 1060x700 logical window overflows a 1366x768 laptop at 150%.
+    dpi = user32.GetDpiForSystem() or 96
+    wa = _RECT()
+    user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+    scale = dpi / 96
+    win_w = min(1060, max(640, int((wa.right - wa.left) / scale)))
+    win_h = min(700, max(480, int((wa.bottom - wa.top) / scale)))
+
     window = webview.create_window(
         "代理管理器", UI_PATH,
-        js_api=api, width=1060, height=700, min_size=(920, 620),
+        js_api=api, width=win_w, height=win_h, min_size=(920, 620),
         frameless=FRAMELESS, easy_drag=False, resizable=True,
         background_color=bg, on_top=cfg.get("pin", False),
+        hidden=_START_HIDDEN,  # tray autostart: no login-time window flash
     )
     api._window = window
     # Taskbar SC_RESTORE on a fake-maximized window needs the Api's
@@ -1947,6 +2095,7 @@ def main():
     def _on_loaded():
         ensure_resize_hook(window)
         ensure_nonclient_drag(window)
+        _restore_window_geometry(api)
         if _START_HIDDEN:
             try:
                 window.hide()
@@ -1959,6 +2108,7 @@ def main():
     # destroy(), which bypasses this event entirely.
     def _on_closing():
         if api._tray_ok:
+            api._save_geometry()
             window.hide()
             return False
         return True

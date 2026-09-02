@@ -377,15 +377,16 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .dialog { width: 400px; padding: 22px 22px 18px; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
 .dialog h4 { font-size: 15px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 9px; }
 .dialog h4 svg { width: 18px; height: 18px; color: var(--amber); flex: none; }
-.dialog p { font-size: 12.5px; color: var(--text2); line-height: 1.65; }
+.dialog p { font-size: 12.5px; color: var(--text2); line-height: 1.65; white-space: pre-line; }
 .dialog .dlg-btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
 .toast {
   position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%) translateY(8px);
   background: rgba(var(--card-rgb), .98); border: 1px solid var(--border); box-shadow: var(--shadow);
   padding: 9px 16px; border-radius: 9px; font-size: 12.5px; z-index: 110;
   opacity: 0; transition: opacity .18s, transform .18s; pointer-events: none; max-width: 70%;
+  white-space: pre-line;
 }
-.toast.show { opacity: 1; transform: translateX(-50%); }
+.toast.show { opacity: 1; transform: translateX(-50%); pointer-events: auto; cursor: default; }
 .toast.err { color: var(--red); } .toast.ok { color: var(--green); }
 
 /* Settings dialog */
@@ -396,6 +397,7 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .set-row .lbl b { display: block; font-size: 13px; font-weight: 600; }
 .set-row .lbl span { display: block; font-size: 11px; color: var(--text2); margin-top: 2px; }
 input[type="range"] { -webkit-appearance: none; width: 150px; height: 4px; border-radius: 2px; background: var(--chip); outline: none; }
+input[type="range"]:disabled { opacity: .35; }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
   background: var(--accent); border: 3px solid var(--card); box-shadow: 0 0 0 1px var(--border);
@@ -548,22 +550,22 @@ html.maximized .grip { display: none; }
       <h3 id="varsTitle">环境变量</h3>
       <div id="varsWin">
         <div class="group-cap">POWERSHELL（用户环境变量）</div>
-        <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vPsHttp">—</span><button class="test-chip" data-test="ps" data-tip="通过该代理发起连通性测试">测试</button></div>
-        <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vPsHttps">—</span><button class="test-chip" data-test="ps" data-tip="通过该代理发起连通性测试">测试</button></div>
-        <div class="kv"><span class="k">系统代理（WinINET）</span><span class="v" id="vSys">—</span><button class="test-chip" data-test="sys" data-tip="通过系统代理发起连通性测试">测试</button></div>
-        <div class="kv"><span class="k">Git（git config --global）</span><span class="v" id="vPsGit">—</span><button class="test-chip" data-test="gitwin" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">HTTP_PROXY</span><span class="v copyable" id="vPsHttp" data-copy>—</span><button class="test-chip" data-test="ps" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v copyable" id="vPsHttps" data-copy>—</span><button class="test-chip" data-test="ps_https" data-tip="通过 HTTPS_PROXY 发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">系统代理（WinINET）</span><span class="v copyable" id="vSys" data-copy>—</span><button class="test-chip" data-test="sys" data-tip="通过系统代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">Git（git config --global）</span><span class="v copyable" id="vPsGit" data-copy>—</span><button class="test-chip" data-test="gitwin" data-tip="通过该代理发起连通性测试">测试</button></div>
         <div class="group-cap">包管理器（用户级配置文件）</div>
-        <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v" id="vNpm">—</span><button class="test-chip" data-test="npm" data-tip="通过该代理发起连通性测试">测试</button></div>
-        <div class="kv"><span class="k">pip（pip.ini）</span><span class="v" id="vPip">—</span><button class="test-chip" data-test="pip" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v copyable" id="vNpm" data-copy>—</span><button class="test-chip" data-test="npm" data-tip="通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">pip（pip.ini）</span><span class="v copyable" id="vPip" data-copy>—</span><button class="test-chip" data-test="pip" data-tip="通过该代理发起连通性测试">测试</button></div>
       </div>
       <div id="varsWsl" style="display:none">
         <div class="group-cap">WSL 终端（~/.bashrc / ~/.zshrc / fish）</div>
-        <div class="kv"><span class="k">HTTP_PROXY</span><span class="v" id="vWslHttp">—</span><button class="test-chip" data-test="wsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
-        <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v" id="vWslHttps">—</span><button class="test-chip" data-test="wsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
-        <div class="kv"><span class="k">Git（git config --global）</span><span class="v" id="vWslGit">—</span><button class="test-chip" data-test="gitwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">HTTP_PROXY</span><span class="v copyable" id="vWslHttp" data-copy>—</span><button class="test-chip" data-test="wsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v copyable" id="vWslHttps" data-copy>—</span><button class="test-chip" data-test="wsl_https" data-tip="在 WSL 内通过 HTTPS_PROXY 发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">Git（git config --global）</span><span class="v copyable" id="vWslGit" data-copy>—</span><button class="test-chip" data-test="gitwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
         <div class="group-cap">包管理器（各发行版用户级配置）</div>
-        <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v" id="vNpmWsl">—</span><button class="test-chip" data-test="npmwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
-        <div class="kv"><span class="k">pip（~/.config/pip/pip.conf）</span><span class="v" id="vPipWsl">—</span><button class="test-chip" data-test="pipwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v copyable" id="vNpmWsl" data-copy>—</span><button class="test-chip" data-test="npmwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
+        <div class="kv"><span class="k">pip（~/.config/pip/pip.conf）</span><span class="v copyable" id="vPipWsl" data-copy>—</span><button class="test-chip" data-test="pipwsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
       </div>
     </div>
   </div>
@@ -582,7 +584,7 @@ html.maximized .grip { display: none; }
     </button>
     <button class="lane-tab" id="tabWsl" role="tab" data-tip="WSL 各发行版的终端 / Git / npm / pip">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12 14h5"/></svg>
-      <span>WSL</span><span class="cnt" id="cntWsl">0/4</span>
+      <span>WSL</span><span class="cnt" id="cntWsl">–/4</span>
     </button>
   </div>
   <div class="sb-chip" data-tip="当前渠道 Git 全局代理">
@@ -773,7 +775,9 @@ function toast(msg, kind = "") {
   t.textContent = msg;
   t.className = "toast show " + kind;
   clearTimeout(t._h);
-  t._h = setTimeout(() => t.classList.remove("show"), 2600);
+  // Errors get 8s (multi-endpoint failures concatenate into long text);
+  // clicking anywhere on a toast dismisses it immediately.
+  t._h = setTimeout(() => t.classList.remove("show"), kind === "err" ? 8000 : 2600);
 }
 
 /* Tooltip engine */
@@ -918,18 +922,22 @@ const LANE_EPS = {
   win: EP_DEFS.filter((d) => d.lane === "win").map((d) => d.id),
   wsl: EP_DEFS.filter((d) => d.lane === "wsl").map((d) => d.id),
 };
+/* WSL states stay unknown until the first WSL probe — a boot-time probe was
+   removed because it cold-starts the whole WSL VM just for the badge. */
+let wslProbed = false;
 function updateHero() {
   const nWin = LANE_EPS.win.reduce((a, k) => a + Number(state[k]), 0);
   const nWsl = LANE_EPS.wsl.reduce((a, k) => a + Number(state[k]), 0);
-  const n = nWin + nWsl;
+  const n = nWin + (wslProbed ? nWsl : 0);
   $("cntWin").textContent = `${nWin}/${LANE_EPS.win.length}`;
-  $("cntWsl").textContent = `${nWsl}/${LANE_EPS.wsl.length}`;
+  $("cntWsl").textContent = wslProbed
+    ? `${nWsl}/${LANE_EPS.wsl.length}` : `–/${LANE_EPS.wsl.length}`;
   updateVtRail();
   const badge = $("heroBadge");
   if (n === EP_TOTAL) { badge.className = "badge ok"; badge.innerHTML = '<span class="dot"></span>全部启用'; }
   else if (n > 0) { badge.className = "badge warn"; badge.innerHTML = '<span class="dot"></span>部分启用'; }
   else { badge.className = "badge idle"; badge.innerHTML = '<span class="dot"></span>未启用'; }
-  $("heroLine").innerHTML = `<b>${n} / ${EP_TOTAL}</b> <span class="dim">个端点已启用</span>`;
+  $("heroLine").innerHTML = `<b>${n} / ${EP_TOTAL}</b> <span class="dim">个端点已启用 · 全部渠道</span>`;
   // Status-bar proxy chips show the current lane's values (kept here because
   // refresh updates detected.* without calling setLane).
   const fmt = (v) => UNSET.has(v) ? "未设置" : String(v).replace(/^http:\/\//, "");
@@ -996,11 +1004,19 @@ async function toggleEndpoint(ep, on) {
   try {
     const r = await api.call("do_toggle", ep, on, host, port);
     if (r && r.error) toast(r.error, "err");
-    else if (r && r.note) toast(r.note, "ok");
     else {
-      let msg = `${epName(ep)} 已${on ? "启用" : "关闭"}`;
-      if (on && (ep === "ps" || ep === "wsl")) msg += "，请新开终端后生效";
-      toast(msg, "ok");
+      // Flip the row immediately; a refresh corrects it. A disable that
+      // restored a stashed proxy actually leaves the endpoint ON.
+      state[ep] = on;
+      if (r && r.note) {
+        if (r.note.includes("已恢复覆盖前的代理")) state[ep] = true;
+        toast(r.note, "ok");
+      } else {
+        let msg = `${epName(ep)} 已${on ? "启用" : "关闭"}`;
+        if (on && (ep === "ps" || ep === "wsl")) msg += "，请新开终端后生效";
+        toast(msg, "ok");
+      }
+      renderEndpoints();
     }
   } finally {
     setBusy(ep, false);
@@ -1089,7 +1105,11 @@ async function applyAddress(newHost, newPort, oldHost, oldPort) {
   try {
     const r = await api.call("switch_port", newPort, newHost);
     if (r && r.error) {
-      toast(r.error, "err");
+      const n = (r.applied || []).length;
+      // Partial failure must not hide what DID succeed — the user needs to
+      // know which endpoints to fix by hand.
+      toast(n ? `已切换为 ${newHost}:${newPort}（${n} 个端点已应用），部分端点失败：\n${r.error}`
+              : r.error, "err");
       if (!(r.applied && r.applied.length)) {
         if (oldHost != null) $("inHost").value = oldHost;
         if (oldPort != null) $("inPort").value = oldPort;
@@ -1129,6 +1149,12 @@ function setBusyAll(b) {
   }
   const btn = $("btnWslRestart");
   if (btn) btn.disabled = b;
+  // Batch toggles / port switches / WSL restarts can run for tens of seconds
+  // (each WSL endpoint spawns several wsl.exe calls) — the status-bar
+  // spinner is the only global "still working" indicator.
+  const spin = $("sbRefreshIco"), rb = $("sbRefresh");
+  if (spin) spin.classList.toggle("spin", b);
+  if (rb) rb.disabled = b;
 }
 
 /* ═══════════════ Refresh (parallel, lane-aware) ═══════════════ */
@@ -1148,7 +1174,8 @@ async function refreshAll() {
       refreshQueued = false;
       refreshing = false;
       spin.classList.remove("spin");
-      $("sbRefresh").disabled = false;
+      // A batch operation may have grabbed the spinner while we settled.
+      $("sbRefresh").disabled = busyAll;
       if (anyOk) persistSoon();
       if (pendingApply) {
         const p = pendingApply; pendingApply = null;
@@ -1185,6 +1212,7 @@ async function refreshAll() {
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "wsl").then((r) => {
     anyOk = true;
+    wslProbed = true;  // the –/4 badge becomes real counts after first probe
     state.wsl = !!r.on;
     detected.gitwsl = r.git;
     state.gitwsl = !UNSET.has(r.git); // mirror the actually detected state
@@ -1298,6 +1326,7 @@ async function allEndpoints(on, lane = null) {
         const r = await api.call("do_toggle", d.id, on, host, port);
         if (r && r.error) { toast(r.error, "err"); hadError = true; break; }
         state[d.id] = on;
+        if (r && r.note && r.note.includes("已恢复覆盖前的代理")) state[d.id] = true;
       } finally {
         setBusy(d.id, false);
       }
@@ -1323,7 +1352,8 @@ function fmtMB(num) {
   for (const [u, f] of units) if (num >= f) { v = num / f; lbl = u + "/s"; } else break;
   return [v >= 100 ? v.toFixed(0) : v.toFixed(1), lbl];
 }
-/* Spark full-scale in bytes/sec, from the user's Mbps setting (default 5).
+/* Spark full-scale in bytes/sec, from the user's Mbps setting (default 40,
+   i.e. 5 MB/s to match the popover's MB/s input).
    Starts as null until boot() loads the saved value; persistSoon skips it
    while null so a pre-boot debounce never overwrites the config. */
 let speedFullMbps = null;
@@ -1336,11 +1366,15 @@ async function tickSpeed() {
       $("spdDn").textContent = dn;
       document.querySelector(".metric .unit").textContent = unit;
       $("spdUp").textContent = s.up;
-      const full = Math.max(1, MbpsToBps(speedFullMbps ?? 5));
+      const full = Math.max(1, MbpsToBps(speedFullMbps ?? 40));
       $("sparkBar").style.width = Math.min(100, (s.dn_num ?? 0) / full * 100) + "%";
       const sb = $("sbPort");
-      sb.innerHTML = s.alive ? '<span class="dot g"></span>在线 · ' + esc_($("inPort").value || "7897")
-                             : '<span class="dot r"></span>无响应';
+      // The backend probes its cached address — show THAT port, not whatever
+      // is sitting in the (possibly just-edited) field.
+      sb.innerHTML = s.alive == null
+        ? '<span class="dot n"></span>检测中'
+        : s.alive ? '<span class="dot g"></span>在线 · ' + esc_(s.port || $("inPort").value || "7897")
+                  : '<span class="dot r"></span>无响应';
       if (s.iface) $("speedCap").textContent = `实时网速（${s.iface}）`;
     }
   } catch (e) { /* keep last values */ }
@@ -1350,7 +1384,7 @@ async function tickSpeed() {
 /* Speed full-scale popover (anchored to the hero-right block) */
 function mbpsToMBps(m) { return (Number(m) || 0) / 8; }
 function mBpsToMbps(v) { return v * 8; }
-function renderSpeedPop() { $("speedFullIn").value = String(Math.round(mbpsToMBps(speedFullMbps ?? 5) * 10) / 10); }
+function renderSpeedPop() { $("speedFullIn").value = String(Math.round(mbpsToMBps(speedFullMbps ?? 40) * 10) / 10); }
 $("btnSpeedFull").onclick = (e) => {
   e.stopPropagation();
   renderSpeedPop();
@@ -1427,6 +1461,9 @@ function applyBg(path, dataUrl, dim) {
     $("bgName").textContent = "未设置";
   }
   $("bgDim").style.opacity = dim ?? cfg.bg_dim;
+  // The dim overlay is invisible without a background image — disable the
+  // slider so the row doesn't read as broken.
+  $("rgDim").disabled = !document.body.classList.contains("has-bg");
 }
 function applyAlpha(a) {
   cfg.card_alpha = a;
@@ -1528,6 +1565,9 @@ $("btnWslRestart").onclick = async () => {
   }
 };
 $("sbRefresh").onclick = () => refreshAll();
+/* Click anywhere on a toast to dismiss it (long error text gets 8s, but no
+   one should have to wait it out). */
+$("toast").onclick = () => $("toast").classList.remove("show");
 $("inHost").addEventListener("input", () => { $("inHost").classList.remove("bad"); renderEndpoints(); });
 $("inPort").addEventListener("input", () => { $("inPort").classList.remove("bad"); renderPorts(); renderEndpoints(); });
 ["inHost", "inPort"].forEach((id) => $(id).addEventListener("change", () => {
@@ -1594,7 +1634,14 @@ $("portAddBtn").onclick = () => {
 };
 $("portAddIn").addEventListener("keydown", (e) => { if (e.key === "Enter") $("portAddBtn").click(); });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && _dlgOpen) $("dlgCancel").click();
+  if (!_dlgOpen) return;
+  if (e.key === "Escape") $("dlgCancel").click();
+  // Enter confirms; skipped while the settings dialog is open (its inputs
+  // have their own Enter handling).
+  else if (e.key === "Enter" && !$("settingsOv").classList.contains("show")) {
+    e.preventDefault();
+    $("dlgOk").click();
+  }
 });
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".ports-wrap")) $("portPop").classList.remove("show");
@@ -1668,13 +1715,13 @@ async function boot() {
   cfg.quit_clear = !!c.quit_clear;
   cfg.wsl_all_distros = c.wsl_all_distros !== false;
   applyAlpha(c.card_alpha ?? 0.92);
-  speedFullMbps = Math.max(0.1, +c.speed_full || 5);
+  speedFullMbps = Math.max(0.1, +c.speed_full || 40);
   cfg.bg_dim = c.bg_dim ?? 0.45;
   if (c.bg_path) {
     const bg = await api.call("get_background");
     if (bg && bg.error) toast(bg.error, "err");
     applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
-  }
+  } else applyBg("", null, cfg.bg_dim);  // initializes the dim-slider state
   /* Sync the maximize affordance with reality (a renderer reload resets it
      while the window may still be maximized). */
   try {
@@ -1684,30 +1731,9 @@ async function boot() {
   renderPorts();
   renderEndpoints();
   refreshAll();
-  probeWslCounts();
   tickSpeed();
 }
 
-function probeWslCounts() {
-  /* Background probe so the WSL tab badge isn't stuck at 0/4 until opened. */
-  api.call("refresh_item", "wsl").then((r) => {
-    if (!r) return;
-    state.wsl = !!r.on;
-    detected.gitwsl = r.git;
-    state.gitwsl = !UNSET.has(r.git);
-    detected.wsl_url = state.wsl ? r.vars.HTTP_PROXY : null;
-    updateHero();
-    if (curLane === "wsl") renderEndpoints();
-  }).catch(() => {});
-  api.call("refresh_item", "npmwsl").then((v) => {
-    detected.npmwsl = v; state.npmwsl = !UNSET.has(v); updateHero();
-    if (curLane === "wsl") renderEndpoints();
-  }).catch(() => {});
-  api.call("refresh_item", "pipwsl").then((v) => {
-    detected.pipwsl = v; state.pipwsl = !UNSET.has(v); updateHero();
-    if (curLane === "wsl") renderEndpoints();
-  }).catch(() => {});
-}
 if (HAS_BRIDGE()) boot();
 else window.addEventListener("pywebviewready", boot);
 /* Browser fallback: if no bridge ever arrives, boot with mock after a beat. */
