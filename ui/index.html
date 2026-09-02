@@ -120,7 +120,7 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 /* ═══════════════════════ Hero card ═══════════════════════ */
 .hero { display: flex; gap: 24px; padding: 20px 24px 18px; }
 .hero-left { flex: 1.15; min-width: 0; }
-.hero-cap { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); }
+.hero-cap { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text2); }
 .badge {
   display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600;
   padding: 2.5px 9px; border-radius: 20px;
@@ -129,18 +129,20 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .badge.ok { color: var(--green); background: var(--green-soft); }
 .badge.idle { color: var(--text2); background: var(--chip); }
 .badge.warn { color: var(--amber); background: var(--amber-soft); }
-.hero-line { margin-top: 12px; font-size: 16px; }
-.hero-line b { font-size: 19px; }
+.hero-line { font-size: 18px; }
+.hero-line b { font-size: 24px; font-weight: 700; }
 .hero-line .dim { color: var(--text2); }
+.hero-row { display: flex; align-items: flex-end; gap: 26px; flex-wrap: wrap; margin-top: 14px; }
+.hero-row .cfg-row { margin-top: 0; }
 .hero-desc { margin-top: 5px; font-size: 12px; color: var(--text2); }
 
-.cfg-row { display: flex; gap: 8px; margin-top: 16px; align-items: flex-end; }
-.field { display: flex; flex-direction: column; gap: 4px; }
-.field label { font-size: 11px; color: var(--text2); font-weight: 600; padding-left: 2px; }
+.cfg-row { display: flex; gap: 10px; margin-top: 16px; align-items: flex-end; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 12px; color: var(--text2); font-weight: 600; padding-left: 2px; }
 .field input {
-  font-family: var(--font); font-size: 12.5px; color: var(--text);
-  background: var(--input); border: 1px solid var(--input-border); border-radius: 7px;
-  padding: 7px 11px; outline: none; width: 150px; transition: border-color .12s, background .12s;
+  font-family: var(--font); font-size: 14px; color: var(--text);
+  background: var(--input); border: 1px solid var(--input-border); border-radius: 8px;
+  padding: 8px 12px; outline: none; width: 170px; transition: border-color .12s, background .12s;
 }
 .field input:focus { border-color: var(--accent); background: var(--card); }
 .field input.bad { border-color: var(--red); }
@@ -197,6 +199,14 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .btn:disabled { opacity: .45; pointer-events: none; }
 .btn.small { padding: 5px 11px; font-size: 12px; }
 .btn.tiny { padding: 4px 10px; font-size: 11.5px; border-radius: 6px; }
+/* prominent, warning-tinted restart action on the status bar */
+.btn.restart {
+  font-size: 13.5px; font-weight: 700; padding: 8px 18px;
+  color: var(--amber); background: var(--amber-soft);
+  border: 1px solid color-mix(in srgb, var(--amber) 55%, transparent);
+}
+.btn.restart:hover { background: color-mix(in srgb, var(--amber) 18%, var(--amber-soft)); }
+.btn.restart svg { width: 16px; height: 16px; }
 
 .hero-right { position: relative; width: 300px; flex: none; display: flex; flex-direction: column; }
 .metric-cap-row { display: flex; align-items: center; gap: 6px; }
@@ -227,10 +237,10 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .metric { display: flex; align-items: baseline; gap: 6px; margin-top: 2px; }
 .metric .num { font-size: 52px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
 .metric .unit { font-size: 15px; color: var(--text2); font-weight: 600; }
-.metric-sub { display: flex; gap: 16px; margin-top: 4px; font-size: 13px; color: var(--text2); }
-.metric-sub .item { display: inline-flex; align-items: center; gap: 5px; }
-.metric-sub svg { width: 13px; height: 13px; }
-.metric-sub b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+.metric .m-arrow { width: 22px; height: 22px; color: var(--accent); align-self: center; }
+.metric-up { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 13px; color: var(--text2); }
+.metric-up .m-arrow { width: 14px; height: 14px; color: var(--text2); }
+.metric-up b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
 .spark { margin-top: auto; height: 3px; border-radius: 2px; background: var(--chip); overflow: hidden; }
 .spark i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .6s ease; }
 .hero-hint { margin-top: 10px; font-size: 11px; color: var(--text3); line-height: 1.6; }
@@ -282,7 +292,7 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .ep .name-row { display: flex; align-items: center; gap: 9px; }
 .ep .name { font-size: 14px; font-weight: 600; }
 .ep .desc { margin-top: 3px; font-size: 11.5px; color: var(--text2); line-height: 1.5; word-break: break-all; }
-.ep .desc code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; color: var(--text); background: var(--chip); padding: 1px 6px; border-radius: 4px; }
+.ep .desc code { font-family: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace; font-size: 11px; color: var(--text); background: var(--chip); padding: 1px 6px; border-radius: 4px; }
 
 /* Win11 toggle */
 .tgl { position: relative; width: 44px; height: 22px; flex: none; border-radius: 11px; border: 1px solid var(--text2);
@@ -296,15 +306,17 @@ body.has-bg #bgLayer, body.has-bg #bgDim { display: block; }
 .tgl:active::after { width: 16px; }
 
 /* ═══════════════════════ Info cards ═══════════════════════ */
-.cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 12px; margin-top: 12px; }
+.cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 12px; margin-top: 12px; align-items: start; }
 .info-card { padding: 14px 18px 12px; }
 .info-card h3 { font-size: 13px; font-weight: 700; margin-bottom: 9px; }
 .kv { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 2.5px 0; }
-.kv .k { width: 108px; flex: none; font-size: 12px; color: var(--text2); }
-.kv .v { font-size: 12px; font-weight: 600; font-family: "Cascadia Mono", Consolas, monospace; color: var(--text);
+.kv .k { width: 190px; flex: none; font-size: 12px; color: var(--text2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kv .v { font-size: 12.5px; font-weight: 500; font-family: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 5px; padding: 2px 6px; margin-left: -6px;
   flex: 1; min-width: 0; }
 .kv .v.copyable:hover { background: var(--chip-hover); outline: 1px solid var(--border); }
+.kv .v.unset { color: var(--text3); }
 /* per-variable connectivity test chip */
 .test-chip {
   flex: none; font-family: var(--font); font-size: 10.5px; font-weight: 700;
@@ -454,12 +466,12 @@ html.maximized .grip { display: none; }
       <div class="hero-cap">终端代理引擎
         <span class="badge idle" id="heroBadge"><span class="dot"></span>检测中</span>
       </div>
-      <div class="hero-line" id="heroLine"><b>0 / 8</b> <span class="dim">个端点已启用</span></div>
-      <div class="hero-desc">Windows 与 WSL 双渠道：终端 · Git · npm · pip 可独立切换</div>
-
-      <div class="cfg-row">
-        <div class="field"><label>代理地址</label><input id="inHost" spellcheck="false" autocomplete="off"></div>
-        <div class="field"><label>端口</label><input id="inPort" spellcheck="false" autocomplete="off" style="width:92px"></div>
+      <div class="hero-row">
+        <div class="hero-line" id="heroLine"><b>0 / 8</b> <span class="dim">个端点已启用</span></div>
+        <div class="cfg-row">
+          <div class="field"><label>代理地址</label><input id="inHost" spellcheck="false" autocomplete="off"></div>
+          <div class="field"><label>端口</label><input id="inPort" spellcheck="false" autocomplete="off" style="width:92px"></div>
+        </div>
       </div>
       <div class="ports-wrap">
         <div class="port-chips" id="portChips"></div>
@@ -472,13 +484,6 @@ html.maximized .grip { display: none; }
           </div>
         </div>
       </div>
-      <div class="hero-actions">
-        <button class="btn subtle" id="btnWslRestart" data-tip="重启 WSL（终止其中所有进程）">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
-          重启 WSL
-        </button>
-      </div>
-      <div class="hero-hint">右侧两条纵向开关分别批量开启 / 关闭当前页的 4 个端点；底部状态栏可切换 Windows / WSL 渠道页签。点击端口预设可快速切换：已启用的端点会自动以新端口重新应用；NAT 模式自动使用宿主网关 IP。</div>
     </div>
 
     <div class="hero-right">
@@ -488,10 +493,13 @@ html.maximized .grip { display: none; }
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
       </div>
-      <div class="metric"><span class="num" id="spdDn">0.0</span><span class="unit">MB/s</span></div>
-      <div class="metric-sub">
-        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V8M6 14l6-6 6 6"/></svg>上传 <b id="spdUp">0 B/s</b></span>
-        <span class="item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6"/></svg>下载 <b id="spdDn2">0 B/s</b></span>
+      <div class="metric">
+        <svg class="m-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M6 10l6 6 6-6"/></svg>
+        <span class="num" id="spdDn">0.0</span><span class="unit">MB/s</span>
+      </div>
+      <div class="metric-up">
+        <svg class="m-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V8M6 14l6-6 6 6"/></svg>
+        <span class="lbl">上传</span><b id="spdUp">0 B/s</b>
       </div>
       <div class="spark"><i id="sparkBar"></i></div>
       <div class="speed-pop" id="speedPop">
@@ -588,6 +596,10 @@ html.maximized .grip { display: none; }
     <div><div class="lbl">pip 代理</div><div class="val" id="sbPip">—</div></div>
   </div>
   <div class="grow"></div>
+  <button class="btn restart" id="btnWslRestart" data-tip="重启 WSL（终止其中所有进程）" style="display:none">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
+    重启 WSL
+  </button>
   <button class="btn primary small" id="sbRefresh" data-tip="重新检测所有端点状态">
     <svg id="sbRefreshIco" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3"/><path d="M21 3v6h-6"/></svg>
     刷新状态
@@ -864,7 +876,10 @@ function setLane(lane) {
   $("netWsl").style.display = lane === "wsl" ? "" : "none";
   $("varsWin").style.display = lane === "win" ? "" : "none";
   $("varsWsl").style.display = lane === "wsl" ? "" : "none";
+  // 重启 WSL lives on the status bar but only concerns the WSL page.
+  $("btnWslRestart").style.display = lane === "wsl" ? "" : "none";
   renderEndpoints();  // updateHero refreshes sbGit/sbNpm/sbPip for the lane
+  refreshAll();       // probe the newly visible lane (states may be stale)
 }
 
 /* Per-endpoint current value: git rows show what was actually detected in
@@ -1027,7 +1042,7 @@ async function quickSwitchPort(p) {
   const enabled = EP_DEFS.map((d) => d.id).filter((k) => state[k]);
   if (enabled.length > 0) {
     const go = await confirmDlg(
-      `已启用的 ${enabled.length} 个端点将关闭并以新端口 ${p} 重新应用，` +
+      "已启用的端点（含另一渠道页）将关闭并以新端口 " + p + " 重新应用，" +
       "期间终端代理会短暂中断。\n确认切换？", "切换端口");
     if (!go) { $("inPort").value = oldPort; renderPorts(); return; }
     setBusyAll(true);
@@ -1061,7 +1076,7 @@ function setBusyAll(b) {
   if (btn) btn.disabled = b;
 }
 
-/* ═══════════════ Refresh (parallel, incremental) ═══════════════ */
+/* ═══════════════ Refresh (parallel, lane-aware) ═══════════════ */
 let refreshing = false;
 async function refreshAll() {
   if (refreshing) return;
@@ -1076,20 +1091,30 @@ async function refreshAll() {
       spin.classList.remove("spin");
       $("sbRefresh").disabled = false;
       if (anyOk) persistSoon();
+      // The user may have switched lanes mid-refresh (this run then probed
+      // the OLD lane) — re-run once so the visible page reflects reality.
+      if (curLane !== lane) refreshAll();
     }
   };
   const track = (p) => { pending++; p.finally(settle); };
-  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  const set = (id, v) => {
+    const el = $(id); if (!el) return;
+    el.textContent = v;
+    // 「未设置」 and friends render in the UI font, not the mono value font.
+    el.classList.toggle("unset", UNSET.has(String(v)));
+  };
   let anyOk = false;
-
-  track(api.call("refresh_item", "ps").then((r) => {
+  // Only the visible lane is probed: WSL slices cost a wsl.exe round-trip
+  // each, and the hidden lane's states are refreshed when its tab opens.
+  const lane = curLane;
+  if (lane === "win") track(api.call("refresh_item", "ps").then((r) => {
     anyOk = true;
     state.ps = !!r.status;
     detected.ps = r.status ? r.vars.HTTP_PROXY : null;
     set("vPsHttp", r.vars.HTTP_PROXY); set("vPsHttps", r.vars.HTTPS_PROXY);
     renderEndpoints();
   }).catch(() => {}));
-  track(api.call("refresh_item", "wsl").then((r) => {
+  if (lane === "wsl") track(api.call("refresh_item", "wsl").then((r) => {
     anyOk = true;
     state.wsl = !!r.on;
     detected.gitwsl = r.git;
@@ -1100,43 +1125,43 @@ async function refreshAll() {
     set("vWslGit", r.git);
     renderEndpoints();
   }).catch(() => {}));
-  track(api.call("refresh_item", "gitwin").then((v) => {
+  if (lane === "win") track(api.call("refresh_item", "gitwin").then((v) => {
     anyOk = true;
     detected.gitwin = v;
     state.gitwin = !UNSET.has(v);
     set("vPsGit", v);
     renderEndpoints();
   }).catch(() => {}));
-  track(api.call("refresh_item", "npm").then((v) => {
+  if (lane === "win") track(api.call("refresh_item", "npm").then((v) => {
     anyOk = true;
     detected.npm = v;
     state.npm = !UNSET.has(v);
     set("vNpm", v);
     renderEndpoints();
   }).catch(() => {}));
-  track(api.call("refresh_item", "pip").then((v) => {
+  if (lane === "win") track(api.call("refresh_item", "pip").then((v) => {
     anyOk = true;
     detected.pip = v;
     state.pip = !UNSET.has(v);
     set("vPip", v);
     renderEndpoints();
   }).catch(() => {}));
-  track(api.call("refresh_item", "npmwsl").then((v) => {
+  if (lane === "wsl") track(api.call("refresh_item", "npmwsl").then((v) => {
     anyOk = true;
     detected.npmwsl = v;
     state.npmwsl = !UNSET.has(v);
     set("vNpmWsl", v);
     renderEndpoints();
   }).catch(() => {}));
-  track(api.call("refresh_item", "pipwsl").then((v) => {
+  if (lane === "wsl") track(api.call("refresh_item", "pipwsl").then((v) => {
     anyOk = true;
     detected.pipwsl = v;
     state.pipwsl = !UNSET.has(v);
     set("vPipWsl", v);
     renderEndpoints();
   }).catch(() => {}));
-  track(api.call("refresh_item", "ip").then((v) => { set("vLip", v); }).catch(() => {}));
-  track(api.call("refresh_item", "mode").then((v) => {
+  if (lane === "win") track(api.call("refresh_item", "ip").then((v) => { set("vLip", v); }).catch(() => {}));
+  if (lane === "wsl") track(api.call("refresh_item", "mode").then((v) => {
     set("vMode2", v);
     // The NAT note only applies to NAT mode; mirrored keeps loopback.
     const hint = $("natHint");
@@ -1228,7 +1253,6 @@ async function tickSpeed() {
       $("spdDn").textContent = dn;
       document.querySelector(".metric .unit").textContent = unit;
       $("spdUp").textContent = s.up;
-      $("spdDn2").textContent = `${dn} ${unit}`;
       const full = Math.max(1, MbpsToBps(speedFullMbps));
       $("sparkBar").style.width = Math.min(100, (s.dn_num ?? 0) / full * 100) + "%";
       const sb = $("sbPort");

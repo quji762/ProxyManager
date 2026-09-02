@@ -137,7 +137,7 @@ def get_wsl_ip_and_block():
         )
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c", cmd],
-            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         if r.returncode != 0:
             return ("WSL 不可用", "", "未设置")
@@ -334,7 +334,7 @@ def _read_wsl_block() -> str:
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c",
              f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc 2>/dev/null"],
-            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         return r.stdout
     except Exception:
@@ -462,7 +462,7 @@ def _get_wsl_gateway_ip():
         r = subprocess.run(
             ["wsl", "-e", "bash", "-c",
              "ip route show default 2>/dev/null | awk '/default/ {print $3; exit}'"],
-            capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         ip = r.stdout.strip()
         if re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", ip):
@@ -488,7 +488,7 @@ def wsl_default_shell():
     unusable. Anything other than bash never reads ~/.bashrc."""
     try:
         r = subprocess.run(["wsl", "-e", "bash", "-c", 'basename "${SHELL:-bash}"'],
-                           capture_output=True, text=True, timeout=15,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
                            creationflags=subprocess.CREATE_NO_WINDOW)
         if r.returncode != 0:
             return None
@@ -507,7 +507,7 @@ def _wsl_distros():
         if r.returncode != 0:
             return []
         names = (r.stdout.decode("utf-16-le", errors="ignore")
-                 .replace("\x00", "").split())
+                 .replace("\x00", "").lstrip("\ufeff").split())
         return [n for n in names if n and not n.startswith("docker-desktop")]
     except Exception:
         return []
@@ -617,7 +617,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
                                "git config --global --unset-all https.proxy 2>/dev/null; true")
                     r = subprocess.run(
                         ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", cmd],
-                        capture_output=True, text=True, timeout=15,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
                         creationflags=subprocess.CREATE_NO_WINDOW)
                     if enable and r.returncode != 0:
                         # Avoid echoing wsl's own messages: redirected console
@@ -637,7 +637,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False):
             if enable:
                 for key in ("http.proxy", "https.proxy"):
                     r = subprocess.run(["git", "config", "--global", "--replace-all", key, url],
-                                       capture_output=True, text=True, timeout=15,
+                                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
                                        creationflags=subprocess.CREATE_NO_WINDOW)
                     if r.returncode != 0:
                         return (r.stderr or f"exit {r.returncode}").strip() or f"exit {r.returncode}"
@@ -673,7 +673,7 @@ def get_git_proxy_win():
     when git is unavailable)."""
     try:
         r = subprocess.run(["git", "config", "--global", "--get", "http.proxy"],
-                           capture_output=True, text=True, timeout=8,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
                            creationflags=subprocess.CREATE_NO_WINDOW)
         v = r.stdout.strip()
         return v if v else "未设置"
@@ -847,7 +847,7 @@ def set_pip_proxy(host, port, enable=True):
                         equals=url, section="global", eol=_eol_of(text))
         if new != text:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding=enc, newline="") as f:
+            with open(path, "w", encoding=enc, newline="", errors="replace") as f:
                 f.write(new)
         return True
     except OSError as e:
@@ -869,9 +869,18 @@ _PIP_CONF_PATH_WSL = "~/.config/pip/pip.conf"
 _PIP_CONF_LEGACY_WSL = "~/.pip/pip.conf"
 
 
+def _bash_path(path):
+    """Make a `~/...` path usable inside a double-quoted bash string: tilde
+    expansion does NOT happen inside quotes, but $HOME does. Absolute paths
+    pass through unchanged."""
+    return path.replace("~", "$HOME", 1) if path.startswith("~") else path
+
+
 def _wsl_pull_file(distro, path):
     """Read a file from a distro, or None when it doesn't exist. Output is
     raw bytes so binary-ish content (GBK comments, BOM) round-trips."""
+    shown = path  # keep the user-facing ~ form for error messages
+    path = _bash_path(path)
     cmd = (f'if [ -f "{path}" ]; then cat "{path}"; else exit 3; fi')
     r = subprocess.run(
         ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", cmd],
@@ -880,12 +889,14 @@ def _wsl_pull_file(distro, path):
     if r.returncode == 3:
         return None
     if r.returncode != 0:
-        raise OSError(f"读取 {path} 失败（exit {r.returncode}）")
+        raise OSError(f"读取 {shown} 失败（exit {r.returncode}）")
     return r.stdout
 
 
 def _wsl_push_file(distro, path, data: bytes):
     """Atomically replace a file in a distro with `data` (arrives on stdin)."""
+    shown = path
+    path = _bash_path(path)
     script = (f'tmp=$(mktemp) && cat > "$tmp" && '
               f'mkdir -p "$(dirname "{path}")" && cat "$tmp" > "{path}" && rm -f "$tmp"')
     r = subprocess.run(
@@ -893,7 +904,7 @@ def _wsl_push_file(distro, path, data: bytes):
         input=data, capture_output=True, timeout=15,
         creationflags=subprocess.CREATE_NO_WINDOW)
     if r.returncode != 0:
-        raise OSError(f"写入 {path} 失败（exit {r.returncode}）")
+        raise OSError(f"写入 {shown} 失败（exit {r.returncode}）")
 
 
 def _wsl_edit_ini(distro, path, keys, url, equals, section=None):
@@ -1018,10 +1029,20 @@ def restart_wsl():
     try:
         subprocess.run(["wsl", "--shutdown"],
                        capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
-        r = subprocess.run(["wsl", "-e", "echo", "ok"],
-                           capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
-        if r.returncode != 0:
-            return "未检测到可用的 WSL 发行版"
-        return True
+        # A cold start after --shutdown can easily exceed 15s on slow disks
+        # (vhdx compaction, AV scans) — a timeout here would misreport the
+        # restart as failed, so probe with retries.
+        last_err = None
+        for _ in range(3):
+            try:
+                r = subprocess.run(["wsl", "-e", "echo", "ok"],
+                                   capture_output=True, timeout=25,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                if r.returncode == 0:
+                    return True
+                last_err = f"exit {r.returncode}"
+            except subprocess.TimeoutExpired:
+                last_err = "探活超时"
+        return f"未检测到可用的 WSL 发行版（{last_err}）"
     except Exception as e:
         return str(e)

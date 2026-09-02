@@ -19,6 +19,7 @@ maximize go through raw Win32 on the real HWND instead.
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -151,6 +152,10 @@ def _valid_host(h):
 
 # ─── Autostart (HKCU Run key) ────────────────────────────────────────────────
 def _autostart_command():
+    if getattr(sys, "frozen", False):
+        # PyInstaller --onefile: __file__ is a per-run temp path that would
+        # never match after extraction; the exe path is stable.
+        return f'"{sys.executable}"'
     return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
 
 
@@ -162,7 +167,8 @@ def autostart_enabled():
         try:
             v, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
             winreg.CloseKey(key)
-            return os.path.abspath(__file__) in v
+            return str(_autostart_command()) in str(v) or (
+                getattr(sys, "frozen", False) and sys.executable in str(v))
         except FileNotFoundError:
             winreg.CloseKey(key)
             return False
@@ -267,6 +273,28 @@ _resize_installed_hwnd = 0   # hwnd the hook currently lives on
 _padded_hwnd = 0             # hwnd whose ring has been applied
 _resize_maximized = False
 _resize_hook_lock = threading.RLock()
+_restore_callback = None   # set by main(): restores fake-maximized bounds
+_page_window_ref = None    # set by main(): pywebview window (UI-thread use only)
+
+
+def _sync_maximized_icon():
+    """Push the maximize/restore icon state to the page from a WndProc
+    context. evaluate_js must NOT run on the UI thread (the JS-result
+    callback needs the message pump we are currently inside — it deadlocks);
+    a short-lived worker thread is the safe caller (pywebview Invoke-marshals
+    the script to the UI pump)."""
+    w = _page_window_ref
+    if w is None:
+        return
+    state = "true" if _resize_maximized else "false"
+
+    def _push():
+        try:
+            w.evaluate_js(f"applyMaximized({state})")
+        except Exception:
+            pass
+
+    threading.Thread(target=_push, daemon=True).start()
 _MIN_W, _MIN_H = 920, 620    # logical px, same as pywebview min_size
 _BORDER_PX = 9               # form-owned ring around the webview (logical px)
 
@@ -315,6 +343,41 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
                 return 12  # HTTOP
             if on_b:
                 return 15  # HTBOTTOM
+    elif msg == 0x00A3:  # WM_NCLBUTTONDBLCLK
+        # Double-click on the native resize ring: HTTOP owns the top strip
+        # (for vertical resize), so without this the title-bar double-click
+        # there would do nothing. Both codes toggle maximize/restore.
+        if wparam in (2, 12) and _restore_callback is not None:
+            try:
+                _restore_callback()
+                _sync_maximized_icon()
+            except Exception:
+                pass
+            return 0
+    elif msg == 0x0112:  # WM_SYSCOMMAND
+        # A frameless form (no WS_MINIMIZEBOX/WS_MAXIMIZEBOX) drops the
+        # taskbar-button click: SC_MINIMIZE / SC_RESTORE arrive only when
+        # those styles (or a system menu entry) exist. Handle them ourselves
+        # so clicking the taskbar icon minimizes/restores in every state.
+        sc = wparam & 0xFFF0
+        if sc == 0xF020:  # SC_MINIMIZE
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            return 0
+        if sc == 0xF120:  # SC_RESTORE
+            was_iconic = bool(user32.IsIconic(hwnd))
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            if was_iconic:
+                # Restoring from the taskbar: a fake-maximized window must
+                # return to its maximized size (work area), NOT collapse to
+                # prev bounds — only un-minimize here.
+                return 0
+            if _resize_maximized and _restore_callback is not None:
+                try:
+                    _restore_callback()
+                    _sync_maximized_icon()
+                except Exception:
+                    pass
+            return 0
     elif msg == WM_GETMINMAXINFO:
         # Enforce the minimum window size for the native resize loop.
         try:
@@ -340,6 +403,16 @@ def install_resize_hook(hwnd):
             return
         try:
             _resize_form_hwnd = hwnd
+            # Borderless forms carry no WS_MINIMIZEBOX, so Windows silently
+            # ignores taskbar-button clicks (no SC_MINIMIZE is ever sent).
+            # Adding the style bit makes the taskbar minimize/restore work.
+            _GWL_STYLE = -16
+            WS_MINIMIZEBOX = 0x00020000
+            style = user32.GetWindowLongPtrW(hwnd, _GWL_STYLE)
+            if not style & WS_MINIMIZEBOX:
+                user32.SetWindowLongPtrW(hwnd, _GWL_STYLE, style | WS_MINIMIZEBOX)
+                # SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED
+                user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
             _resize_old_proc = user32.GetWindowLongPtrW(hwnd, _GWL_WNDPROC)
             _resize_wndproc_ref = _WNDPROC(_resize_hook_proc)
             if user32.SetWindowLongPtrW(
@@ -633,10 +706,16 @@ class Api:
             label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
             use_wsl = target == "gitwsl"
             if on:
-                ret = pm.set_git_proxy(h, p, True, use_wsl=use_wsl)
+                # Git(WSL) writes the URL verbatim (pm has no substitution),
+                # so the NAT gateway swap must happen here — same contract as
+                # the wsl/npmwsl/pipwsl endpoints.
+                gh, gp = self._wsl_url_target(h, p) if use_wsl else (h, p)
+                if use_wsl and (gh, gp) != (h, p):
+                    notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
+                ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl)
                 if ret is not True:
                     return {"error": f"{label}: {ret}"}
-                self._git_managed[target] = (h, p)
+                self._git_managed[target] = (gh, gp)
             else:
                 # Unset the URL this tool actually wrote, not whatever the
                 # fields hold now (the user may have edited them since).
@@ -679,6 +758,18 @@ class Api:
             return {"error": f"未知端点 {target}"}
         return {"ok": True, "note": "；".join(notes) if notes else None}
 
+    def _wsl_url_target(self, host, port):
+        """Host/port that WSL-side endpoints should write: in NAT mode a
+        loopback host is unreachable from the distro, so it becomes the
+        Windows gateway IP (mirrored mode keeps the loopback address)."""
+        port = str(port)
+        if host.lower() in pm.LOOPBACK_HOSTS \
+                and pm.get_wsl_network_mode() != "Mirrored":
+            gw = pm._get_wsl_gateway_ip()
+            if gw:
+                return gw, port
+        return host, port
+
     def _git_unset_target(self, target):
         """Address whose git proxy a disable should remove: this session's
         managed URL if known, else whatever git currently has configured
@@ -708,6 +799,14 @@ class Api:
 
         old_h, old_p = host, self.port
         managed_url = f"http://{old_h}:{old_p}"
+        # The WSL npm/pip endpoints write the gateway URL in NAT mode, so the
+        # "is this ours" comparison must use the same substituted URL.
+        wsl_managed_url = managed_url
+        if old_h.lower() in pm.LOOPBACK_HOSTS \
+                and pm.get_wsl_network_mode() != "Mirrored":
+            gw = pm._get_wsl_gateway_ip()
+            if gw:
+                wsl_managed_url = f"http://{gw}:{old_p}"
         # Detect what is currently on. Only values equal to this tool's
         # managed URL count as "ours" — a proxy the user configured by hand
         # must survive the switch untouched (one wsl.exe call for the WSL side).
@@ -716,11 +815,11 @@ class Api:
             "ps": pm.get_ps_status() == managed_url,
             "wsl": bool((wsl_state or {}).get("on")),
             "gitwin": pm.get_git_proxy_win() == managed_url,
-            "gitwsl": (wsl_state or {}).get("git") == managed_url,
+            "gitwsl": (wsl_state or {}).get("git") == wsl_managed_url,
             "npm": pm.get_npm_proxy() == managed_url,
             "pip": pm.get_pip_proxy() == managed_url,
-            "npmwsl": pm.get_npm_proxy_wsl() == managed_url,
-            "pipwsl": pm.get_pip_proxy_wsl() == managed_url,
+            "npmwsl": pm.get_npm_proxy_wsl() == wsl_managed_url,
+            "pipwsl": pm.get_pip_proxy_wsl() == wsl_managed_url,
         }
         if not any(enabled.values()):
             self.host, self.port = old_h, new_port
@@ -740,10 +839,20 @@ class Api:
             ret = pm.set_wsl_proxy(old_h, old_p, False)
             if ret is not True:
                 dis_errs["wsl"] = f"WSL: {ret}"
+        # Git(WSL) in NAT mode holds the gateway URL — unset with the exact
+        # URL detected above, not the loopback fields.
+        gitwsl_unset = (old_h, old_p)
+        if enabled["gitwsl"]:
+            gv = (wsl_state or {}).get("git")
+            if gv and gv.startswith("http://"):
+                gh, _, gp = gv[len("http://"):].rpartition(":")
+                if gh and pm._is_valid_port(gp):
+                    gitwsl_unset = (gh, gp)
         for tgt, label, use_wsl in (("gitwin", "Git(Windows)", False),
                                     ("gitwsl", "Git(WSL)", True)):
             if enabled[tgt]:
-                ret = pm.set_git_proxy(old_h, old_p, False, use_wsl=use_wsl)
+                uh, up = gitwsl_unset if tgt == "gitwsl" else (old_h, old_p)
+                ret = pm.set_git_proxy(uh, up, False, use_wsl=use_wsl)
                 if ret is not True:
                     dis_errs[tgt] = f"{label}: {ret}"
         if enabled["npm"]:
@@ -754,14 +863,23 @@ class Api:
             ret = pm.set_pip_proxy(old_h, old_p, False)
             if ret is not True:
                 dis_errs["pip"] = f"pip: {ret}"
-        if enabled["npmwsl"]:
-            ret = pm.set_npm_proxy_wsl(old_h, old_p, False)
-            if ret is not True:
-                dis_errs["npmwsl"] = f"npm(WSL): {ret}"
-        if enabled["pipwsl"]:
-            ret = pm.set_pip_proxy_wsl(old_h, old_p, False)
-            if ret is not True:
-                dis_errs["pipwsl"] = f"pip(WSL): {ret}"
+        if enabled["npmwsl"] or enabled["pipwsl"]:
+            # In NAT mode the file holds the gateway URL, so the surgical
+            # disable must target the substituted host, not the fields'.
+            wh, wp = old_h, old_p
+            cur = pm.get_npm_proxy_wsl() if enabled["npmwsl"] else pm.get_pip_proxy_wsl()
+            if cur and cur.startswith("http://"):
+                ch, _, cp = cur[len("http://"):].rpartition(":")
+                if ch and pm._is_valid_port(cp):
+                    wh, wp = ch, cp
+            if enabled["npmwsl"]:
+                ret = pm.set_npm_proxy_wsl(wh, wp, False)
+                if ret is not True:
+                    dis_errs["npmwsl"] = f"npm(WSL): {ret}"
+            if enabled["pipwsl"]:
+                ret = pm.set_pip_proxy_wsl(wh, wp, False)
+                if ret is not True:
+                    dis_errs["pipwsl"] = f"pip(WSL): {ret}"
 
         self.host, self.port = old_h, new_port
         with _cfg_lock:
@@ -785,10 +903,14 @@ class Api:
             for tgt, label, use_wsl in (("gitwin", "Git(Windows)", False),
                                         ("gitwsl", "Git(WSL)", True)):
                 if enabled[tgt]:
-                    ret = pm.set_git_proxy(old_h, new_port, True, use_wsl=use_wsl)
+                    # NAT: Git(WSL) must re-enable with the gateway URL
+                    # (set_git_proxy writes verbatim — no pm-side swap).
+                    gh, gp = self._wsl_url_target(old_h, new_port) \
+                        if use_wsl else (old_h, new_port)
+                    ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl)
                     if ret is True:
                         applied.append(tgt)
-                        self._git_managed[tgt] = (old_h, new_port)
+                        self._git_managed[tgt] = (gh, gp)
                     else:
                         errs[tgt] = f"{label}: {ret}"
             if enabled["npm"]:
@@ -815,9 +937,10 @@ class Api:
                     applied.append("pipwsl")
                 else:
                     errs["pipwsl"] = f"pip(WSL): {ret}"
-            if "wsl" in applied and old_h.lower() in pm.LOOPBACK_HOSTS \
-                    and pm.get_wsl_network_mode() != "Mirrored":
-                notes.append("NAT 模式已自动改用宿主网关 IP。")
+            if "wsl" in applied or "npmwsl" in applied or "pipwsl" in applied:
+                if old_h.lower() in pm.LOOPBACK_HOSTS \
+                        and pm.get_wsl_network_mode() != "Mirrored":
+                    notes.append("NAT 模式已自动改用宿主网关 IP。")
         else:
             errs = dis_errs
         ok = not errs
@@ -916,7 +1039,7 @@ class Api:
             if not url or not str(url).startswith("http"):
                 return {"ok": False, "error": "未设置代理，无法测试"}
             host, _, port = str(url)[len("http://"):].rpartition(":")
-            if not host or not pm._is_valid_port(port):
+            if not host or not pm._is_valid_port(port) or not _valid_host(host):
                 return {"ok": False, "error": f"代理地址无效：{url}"}
             return self._proxy_probe(host, int(port), _t, _urlreq)
         # WSL side: the proxy URL lives inside the distro; probe THROUGH it
@@ -935,7 +1058,7 @@ class Api:
         if not url or not str(url).startswith("http"):
             return {"ok": False, "error": "未设置代理，无法测试"}
         host, _, port = str(url)[len("http://"):].rpartition(":")
-        if not host or not pm._is_valid_port(port):
+        if not host or not pm._is_valid_port(port) or not _valid_host(host):
             return {"ok": False, "error": f"代理地址无效：{url}"}
         # Probe from inside WSL (curl) so NAT/mirrored routing matches reality.
         return self._wsl_proxy_probe(host, int(port))
@@ -965,7 +1088,7 @@ class Api:
         try:
             r = subprocess.run(
                 ["wsl", "-e", "bash", "-c", script],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
                 creationflags=subprocess.CREATE_NO_WINDOW)
             out = (r.stdout or "").strip().split()
             if len(out) == 2 and out[0] == "204":
@@ -1109,7 +1232,12 @@ class Api:
 
     def _toggle_maximize(self):
         """Frameless forms cover the taskbar when natively maximized, so
-        maximize = resize to the monitor work area, restore = prev bounds."""
+        maximize = resize to the monitor work area, restore = prev bounds.
+
+        NEVER call evaluate_js from here: window_control reaches this on a
+        js_api worker thread, and evaluate_js from a worker deadlocks the UI
+        thread (same class of hang as set_on_top — see module docstring).
+        The taskbar path (WndProc, UI thread) pushes the icon sync itself."""
         hwnd = self._hwnd()
         if not hwnd:
             return
@@ -1408,6 +1536,11 @@ def main():
         background_color=bg, on_top=cfg.get("pin", False),
     )
     api._window = window
+    # Taskbar SC_RESTORE on a fake-maximized window needs the Api's
+    # prev-bounds restore; the WndProc hook lives outside the Api class.
+    global _restore_callback, _page_window_ref
+    _restore_callback = api._toggle_maximize
+    _page_window_ref = window
 
     # Tray icon lives for the whole process (like the tkinter build): the
     # frameless window has no native close button, and the X button hides to
