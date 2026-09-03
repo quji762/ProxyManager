@@ -1,0 +1,4 @@
+# Build-only. Install on top of requirements.txt:
+#   pip install -r requirements.txt -r requirements-build.txt
+-r requirements.txt
+pyinstaller>=6.0

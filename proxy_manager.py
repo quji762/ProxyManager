@@ -17,6 +17,7 @@ import uuid
 import ctypes
 import winreg
 from typing import Optional
+from urllib.parse import quote, unquote, urlparse
 
 # ── Optional dependencies ─────────────────────────────────────────────────────
 try:
@@ -35,6 +36,7 @@ _CRASH_LOG = os.path.join(_APPDATA, "ProxyManager", "crash.log")
 # Single-instance wake signal: a second launch writes "show" and exits; the
 # running instance polls for it and brings its window back.
 _SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
+SIGNAL_FILE = _SIGNAL_FILE
 
 
 def _log_crash(exc_type, exc_val, exc_tb):
@@ -49,6 +51,47 @@ def _log_crash(exc_type, exc_val, exc_tb):
             f.write("\n")
     except Exception:
         pass
+
+
+log_crash = _log_crash  # public alias — app.py / tray / window code should use this
+
+_logged_keys: set = set()
+
+
+def log_exception(prefix: str = "") -> None:
+    """Append the current exception as a non-fatal WARN to crash.log.
+
+    Call from `except Exception` handlers that would otherwise `pass` so
+    field failures are diagnosable in a --windowed build. Never raises.
+    """
+    import traceback
+    import datetime
+    import sys
+    try:
+        exc_type, exc_val, exc_tb = sys.exc_info()
+        if exc_type is None:
+            return
+        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            label = f" {prefix}" if prefix else ""
+            f.write(f"[{datetime.datetime.now()}] WARN{label}: "
+                    f"{exc_type.__name__}: {exc_val}\n")
+            traceback.print_tb(exc_tb, file=f)
+            f.write("\n")
+    except Exception:
+        pass
+
+
+def log_exception_once(key: str, prefix: str = "") -> None:
+    """Like log_exception, but only the first hit per process for `key`.
+
+    Use on hot paths (speed sampler, resize watchdog) so a repeating
+    failure cannot grow crash.log without bound.
+    """
+    if key in _logged_keys:
+        return
+    _logged_keys.add(key)
+    log_exception(prefix or key)
 
 
 user32 = ctypes.WinDLL("user32")
@@ -83,6 +126,8 @@ def _config_dir() -> str:
     return os.path.join(base, "ProxyManager")
 
 
+config_dir = _config_dir  # public alias
+
 CONFIG_FILE = os.path.join(_config_dir(), "config.json")
 
 WSL_PROXY_BEGIN = "# >>> proxy-manager begin >>>"
@@ -90,6 +135,12 @@ WSL_PROXY_END   = "# <<< proxy-manager end <<<"
 ENV_REG_PATH    = r"Environment"
 NO_PROXY_VALUE  = "localhost,127.0.0.1,::1"
 LOOPBACK_HOSTS  = {"127.0.0.1", "localhost", "::1", "::"}
+
+# Sentinel strings the UI maps through i18n. Keep stable; do not translate here.
+UNSET = "未设置"
+UNDETECTED = "未检测到"
+
+PROXY_SCHEMES = ("http", "socks5", "socks5h")
 
 
 def _is_valid_port(p) -> bool:
@@ -103,6 +154,138 @@ def _is_valid_port(p) -> bool:
     return s.isascii() and s.isdigit() and 1 <= int(s) <= 65535
 
 
+is_valid_port = _is_valid_port  # public alias
+
+
+def is_valid_scheme(s) -> bool:
+    return str(s or "").strip().lower() in PROXY_SCHEMES
+
+
+def is_valid_userinfo(s) -> bool:
+    """Username or password: empty is fine; letters, digits, '.', '_' and '-' only.
+
+    Tight charset so JS encodeURIComponent and Python quote() produce the same
+    bytes — a looser set (e.g. `!'()*`) diverged and made switches flip off.
+    """
+    if s is None:
+        return True
+    text = str(s)
+    if not text:
+        return True
+    return text.isascii() and all(c.isalnum() or c in "._-" for c in text)
+
+
+def build_proxy_url(host, port, scheme="http", user="", password="") -> str:
+    """Canonical proxy URL. Userinfo is percent-encoded so bash/git/ini stay safe."""
+    sch = str(scheme or "http").strip().lower()
+    if sch not in PROXY_SCHEMES:
+        sch = "http"
+    auth = ""
+    if user:
+        auth = quote(str(user), safe="")
+        if password:
+            auth += ":" + quote(str(password), safe="")
+        auth += "@"
+    return f"{sch}://{auth}{host}:{port}"
+
+
+def parse_proxy_url(url):
+    """Parse a proxy URL into {scheme, host, port, user, password} or None.
+
+    Accepts http / https / socks5 / socks5h / socks4. https is normalized to
+    http (we only ever write http:// for HTTP proxies); socks4 -> socks5
+    for the scheme we manage.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    s = url.strip()
+    if "://" not in s:
+        return None
+    try:
+        parsed = urlparse(s)
+    except Exception:
+        return None
+    sch = (parsed.scheme or "").lower()
+    if sch == "https":
+        sch = "http"
+    elif sch == "socks4":
+        sch = "socks5"
+    if sch not in PROXY_SCHEMES:
+        return None
+    # urlparse(.hostname) lowercases DNS names; surgical disable compares
+    # the rebuilt URL as an exact string against registry/ini, so case must
+    # be preserved from the original netloc.
+    host = parsed.hostname
+    raw = parsed.netloc or ""
+    if "@" in raw:
+        raw = raw.rsplit("@", 1)[-1]
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end > 0:
+            host = raw[1:end]
+    elif raw:
+        host_part, sep, _rest = raw.rpartition(":")
+        if sep and host_part:
+            host = host_part
+    if not host:
+        return None
+    try:
+        port = parsed.port
+    except (ValueError, TypeError):
+        return None
+    if not is_valid_port(port):
+        return None
+    user = unquote(parsed.username) if parsed.username else ""
+    password = unquote(parsed.password) if parsed.password else ""
+    return {
+        "scheme": sch,
+        "host": host,
+        "port": str(port),
+        "user": user,
+        "password": password,
+    }
+
+
+def wininet_url(host, port, scheme="http") -> str:
+    """URL that get_sys_proxy() returns for a host/port/scheme we wrote.
+
+    WinINET has no userinfo and treats SOCKS as a single `socks=` token, so
+    socks5h collapses to socks5:// and auth is dropped.
+    """
+    sch = str(scheme or "http").strip().lower()
+    if sch.startswith("socks"):
+        return f"socks5://{host}:{port}"
+    return f"http://{host}:{port}"
+
+
+def is_proxy_url(url) -> bool:
+    return parse_proxy_url(url) is not None
+
+
+def rewrite_proxy_host(url, new_host) -> str:
+    """Keep scheme/userinfo/port, replace host (WSL NAT gateway swap)."""
+    parsed = parse_proxy_url(url)
+    if not parsed:
+        return url
+    return build_proxy_url(
+        new_host, parsed["port"], parsed["scheme"],
+        parsed["user"], parsed["password"])
+
+
+def nat_host(host: str) -> str:
+    """In WSL2 NAT mode, loopback inside the distro does not reach Windows;
+    return the host gateway IP. Mirrored mode and non-loopback hosts pass through."""
+    if str(host).lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
+        gw = _get_wsl_gateway_ip()
+        if gw:
+            return gw
+    return host
+
+
+def _proxy_kwargs(scheme="http", user="", password=""):
+    return {"scheme": scheme or "http", "user": user or "", "password": password or ""}
+
+
 # ─── Network Info ─────────────────────────────────────────────────────────────
 def get_local_ip():
     try:
@@ -110,7 +293,8 @@ def get_local_ip():
             s.connect(("8.8.8.8", 80))
             return s.getsockname()[0]
     except Exception:
-        return "未检测到"
+        log_exception_once("local_ip", "get_local_ip")
+        return UNDETECTED
 
 
 def get_wsl_ip_and_block():
@@ -143,7 +327,7 @@ def get_wsl_ip_and_block():
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
         )
         if r.returncode != 0:
-            return ("WSL 不可用", "", "未设置")
+            return ("WSL 不可用", "", UNSET)
         out = r.stdout
         git_part = ""
         if sep2 in out:
@@ -160,10 +344,11 @@ def get_wsl_ip_and_block():
             ip_part, block_part = out, ""
         ip = ip_part.strip()
         ip = ip if ip else "未获取到"
-        git_part = git_part if git_part else "未设置"
+        git_part = git_part if git_part else UNSET
         return (ip, block_part, git_part)
     except Exception:
-        return ("WSL 未运行", "", "未设置")
+        log_exception("get_wsl_ip_and_block")
+        return ("WSL 未运行", "", UNSET)
 
 
 # Cache is keyed by .wslconfig's mtime so editing networkingMode and clicking
@@ -177,6 +362,9 @@ def _invalidate_wsl_network_mode_cache():
     Called after a WSL restart, which is when a config change takes effect."""
     global _wsl_network_mode_cache
     _wsl_network_mode_cache = None
+
+
+invalidate_wsl_network_mode_cache = _invalidate_wsl_network_mode_cache
 
 
 def get_wsl_network_mode():
@@ -218,6 +406,7 @@ def get_wsl_network_mode():
         _wsl_network_mode_cache = (mtime, "默认(NAT)")
         return _wsl_network_mode_cache[1]
     except Exception:
+        log_exception_once("wsl_mode", "get_wsl_network_mode")
         return "未知"
 
 
@@ -321,11 +510,11 @@ def get_ps_status():
 
 
 def get_ps_proxy_vars():
-    """Read HTTP_PROXY and HTTPS_PROXY from Windows user env."""
-    result = {"HTTP_PROXY": "未设置", "HTTPS_PROXY": "未设置"}
+    """Read HTTP_PROXY, HTTPS_PROXY and ALL_PROXY from Windows user env."""
+    result = {"HTTP_PROXY": UNSET, "HTTPS_PROXY": UNSET, "ALL_PROXY": UNSET}
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
-        for name in ("HTTP_PROXY", "HTTPS_PROXY"):
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
             try:
                 v, _ = winreg.QueryValueEx(key, name)
                 result[name] = v
@@ -370,15 +559,15 @@ def _parse_export(block: str, name: str):
 
 
 def get_wsl_proxy_vars(block: Optional[str] = None):
-    """Read HTTP_PROXY and HTTPS_PROXY produced by this tool from WSL.
+    """Read HTTP_PROXY / HTTPS_PROXY / ALL_PROXY produced by this tool from WSL.
     Pass an existing block (from _read_wsl_block) to avoid a redundant WSL
     subprocess call."""
-    result = {"HTTP_PROXY": "未设置", "HTTPS_PROXY": "未设置"}
+    result = {"HTTP_PROXY": UNSET, "HTTPS_PROXY": UNSET, "ALL_PROXY": UNSET}
     if block is None:
         block = _read_wsl_block()
     if not block:
         return result
-    for name in ("HTTP_PROXY", "HTTPS_PROXY"):
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         val = _parse_export(block, name)
         if val:
             result[name] = val
@@ -414,14 +603,15 @@ def _stripped_no_proxy(existing: str) -> str:
     return ",".join(e for e in _no_proxy_entries(existing) if e not in ours)
 
 
-def set_ps_proxy(host, port, enable=True):
-    url = f"http://{host}:{port}"
+def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
+    url = build_proxy_url(host, port, scheme, user, password)
+    env_names = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
                              winreg.KEY_SET_VALUE | winreg.KEY_READ)
         if enable:
-            winreg.SetValueEx(key, "HTTP_PROXY", 0, winreg.REG_SZ, url)
-            winreg.SetValueEx(key, "HTTPS_PROXY", 0, winreg.REG_SZ, url)
+            for n in env_names:
+                winreg.SetValueEx(key, n, 0, winreg.REG_SZ, url)
             # Keep loopback traffic direct without clobbering a user-set
             # NO_PROXY: merge ours in on enable, strip only ours on disable.
             try:
@@ -434,7 +624,7 @@ def set_ps_proxy(host, port, enable=True):
             # Surgical: only drop values equal to the URL this tool manages.
             # A proxy the user set by hand for another endpoint survives.
             removed = False
-            for n in ("HTTP_PROXY", "HTTPS_PROXY"):
+            for n in env_names:
                 try:
                     cur, _ = winreg.QueryValueEx(key, n)
                 except FileNotFoundError:
@@ -493,15 +683,28 @@ def _sys_proxy_server_to_url(server: str):
         return None
     if "=" in s:
         picked = None
+        socks_picked = None
         for part in s.split(";"):
             pl = part.lower()
-            if pl.startswith("http=") and not pl.startswith("https="):
+            if pl.startswith("socks=") or pl.startswith("socks5="):
+                socks_picked = part.split("=", 1)[1]
+            elif pl.startswith("http=") and not pl.startswith("https="):
                 picked = part.split("=", 1)[1]
                 break
-            if pl.startswith("https=") and picked is None:
+            elif pl.startswith("https=") and picked is None:
                 picked = part.split("=", 1)[1]
-        s = (picked or s.split("=", 1)[-1]).strip()
-    if s.startswith("http://") or s.startswith("https://"):
+        if picked:
+            s = picked.strip()
+        elif socks_picked:
+            hostport = socks_picked.strip()
+            if hostport.startswith("socks"):
+                return hostport
+            return f"socks5://{hostport}"
+        else:
+            s = s.split("=", 1)[-1].strip()
+    if s.startswith("http://") or s.startswith("https://") \
+            or s.startswith("socks5://") or s.startswith("socks5h://") \
+            or s.startswith("socks4://"):
         return s
     return f"http://{s}"
 
@@ -521,17 +724,25 @@ def get_sys_proxy():
             server = ""
         winreg.CloseKey(key)
         if not enable:
-            return "未设置"
-        return _sys_proxy_server_to_url(str(server)) or "未设置"
+            return UNSET
+        return _sys_proxy_server_to_url(str(server)) or UNSET
     except OSError:
-        return "未检测到"
+        return UNDETECTED
 
 
-def set_sys_proxy(host, port, enable=True):
+def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear Windows system proxy (Internet Options / WinINET).
-    Disable is surgical: only turns it off when the current server is ours."""
-    server = f"{host}:{port}"
-    url = f"http://{host}:{port}"
+    Disable is surgical: only turns it off when the current server is ours.
+
+    WinINET does not honor SOCKS userinfo; SOCKS schemes write `socks=host:port`
+    (no auth). HTTP schemes write `host:port` as before.
+    """
+    sch = str(scheme or "http").strip().lower()
+    if sch.startswith("socks"):
+        server = f"socks={host}:{port}"
+    else:
+        server = f"{host}:{port}"
+    url = build_proxy_url(host, port, scheme, user, password)
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
                              winreg.KEY_SET_VALUE | winreg.KEY_READ)
@@ -593,8 +804,11 @@ def _get_wsl_gateway_ip():
         if re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", ip):
             return ip
     except Exception:
-        pass
+        log_exception_once("wsl_gateway", "get_wsl_gateway_ip")
     return None
+
+
+get_wsl_gateway_ip = _get_wsl_gateway_ip  # public alias
 
 
 def proxy_port_alive(host, port, timeout=1.5):
@@ -664,23 +878,18 @@ def _wsl_write_failure(r, distro):
     return "写入 WSL 代理配置失败（权限不足或磁盘已满？）"
 
 
-def set_wsl_proxy(host, port, enable=True):
-    url = f"http://{host}:{port}"
-    # In WSL2 NAT mode 127.0.0.1 inside WSL does not reach the Windows host
-    # (localhost forwarding is Windows->WSL only), so a loopback host would
-    # silently produce a dead proxy. Substitute the host's gateway IP; in
-    # mirrored mode (and WSL1) loopback works and is left untouched.
-    if enable and host.lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
-        gw = _get_wsl_gateway_ip()
-        if gw:
-            url = f"http://{gw}:{port}"
+def set_wsl_proxy(host, port, enable=True, scheme="http", user="", password=""):
+    write_host = nat_host(host) if enable else host
+    url = build_proxy_url(write_host, port, scheme, user, password)
     # Merge loopback bypass entries into whatever NO_PROXY the user already
     # exported earlier in bashrc / the environment, instead of overwriting.
     block = f"""{WSL_PROXY_BEGIN}
 export HTTP_PROXY="{url}"
 export HTTPS_PROXY="{url}"
+export ALL_PROXY="{url}"
 export http_proxy="{url}"
 export https_proxy="{url}"
+export all_proxy="{url}"
 _pm_np="${{NO_PROXY:-}}"
 for _pm_e in localhost 127.0.0.1 ::1; do
   case ",${{_pm_np}}," in
@@ -717,8 +926,10 @@ unset _pm_np _pm_e
                 f"{WSL_PROXY_BEGIN}\n"
                 f'set -gx HTTP_PROXY "{url}"\n'
                 f'set -gx HTTPS_PROXY "{url}"\n'
+                f'set -gx ALL_PROXY "{url}"\n'
                 f'set -gx http_proxy "{url}"\n'
                 f'set -gx https_proxy "{url}"\n'
+                f'set -gx all_proxy "{url}"\n'
                 "if not set -q NO_PROXY\n"
                 "    set -gx NO_PROXY\n"
                 "end\n"
@@ -801,15 +1012,16 @@ def _git_wsl_unset_cmd(url: str) -> str:
     )
 
 
-def set_git_proxy(host, port, enable=True, use_wsl=False):
+def set_git_proxy(host, port, enable=True, use_wsl=False,
+                  scheme="http", user="", password=""):
     """Configure git's global http.proxy/https.proxy, either on Windows
     (use_wsl=False) or inside WSL (use_wsl=True).
 
-    Host/port are pre-validated by the UI, so the URL is injection-safe.
+    Host/port/userinfo are pre-validated by the UI, so the URL is injection-safe.
     Disabling is best-effort: a missing git binary (or missing WSL) simply
     means there is nothing to clean up and is reported as success, so it
     never blocks the unconditional disable flow."""
-    url = f"http://{host}:{port}"
+    url = build_proxy_url(host, port, scheme, user, password)
     try:
         if use_wsl:
             errs = []
@@ -886,9 +1098,10 @@ def get_git_proxy_win():
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
                            creationflags=subprocess.CREATE_NO_WINDOW)
         v = r.stdout.strip()
-        return v if v else "未设置"
+        return v if v else UNSET
     except Exception:
-        return "未检测到"
+        log_exception_once("git_win", "get_git_proxy_win")
+        return UNDETECTED
 
 
 # ─── npm / pip endpoints ──────────────────────────────────────────────────────
@@ -1003,22 +1216,22 @@ def _decode_ini_bytes(data: bytes):
 
 
 def get_npm_proxy():
-    """npm's user-level proxy ('未设置' when no config/no key, '未检测到' when
+    """npm's user-level proxy (UNSET when no config/no key, UNDETECTED when
     the file exists but can't be read)."""
     try:
         text, _enc = _read_ini(NPM_CONFIG_PATH)
     except FileNotFoundError:
-        return "未设置"
+        return UNSET
     except OSError:
-        return "未检测到"
-    return _ini_get(text, "proxy") or "未设置"
+        return UNDETECTED
+    return _ini_get(text, "proxy") or UNSET
 
 
-def set_npm_proxy(host, port, enable=True):
+def set_npm_proxy(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear npm's proxy + https-proxy in ~/.npmrc. npm re-reads this
     file on every invocation, so the next npm command picks the change up.
     Disable is best-effort: a missing file means nothing to clean up."""
-    url = f"http://{host}:{port}"
+    url = build_proxy_url(host, port, scheme, user, password)
     try:
         try:
             text, _enc = _read_ini(NPM_CONFIG_PATH)
@@ -1045,19 +1258,19 @@ def get_pip_proxy():
     try:
         text, _enc = _read_ini(_pip_config_path())
     except FileNotFoundError:
-        return "未设置"
+        return UNSET
     except OSError:
-        return "未检测到"
-    return _ini_get(text, "proxy") or "未设置"
+        return UNDETECTED
+    return _ini_get(text, "proxy") or UNSET
 
 
-def set_pip_proxy(host, port, enable=True):
+def set_pip_proxy(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear the proxy key pip reads: `proxy` under [global] (--proxy is
     a general option in pip, so global.proxy applies to every pip command,
     not just `pip install`). File-based, so it applies to every interpreter's
     pip including `py -m pip` without pip.exe on PATH. Disable is
     best-effort."""
-    url = f"http://{host}:{port}"
+    url = build_proxy_url(host, port, scheme, user, password)
     path = _pip_config_path()
     try:
         try:
@@ -1159,15 +1372,16 @@ def get_npm_proxy_wsl(distro=None):
             try:
                 data = _wsl_pull_file(d, _NPMrc_PATH_WSL)
             except OSError:
-                return "未检测到"
+                return UNDETECTED
             if data is None:
                 continue
             v = _ini_get(_decode_ini_bytes(data)[0], "proxy")
             if v:
                 return v
-        return "未设置"
+        return UNSET
     except Exception:
-        return "未检测到"
+        log_exception("get_npm_proxy_wsl")
+        return UNDETECTED
 
 
 def get_pip_proxy_wsl(distro=None):
@@ -1179,27 +1393,24 @@ def get_pip_proxy_wsl(distro=None):
                 try:
                     data = _wsl_pull_file(d, path)
                 except OSError:
-                    return "未检测到"
+                    return UNDETECTED
                 if data is None:
                     continue
                 v = _ini_get(_decode_ini_bytes(data)[0], "proxy")
                 if v:
                     return v
-        return "未设置"
+        return UNSET
     except Exception:
-        return "未检测到"
+        log_exception("get_pip_proxy_wsl")
+        return UNDETECTED
 
 
-def set_npm_proxy_wsl(host, port, enable=True):
+def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear npm's proxy + https-proxy in every user distro's ~/.npmrc.
     Same disable contract as the Windows npm endpoint. NAT mode swaps a
     loopback host for the Windows gateway IP, same as the WSL shell block."""
-    url = f"http://{host}:{port}"
-    if enable and host.lower() in LOOPBACK_HOSTS \
-            and get_wsl_network_mode() != "Mirrored":
-        gw = _get_wsl_gateway_ip()
-        if gw:
-            url = f"http://{gw}:{port}"
+    write_host = nat_host(host) if enable else host
+    url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
         for d in (_wsl_targets()):
@@ -1214,19 +1425,16 @@ def set_npm_proxy_wsl(host, port, enable=True):
             return "; ".join(errs)
         return True
     except Exception:
+        log_exception("set_npm_proxy_wsl")
         return True if not enable else "WSL 操作失败"
 
 
-def set_pip_proxy_wsl(host, port, enable=True):
+def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear `proxy` under [global] in every user distro's XDG
     pip.conf; disable also cleans the legacy ~/.pip/pip.conf. NAT mode swaps
     a loopback host for the Windows gateway IP."""
-    url = f"http://{host}:{port}"
-    if enable and host.lower() in LOOPBACK_HOSTS \
-            and get_wsl_network_mode() != "Mirrored":
-        gw = _get_wsl_gateway_ip()
-        if gw:
-            url = f"http://{gw}:{port}"
+    write_host = nat_host(host) if enable else host
+    url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
         for d in (_wsl_targets()):
@@ -1246,6 +1454,7 @@ def set_pip_proxy_wsl(host, port, enable=True):
             return "; ".join(errs)
         return True
     except Exception:
+        log_exception("set_pip_proxy_wsl")
         return True if not enable else "WSL 操作失败"
 
 

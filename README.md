@@ -11,11 +11,11 @@ Windows 代理一键管理工具：PowerShell、系统代理、WSL、两端 Git�
 
 ## Overview
 
-ProxyManager is a Windows desktop app that toggles HTTP proxy settings for terminal workflows. The status bar hosts **Win / WSL page tabs** — each page shows that system's own endpoints and variables, so every tool (Git, npm, pip) appears exactly once per page. All switches are independent:
+ProxyManager is a Windows desktop app that toggles HTTP and SOCKS5 proxy settings for terminal workflows. The UI is Chinese/English. The status bar hosts **Win / WSL page tabs** — each page shows that system's own endpoints and variables, so every tool (Git, npm, pip) appears exactly once per page. All switches are independent:
 
 **Windows page**
 
-- **PowerShell** — Windows user environment variables (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`), broadcast to the system so new terminals pick them up
+- **PowerShell** — Windows user environment variables (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`), broadcast to the system so new terminals pick them up
 - **System proxy** — WinINET (`Internet Settings`): browsers and many GUI apps honor this
 - **Git** — global `git config` proxy on the Windows side
 - **npm** — `proxy` and `https-proxy` in the user-level `~/.npmrc`
@@ -28,13 +28,15 @@ ProxyManager is a Windows desktop app that toggles HTTP proxy settings for termi
 - **npm** — `proxy` / `https-proxy` in each distro's `~/.npmrc`
 - **pip** — `proxy` under `[global]` in each distro's `~/.config/pip/pip.conf`; the legacy `~/.pip/pip.conf` is also cleaned on disable
 
-The interface is a zero-build single-page web app (`ui/index.html`) rendered in WebView2 through pywebview; all system operations run in the Python backend (`proxy_manager.py`).
+The interface is a zero-build web UI (`ui/index.html` + `styles.css` / `app.js` / `i18n.js`) rendered in WebView2 through pywebview; all system operations run in the Python backend (`proxy_manager.py`).
 
 Terminal-side endpoints write environment variables, shell rc files, `git config --global`, and npm/pip user config. The **System proxy** switch additionally writes WinINET (Windows Settings → Proxy), which is what browsers typically use.
 
 ## Features
 
-- **Env-var connectivity test** — every variable in the environment-variables card (HTTP_PROXY, system proxy, Git, npm, pip; separate per page) carries a **Test** button that fires a real request THROUGH that proxy source (urllib on Windows, curl inside WSL). Several captive-portal URLs are tried in order so a blocked gstatic does not look like a dead proxy; latency is green, the failure reason is red (full text on hover).
+- **HTTP and SOCKS5** — scheme is `http`, `socks5`, or `socks5h`; optional username/password is percent-encoded into the URL. Connectivity tests use `curl -x` (SOCKS included); urllib is the HTTP fallback when curl is missing.
+- **Chinese / English UI** — language is a Settings option (persisted as `lang`); the native window title stays `代理管理器` so the single-instance wake path keeps working.
+- **Env-var connectivity test** — every variable in the environment-variables card (HTTP_PROXY, ALL_PROXY, system proxy, Git, npm, pip; separate per page) carries a **Test** button that fires a real request THROUGH that proxy source. Several captive-portal URLs are tried in order so a blocked gstatic does not look like a dead proxy; latency is green, the failure reason is red (full text on hover).
 - **Nine independent switches on Win/WSL pages** — the status-bar tabs switch the whole page between the Windows and WSL views (endpoints, network info, and env variables all follow); two vertical rails beside the endpoint list (**Enable all / Disable all**) batch-toggle the current page, and each endpoint can still be toggled separately. Disabling removes exactly what the tool wrote, or restores the value it overwrote.
 - **Switches reflect reality** — every toggle is re-synced from the actually detected proxy state, so a failed operation reverts the switch automatically.
 - **Port quick-switch** — one-click switching between preset ports (7890 / 7892 / 7897 by default, fully customizable); enabled endpoints are re-applied with the new port automatically.
@@ -50,7 +52,7 @@ Terminal-side endpoints write environment variables, shell rc files, `git config
 | Layer | Technology |
 | --- | --- |
 | Window / runtime | Python + [pywebview](https://pypi.org/project/pywebview/) on WebView2 |
-| UI | Single-file HTML/CSS/JS (`ui/index.html`), no build step |
+| UI | Zero-build HTML/CSS/JS (`ui/`), zh/en i18n, no bundler |
 | npm/pip config | Direct INI editing of `~/.npmrc` / `pip.ini` (no CLI dependency; WSL side pulled/pushed over wsl.exe) |
 | Tray icon | pystray + Pillow |
 | Telemetry | psutil (optional) |
@@ -108,6 +110,10 @@ The app stores its settings in `%APPDATA%\ProxyManager\config.json` and manages 
 | --- | --- | --- | --- |
 | `host` | string | `127.0.0.1` | Proxy host |
 | `port` | string | `7897` | Proxy port (1–65535) |
+| `scheme` | string | `http` | `http`, `socks5`, or `socks5h` |
+| `user` | string | `""` | Optional proxy username (no `:` `@` or whitespace) |
+| `password` | string | `""` | Optional proxy password (stored in this config file) |
+| `lang` | string | `zh` | UI language: `zh` or `en` |
 | `powershell` | bool | `true` | PowerShell endpoint switch state |
 | `wsl` | bool | `true` | WSL endpoint switch state |
 | `git_win` | bool | `false` | Git · Windows switch state |
@@ -137,7 +143,8 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 
 - The WSL terminal endpoint writes `~/.bashrc`, `~/.zshrc`, and fish `~/.config/fish/conf.d/proxy-manager.fish`. Other shells are warned before writing.
 - The PowerShell endpoint sets user environment variables, which apply to terminals and processes started after the change. Already-open windows keep their old environment until you open a new one.
-- Only `http://` proxy URLs are managed; the tool writes `http://host:port` exactly.
+- Proxy URLs are `http://`, `socks5://`, or `socks5h://`, with optional userinfo. WinINET **system proxy** SOCKS writes `socks=host:port` and **does not support username/password**.
+- The password is stored in `%APPDATA%\ProxyManager\config.json` (local user file). Do not copy that file into a shared repo.
 - In WSL, the managed block and git/npm/pip proxies are applied to every user distro by default (Settings can limit this to the default distro); Docker infrastructure distros are skipped.
 - Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **quit-clears-proxy** is on). npm/pip switches still read as "on" whenever the file contains any proxy value.
 - The WSL npm/pip endpoints read back and modify config files over `wsl.exe`; every read/write round-trip costs a wsl.exe call, so the WSL switches refresh a bit slower than the Windows ones.
@@ -147,19 +154,26 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 
 ```text
 ProxyManager/
-├── app.py                     # Front-end entry: pywebview window, JS bridge, tray, Win32 window logic
-├── proxy_manager.py           # Back-end library: registry / WSL / git / npm / pip operations, telemetry, crash log
+├── app.py                     # Entry: pywebview window, singleton, wiring
+├── js_api.py                  # JS bridge (Api class)
+├── config_store.py            # config.json load/save, autostart, version
+├── window_win32.py            # Frameless resize, caption drag, HWND helpers
+├── tray_icon.py               # Tray icon + Win11 promotion
+├── proxy_manager.py           # Registry / WSL / git / npm / pip / telemetry
 ├── ui/
-│   └── index.html             # Zero-build single-page UI (HTML/CSS/JS)
+│   ├── index.html             # Markup
+│   ├── styles.css             # Theme tokens + layout
+│   ├── i18n.js                # zh / en strings
+│   └── app.js                 # UI logic (browser mock included)
+├── tests/                     # pytest unit tests (no WSL required)
 ├── assets/
-│   ├── icon.ico               # Application / EXE icon
-│   └── tray.png               # Tray icon
-├── build.bat                  # Local PyInstaller build script
-├── start.bat                  # Launcher: finds Python 3.9–3.13 and runs app.py
-├── requirements.txt           # Runtime + build dependencies
-└── .github/
-    └── workflows/
-        └── release.yml        # Build & Release: builds the EXE on v* tags and publishes a GitHub Release
+│   ├── icon.ico
+│   └── tray.png
+├── build.bat                  # PyInstaller (installs requirements-build.txt)
+├── start.bat
+├── requirements.txt           # Runtime dependencies
+├── requirements-build.txt     # Runtime + PyInstaller
+└── .github/workflows/         # ci.yml (ruff + pytest) and release.yml
 ```
 
 ## Development
@@ -169,7 +183,13 @@ Run from source with `py -3.13 app.py`. Two environment variables aid debugging:
 - `PM_DEBUG=1` — verbose console output, a UI-thread heartbeat, and window-geometry probes.
 - `PM_NO_SINGLETON=1` — bypass the single-instance guard so a debug instance can run next to the normal one.
 
-The UI calls Python through the pywebview `js_api` bridge (`Api` class in `app.py`); every system-touching operation lives in `proxy_manager.py`.
+The UI calls Python through the pywebview `js_api` bridge (`Api` in `js_api.py`); every system-touching operation lives in `proxy_manager.py`.
+
+```bat
+pip install -r requirements.txt pytest ruff
+ruff check .
+python -m pytest tests/ -q
+```
 
 ## Building and Distribution
 
@@ -185,7 +205,7 @@ The same build runs in CI: pushing a `v*` tag triggers `.github/workflows/releas
 
 ## Contributing
 
-Issues and pull requests are welcome at the [GitHub repository](https://github.com/quji762/ProxyManager). Please keep changes consistent with the existing structure: UI in `ui/index.html`, system operations in `proxy_manager.py`.
+Issues and pull requests are welcome at the [GitHub repository](https://github.com/quji762/ProxyManager). Please keep changes consistent with the existing structure: UI in `ui/`, window/tray/bridge in their modules, system operations in `proxy_manager.py`. Add tests next to the helpers they cover.
 
 ## License
 

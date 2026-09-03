@@ -11,6 +11,10 @@ config.json
 # Crash / trace logs written by the app at runtime
 *.log
 
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+
 # IDE
 .vscode/
 .idea/

@@ -1,7 +1,7 @@
 @echo off
 echo === Installing dependencies ===
 REM Single source of dependency truth: same file the CI and users install from.
-pip install -r requirements.txt -q
+pip install -r requirements-build.txt -q
 echo.
 echo === Building ProxyManager ===
 REM pystray / PIL are imported lazily inside functions (deferred to tray use),
