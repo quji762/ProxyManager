@@ -1,5 +1,9 @@
 pywebview>=5.0
+# app.py imports System/* CLR namespaces directly (window logic); previously
+# only pulled in transitively via pywebview's Windows backend.
+pythonnet>=3.0
 psutil>=5.9
 pystray>=0.19
 Pillow>=10.0
+# build-only dependency (PyInstaller packaging; see build.bat / release.yml)
 pyinstaller>=6.0

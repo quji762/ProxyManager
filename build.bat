@@ -1,6 +1,7 @@
 @echo off
 echo === Installing dependencies ===
-pip install pywebview psutil pystray Pillow pyinstaller -q
+REM Single source of dependency truth: same file the CI and users install from.
+pip install -r requirements.txt -q
 echo.
 echo === Building ProxyManager ===
 REM pystray / PIL are imported lazily inside functions (deferred to tray use),
@@ -21,4 +22,5 @@ pyinstaller --onefile --windowed --name ProxyManager --clean ^
 echo.
 echo === Done ===
 echo Output: dist\ProxyManager.exe
-pause
+REM CI has no interactive console; skip the pause there.
+if "%CI%"=="" pause

@@ -18,21 +18,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
+      # Single source of packaging truth: same script as the local build,
+      # so the PyInstaller arguments cannot drift between the two.
       - name: Build EXE
-        run: >
-          pyinstaller --onefile --windowed --name ProxyManager --clean
-          --icon assets/icon.ico
-          --hidden-import pystray
-          --hidden-import PIL
-          --hidden-import PIL.Image
-          --hidden-import PIL.ImageDraw
-          --collect-all webview
-          --add-data "ui;ui"
-          --add-data "assets;assets"
-          app.py
+        run: build.bat
+        shell: cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

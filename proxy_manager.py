@@ -9,9 +9,7 @@ network/speed telemetry, WSL restart, crash logging. No UI code lives here.
 Front-end entry point: app.py (pywebview + WebView2).
 """
 
-import json
 import os
-import sys
 import re
 import socket
 import subprocess
@@ -41,7 +39,8 @@ _SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
 
 def _log_crash(exc_type, exc_val, exc_tb):
     """Append a timestamped traceback to crash.log. Best-effort: never raises."""
-    import traceback, datetime
+    import traceback
+    import datetime
     try:
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:

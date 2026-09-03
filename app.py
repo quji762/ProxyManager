@@ -37,6 +37,9 @@ import proxy_manager as pm  # noqa: E402  (backend: registry/WSL/git logic)
 
 UI_PATH = os.path.join(_BASE, "ui", "index.html")
 
+# Shown in the settings dialog; bump together with the v* release tag.
+APP_VERSION = "1.3.0"
+
 # Frameless gives the HypoMux-style integrated title bar. Flip to False if a
 # future pywebview build regresses edge-resizing on frameless windows.
 FRAMELESS = True
@@ -654,7 +657,6 @@ def ensure_nonclient_drag(window=None):
 
 def _enum_windows(match):
     found = []
-    my_pid = os.getpid()
 
     @ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ssize_t, ctypes.c_ssize_t)
     def cb(hwnd, _lparam):
@@ -712,6 +714,7 @@ class Api:
     def get_config(self):
         cfg = load_config()
         return {
+            "version": APP_VERSION,
             "host": self.host, "port": self.port,
             "mode": cfg.get("mode", "light"), "pin": cfg.get("pin", False),
             "ports": cfg.get("ports", DEFAULT_PORTS),
@@ -759,7 +762,15 @@ class Api:
             if "autostart" in data:
                 cfg["autostart"] = bool(data["autostart"])
             if "bg_path" in data:
-                cfg["bg_path"] = str(data["bg_path"])
+                bp = str(data["bg_path"])
+                ext = os.path.splitext(bp)[1].lower()
+                if not bp:
+                    cfg["bg_path"] = ""
+                elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif") \
+                        and os.path.isfile(bp):
+                    cfg["bg_path"] = bp
+                # else: keep the previous value instead of persisting a
+                # bogus/missing path that get_background would choke on.
             if "bg_dim" in data:
                 try:
                     cfg["bg_dim"] = min(0.8, max(0.0, float(data["bg_dim"])))
@@ -1501,7 +1512,7 @@ class Api:
             return True
         except Exception:
             if os.environ.get("PM_DEBUG"):
-                print(f"[pm] form back recolor failed", flush=True)
+                print("[pm] form back recolor failed", flush=True)
             return False
 
     # ── custom background ──
@@ -1693,8 +1704,9 @@ class Api:
             self._maximized = True
         else:
             if self._prev_bounds:
-                l, t, r, b = self._prev_bounds
-                user32.SetWindowPos(hwnd, 0, l, t, r - l, b - t, 0x0004)
+                left, top, right, bottom = self._prev_bounds
+                user32.SetWindowPos(hwnd, 0, left, top,
+                                    right - left, bottom - top, 0x0004)
             self._maximized = False
         set_resize_maximized(self._maximized)
         self._save_geometry()
@@ -2084,7 +2096,7 @@ def main():
         # Windowless (pythonw) launches have no stdout — a bare print here
         # would vanish; failures must land in crash.log to be diagnosable.
         pm._log_crash(*sys.exc_info())
-        print(f"[pm] tray unavailable", flush=True)
+        print("[pm] tray unavailable", flush=True)
 
     # Native frameless resize: install the WM_NCHITTEST hook as soon as the
     # window exists, then keep re-installing via the watchdog below — WinForms
