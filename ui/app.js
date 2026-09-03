@@ -738,6 +738,11 @@ function fmtMB(num) {
   const units = [["KB", 1e3], ["MB", 1e6], ["GB", 1e9]];
   let v = num, lbl = "KB/s";
   for (const [u, f] of units) if (num >= f) { v = num / f; lbl = u + "/s"; } else break;
+  // Promote when rounding produces "1000" (e.g. 999,999 B/s → 999.999 KB
+  // → rounds to 1000 KB → should be 1.0 MB).
+  const display = v >= 100 ? Math.round(v) : Math.round(v * 10) / 10;
+  if (display >= 1000 && lbl === "KB/s") { v /= 1e3; lbl = "MB/s"; }
+  else if (display >= 1000 && lbl === "MB/s") { v /= 1e3; lbl = "GB/s"; }
   return [v >= 100 ? v.toFixed(0) : v.toFixed(1), lbl];
 }
 /* Spark full-scale in bytes/sec, from the user's Mbps setting (default 40,

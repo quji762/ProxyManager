@@ -134,8 +134,10 @@ def load_config():
     except (TypeError, ValueError):
         pass
     try:
+        migrated = False
         if cfg.get("speed_full") == 5:
             cfg["speed_full"] = 40
+            migrated = True
         s = float(cfg.get("speed_full", 40))
         out["speed_full"] = round(s, 1) if 0 < s <= 100000 else 40
     except (TypeError, ValueError):
@@ -150,6 +152,11 @@ def load_config():
     out["win_max"] = bool(cfg.get("win_max", False))
     restore = cfg.get("restore")
     out["restore"] = restore if isinstance(restore, dict) else {}
+    if migrated:
+        try:
+            save_config(out)
+        except Exception:
+            pass
     return out
 
 
@@ -187,15 +194,16 @@ def autostart_enabled():
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_RUN, 0,
                              winreg.KEY_READ)
         try:
-            v, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
-            winreg.CloseKey(key)
+            try:
+                v, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
+            except FileNotFoundError:
+                return False
             val = str(v)
             return str(autostart_command()) in val or (
                 getattr(sys, "frozen", False) and sys.executable in val) or (
                 ENTRY_SCRIPT in val)
-        except FileNotFoundError:
+        finally:
             winreg.CloseKey(key)
-            return False
     except OSError:
         return False
 
@@ -205,15 +213,17 @@ def autostart_set(on):
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_RUN, 0,
                              winreg.KEY_SET_VALUE)
-        if on:
-            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ,
-                              autostart_command())
-        else:
-            try:
-                winreg.DeleteValue(key, AUTOSTART_NAME)
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
+        try:
+            if on:
+                winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ,
+                                  autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_NAME)
+                except FileNotFoundError:
+                    pass
+        finally:
+            winreg.CloseKey(key)
         return True
     except OSError as e:
         return str(e)

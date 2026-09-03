@@ -491,6 +491,14 @@ def format_speed(bytes_per_sec: float) -> str:
             label = lbl
         else:
             break
+    # Promote when .1f rounding produces "1000.0" (e.g. 999,999 B/s rounds
+    # to 1000.0 KB/s but should display as 1.0 MB/s).
+    _PROMOTE = {"KB": ("MB", 1000), "MB": ("GB", 1000)}
+    formatted = f"{val:.1f}"
+    if formatted.startswith("1000") and label in _PROMOTE:
+        nxt, div = _PROMOTE[label]
+        val /= div
+        label = nxt
     return f"{val:.1f} {label}/s"
 
 
@@ -500,11 +508,11 @@ def get_ps_status():
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
         try:
             v, _ = winreg.QueryValueEx(key, "HTTP_PROXY")
-            winreg.CloseKey(key)
             return v
         except FileNotFoundError:
-            winreg.CloseKey(key)
             return None
+        finally:
+            winreg.CloseKey(key)
     except OSError:
         return None
 
@@ -514,13 +522,15 @@ def get_ps_proxy_vars():
     result = {"HTTP_PROXY": UNSET, "HTTPS_PROXY": UNSET, "ALL_PROXY": UNSET}
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
-        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
-            try:
-                v, _ = winreg.QueryValueEx(key, name)
-                result[name] = v
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
+        try:
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+                try:
+                    v, _ = winreg.QueryValueEx(key, name)
+                    result[name] = v
+                except FileNotFoundError:
+                    pass
+        finally:
+            winreg.CloseKey(key)
     except OSError:
         pass
     return result
@@ -609,47 +619,49 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
                              winreg.KEY_SET_VALUE | winreg.KEY_READ)
-        if enable:
-            for n in env_names:
-                winreg.SetValueEx(key, n, 0, winreg.REG_SZ, url)
-            # Keep loopback traffic direct without clobbering a user-set
-            # NO_PROXY: merge ours in on enable, strip only ours on disable.
-            try:
-                prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
-            except FileNotFoundError:
-                prev = ""
-            winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ,
-                              _merged_no_proxy(prev))
-        else:
-            # Surgical: only drop values equal to the URL this tool manages.
-            # A proxy the user set by hand for another endpoint survives.
-            removed = False
-            for n in env_names:
-                try:
-                    cur, _ = winreg.QueryValueEx(key, n)
-                except FileNotFoundError:
-                    continue
-                if cur == url:
-                    try:
-                        winreg.DeleteValue(key, n)
-                        removed = True
-                    except FileNotFoundError:
-                        pass
-            if removed:
+        try:
+            if enable:
+                for n in env_names:
+                    winreg.SetValueEx(key, n, 0, winreg.REG_SZ, url)
+                # Keep loopback traffic direct without clobbering a user-set
+                # NO_PROXY: merge ours in on enable, strip only ours on disable.
                 try:
                     prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
                 except FileNotFoundError:
-                    prev = None
-                if prev is not None:
-                    kept = _stripped_no_proxy(prev)
-                    if kept:
-                        winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, kept)
-                    else:
+                    prev = ""
+                winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ,
+                                  _merged_no_proxy(prev))
+            else:
+                # Surgical: only drop values equal to the URL this tool manages.
+                # A proxy the user set by hand for another endpoint survives.
+                removed = False
+                for n in env_names:
+                    try:
+                        cur, _ = winreg.QueryValueEx(key, n)
+                    except FileNotFoundError:
+                        continue
+                    if cur == url:
                         try:
-                            winreg.DeleteValue(key, "NO_PROXY")
+                            winreg.DeleteValue(key, n)
+                            removed = True
                         except FileNotFoundError:
                             pass
-        winreg.CloseKey(key)
+                if removed:
+                    try:
+                        prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
+                    except FileNotFoundError:
+                        prev = None
+                    if prev is not None:
+                        kept = _stripped_no_proxy(prev)
+                        if kept:
+                            winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, kept)
+                        else:
+                            try:
+                                winreg.DeleteValue(key, "NO_PROXY")
+                            except FileNotFoundError:
+                                pass
+        finally:
+            winreg.CloseKey(key)
         # Broadcast env change so already-running processes pick it up.
         ret = ctypes.c_long()
         user32.SendMessageTimeoutW(
@@ -715,14 +727,16 @@ def get_sys_proxy():
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
                              winreg.KEY_READ)
         try:
-            enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
-        except FileNotFoundError:
-            enable = 0
-        try:
-            server, _ = winreg.QueryValueEx(key, "ProxyServer")
-        except FileNotFoundError:
-            server = ""
-        winreg.CloseKey(key)
+            try:
+                enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            except FileNotFoundError:
+                enable = 0
+            try:
+                server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except FileNotFoundError:
+                server = ""
+        finally:
+            winreg.CloseKey(key)
         if not enable:
             return UNSET
         return _sys_proxy_server_to_url(str(server)) or UNSET
@@ -746,32 +760,34 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
                              winreg.KEY_SET_VALUE | winreg.KEY_READ)
-        if enable:
-            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
-            winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
-            try:
-                prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
-            except FileNotFoundError:
-                prev = ""
-            entries = [e.strip() for e in str(prev).split(";") if e.strip()]
-            for e in ("localhost", "127.0.0.1", "<local>"):
-                if e not in entries:
-                    entries.append(e)
-            winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
-                              ";".join(entries))
-        else:
-            try:
-                cur, _ = winreg.QueryValueEx(key, "ProxyServer")
-            except FileNotFoundError:
-                cur = ""
-            cur_url = _sys_proxy_server_to_url(str(cur)) if cur else None
-            if cur_url == url or str(cur).strip() == server:
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        try:
+            if enable:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
                 try:
-                    winreg.DeleteValue(key, "ProxyServer")
+                    prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
                 except FileNotFoundError:
-                    pass
-        winreg.CloseKey(key)
+                    prev = ""
+                entries = [e.strip() for e in str(prev).split(";") if e.strip()]
+                for e in ("localhost", "127.0.0.1", "<local>"):
+                    if e not in entries:
+                        entries.append(e)
+                winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
+                                  ";".join(entries))
+            else:
+                try:
+                    cur, _ = winreg.QueryValueEx(key, "ProxyServer")
+                except FileNotFoundError:
+                    cur = ""
+                cur_url = _sys_proxy_server_to_url(str(cur)) if cur else None
+                if cur_url == url or str(cur).strip() == server:
+                    winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                    try:
+                        winreg.DeleteValue(key, "ProxyServer")
+                    except FileNotFoundError:
+                        pass
+        finally:
+            winreg.CloseKey(key)
         _wininet_notify()
         return True
     except OSError as e:

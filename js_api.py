@@ -803,7 +803,8 @@ class Api:
         wfn = wsl_sources.get(which)
         if not wfn:
             return {"ok": False, "error": f"未知渠道 {which}"}
-        url = (wfn() or {}).get("HTTP_PROXY") or (wfn() or {}).get("ALL_PROXY")
+        result = wfn() or {}
+        url = result.get("HTTP_PROXY") or result.get("HTTPS_PROXY") or result.get("ALL_PROXY")
         parsed = self._adopt_parsed(url)
         if not parsed:
             return {"ok": False, "error": "未设置代理，无法测试"}
@@ -1115,6 +1116,10 @@ class Api:
         try:
             hwnd = self._hwnd()
             if not hwnd:
+                return
+            # Minimized windows report iconized coordinates (≈ -32000) from
+            # GetWindowRect — skip the save so we don't persist garbage.
+            if user32.IsIconic(hwnd):
                 return
             r = _RECT()
             if not user32.GetWindowRect(hwnd, ctypes.byref(r)):

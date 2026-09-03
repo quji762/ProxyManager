@@ -31,3 +31,13 @@ def test_format_speed():
     assert format_speed(100).endswith("B/s")
     assert "KB" in format_speed(1500)
     assert "MB" in format_speed(2_500_000)
+
+
+def test_format_speed_boundary_promotes():
+    """Regression: 999,999 B/s must display as '1.0 MB/s', not '1000.0 KB/s'."""
+    from proxy_manager import format_speed
+    assert format_speed(999_999) == "1.0 MB/s"
+    assert format_speed(999_999_999) == "1.0 GB/s"
+    # Exact boundaries must not double-promote.
+    assert format_speed(1_000_000) == "1.0 MB/s"
+    assert format_speed(1_000_000_000) == "1.0 GB/s"
