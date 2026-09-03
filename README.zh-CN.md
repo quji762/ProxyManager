@@ -1,5 +1,7 @@
 # ProxyManager
 
+One-click proxy management for PowerShell, Windows system proxy, WSL, Git, npm, and pip on Windows: nine independent switches across Windows and WSL channel pages, port presets, and live status in a Windows 11-style interface.
+
 Windows 代理一键管理工具：PowerShell、系统代理、WSL、两端 Git、npm 与 pip 九个端点经底部 Win / WSL 页签分页独立开关、端口快选、实时状态，Win11 风格界面。
 
 [English](./README.md) | **简体中文**
