@@ -492,7 +492,7 @@ def format_speed(bytes_per_sec: float) -> str:
     units = ["KB", "MB", "GB"]
     val = bytes_per_sec / 1000  # 先转为 KB
     idx = 0
-    while val >= 1000 and idx < len(units) - 1:
+    while val >= 999.95 and idx < len(units) - 1:
         val /= 1000
         idx += 1
     return f"{val:.1f} {units[idx]}/s"
