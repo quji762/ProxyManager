@@ -9,6 +9,7 @@ network/speed telemetry, WSL restart, crash logging. No UI code lives here.
 Front-end entry point: app.py (pywebview + WebView2).
 """
 
+import collections
 import os
 import re
 import socket
@@ -55,7 +56,8 @@ def _log_crash(exc_type, exc_val, exc_tb):
 
 log_crash = _log_crash  # public alias — app.py / tray / window code should use this
 
-_logged_keys: set = set()
+_LOGGED_KEYS_MAX = 256
+_logged_keys: "collections.OrderedDict" = collections.OrderedDict()  # LRU via move-to-end
 
 
 def log_exception(prefix: str = "") -> None:
@@ -86,11 +88,15 @@ def log_exception_once(key: str, prefix: str = "") -> None:
     """Like log_exception, but only the first hit per process for `key`.
 
     Use on hot paths (speed sampler, resize watchdog) so a repeating
-    failure cannot grow crash.log without bound.
+    failure cannot grow crash.log without bound.  Bounded to
+    ``_LOGGED_KEYS_MAX`` entries via an LRU eviction policy.
     """
     if key in _logged_keys:
+        _logged_keys.move_to_end(key)
         return
-    _logged_keys.add(key)
+    _logged_keys[key] = True
+    if len(_logged_keys) > _LOGGED_KEYS_MAX:
+        _logged_keys.popitem(last=False)
     log_exception(prefix or key)
 
 
@@ -483,23 +489,13 @@ def format_speed(bytes_per_sec: float) -> str:
     """Human-readable rate, e.g. 1.2 MB/s (SI, same scale as the Mbps setting)."""
     if bytes_per_sec < 1000:
         return f"{bytes_per_sec:.0f} B/s"
-    val = bytes_per_sec
-    label = "KB"
-    for lbl, factor in (("KB", 1000), ("MB", 1000 ** 2), ("GB", 1000 ** 3)):
-        if bytes_per_sec >= factor:
-            val = bytes_per_sec / factor
-            label = lbl
-        else:
-            break
-    # Promote when .1f rounding produces "1000.0" (e.g. 999,999 B/s rounds
-    # to 1000.0 KB/s but should display as 1.0 MB/s).
-    _PROMOTE = {"KB": ("MB", 1000), "MB": ("GB", 1000)}
-    formatted = f"{val:.1f}"
-    if formatted.startswith("1000") and label in _PROMOTE:
-        nxt, div = _PROMOTE[label]
-        val /= div
-        label = nxt
-    return f"{val:.1f} {label}/s"
+    units = ["KB", "MB", "GB"]
+    val = bytes_per_sec / 1000  # 先转为 KB
+    idx = 0
+    while val >= 1000 and idx < len(units) - 1:
+        val /= 1000
+        idx += 1
+    return f"{val:.1f} {units[idx]}/s"
 
 
 # ─── Proxy Logic ──────────────────────────────────────────────────────────────
@@ -634,6 +630,9 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
             else:
                 # Surgical: only drop values equal to the URL this tool manages.
                 # A proxy the user set by hand for another endpoint survives.
+                # This is an intentional design choice — only exact matches are
+                # removed so user-configured proxies for other endpoints are
+                # never clobbered by a disable.
                 removed = False
                 for n in env_names:
                     try:
@@ -674,6 +673,7 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
 
 
 INET_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+_PROXY_OVERRIDE_OURS = {"localhost", "127.0.0.1", "<local>"}
 
 
 def _wininet_notify():
@@ -786,6 +786,23 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
                         winreg.DeleteValue(key, "ProxyServer")
                     except FileNotFoundError:
                         pass
+                    # Clean up ProxyOverride entries we appended on enable,
+                    # preserving any the user added themselves.
+                    try:
+                        prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
+                    except FileNotFoundError:
+                        prev = None
+                    if prev is not None:
+                        kept = [e.strip() for e in str(prev).split(";")
+                                if e.strip() and e.strip() not in _PROXY_OVERRIDE_OURS]
+                        if kept:
+                            winreg.SetValueEx(key, "ProxyOverride", 0,
+                                              winreg.REG_SZ, ";".join(kept))
+                        else:
+                            try:
+                                winreg.DeleteValue(key, "ProxyOverride")
+                            except FileNotFoundError:
+                                pass
         finally:
             winreg.CloseKey(key)
         _wininet_notify()
@@ -1017,13 +1034,20 @@ def _git_win_unset(url: str) -> None:
             creationflags=subprocess.CREATE_NO_WINDOW)
 
 
+def _bash_sq(s: str) -> str:
+    """Escape a string for use inside single quotes in bash.
+    ``'`` becomes ``'\\''`` (end-quote, escaped-quote, start-quote)."""
+    return s.replace("'", "'\\''")
+
+
 def _git_wsl_unset_cmd(url: str) -> str:
     """Bash snippet: surgical unset with --fixed-value, regex fallback."""
     esc = re.escape(url)
+    sq = _bash_sq(url)
     return (
-        f"(git config --global --fixed-value --unset-all http.proxy '{url}' "
+        f"(git config --global --fixed-value --unset-all http.proxy '{sq}' "
         f"|| git config --global --unset-all http.proxy '{esc}') 2>/dev/null; "
-        f"(git config --global --fixed-value --unset-all https.proxy '{url}' "
+        f"(git config --global --fixed-value --unset-all https.proxy '{sq}' "
         f"|| git config --global --unset-all https.proxy '{esc}') 2>/dev/null; true"
     )
 
@@ -1045,8 +1069,9 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                 label = f"WSL({d})" if d else "WSL"
                 try:
                     if enable:
-                        cmd = (f"git config --global --replace-all http.proxy '{url}' && "
-                               f"git config --global --replace-all https.proxy '{url}'")
+                        sq = _bash_sq(url)
+                        cmd = (f"git config --global --replace-all http.proxy '{sq}' && "
+                               f"git config --global --replace-all https.proxy '{sq}'")
                     elif host or port:
                         # Remove only values equal to the URL this tool manages;
                         # any proxy value the user set themselves survives.
@@ -1142,16 +1167,11 @@ def _pip_config_path():
 
 
 def _read_ini(path):
-    """Read an INI-ish file as (text, encoding). Tries UTF-8 (BOM optional)
-    then the ANSI codepage: pip reads its config with the locale encoding, so
-    a hand-edited pip.ini with GBK comments must round-trip as GBK instead of
-    being force-converted. The returned encoding is reused on write."""
+    """Read an INI-ish file as (text, encoding). Delegates to
+    ``_decode_ini_bytes`` so the decoding logic is not duplicated."""
     with open(path, "rb") as f:
         raw = f.read()
-    try:
-        return raw.decode("utf-8-sig"), "utf-8-sig"
-    except UnicodeDecodeError:
-        return raw.decode("mbcs", errors="replace"), "mbcs"
+    return _decode_ini_bytes(raw)
 
 
 def _ini_get(text, key):

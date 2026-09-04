@@ -158,16 +158,21 @@ def main():
 
     def _watch_wake():
         while True:
-            if os.path.exists(pm.SIGNAL_FILE):
-                try:
-                    os.remove(pm.SIGNAL_FILE)
-                except OSError:
-                    pass
-                try:
-                    _refresh_tray_icon(api)
-                    _show_main_window(api)
-                except Exception:
-                    pm.log_exception("wake_show")
+            # Atomically attempt removal instead of exists()+remove() to
+            # avoid TOCTOU race with the second-instance writer.
+            try:
+                os.remove(pm.SIGNAL_FILE)
+            except FileNotFoundError:
+                time.sleep(1.5)
+                continue
+            except OSError:
+                time.sleep(1.5)
+                continue
+            try:
+                _refresh_tray_icon(api)
+                _show_main_window(api)
+            except Exception:
+                pm.log_exception("wake_show")
             time.sleep(1.5)
 
     threading.Thread(target=_watch_wake, daemon=True).start()

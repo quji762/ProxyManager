@@ -12,7 +12,7 @@ from config_store import (
     autostart_enabled, autostart_set, load_config, save_config, valid_host,
 )
 from window_win32 import (
-    _POINT, _RECT, _our_hwnds, _resize_maximized, set_resize_maximized, user32,
+    _POINT, _RECT, _is_maximized, _our_hwnds, set_resize_maximized, user32,
 )
 
 class Api:
@@ -199,6 +199,26 @@ class Api:
             "password": password if password is not None else self.password,
         }
 
+    def _detected_hpk(self, cur, fallback_h, fallback_p, fallback_kw):
+        """Parse a detected proxy URL into (host, port, kw) or return fallbacks."""
+        parsed = self._adopt_parsed(cur)
+        if not parsed:
+            return fallback_h, fallback_p, fallback_kw
+        return parsed["host"], parsed["port"], {
+            "scheme": parsed["scheme"], "user": parsed["user"],
+            "password": parsed["password"]}
+
+    # Dispatch table for simple toggle endpoints: (setter, label, detected_fn, on_note).
+    # Git and WSL endpoints are handled separately due to their unique logic.
+    _ENDPOINT_INFO = {
+        "ps":     (pm.set_ps_proxy,     "PowerShell",  pm.get_ps_status,     "请新开一个终端后生效"),
+        "sys":    (pm.set_sys_proxy,    "系统代理",    pm.get_sys_proxy,     None),
+        "npm":    (pm.set_npm_proxy,    "npm",         pm.get_npm_proxy,     None),
+        "pip":    (pm.set_pip_proxy,    "pip",         pm.get_pip_proxy,     None),
+        "npmwsl": (pm.set_npm_proxy_wsl, "npm(WSL)",   pm.get_npm_proxy_wsl, None),
+        "pipwsl": (pm.set_pip_proxy_wsl, "pip(WSL)",   pm.get_pip_proxy_wsl, None),
+    }
+
     def _managed_url(self, host=None, port=None, **kw):
         opts = self._proxy_kw(**{k: kw[k] for k in ("scheme", "user", "password") if k in kw})
         return pm.build_proxy_url(
@@ -345,7 +365,8 @@ class Api:
         # (speed probe, restart_wsl) act on the address just applied.
         # Restoring a previous proxy must not overwrite the UI's current fields.
         if not _restoring:
-            self.host, self.port = h, p
+            with self._speed_lock:
+                self.host, self.port = h, p
             if scheme is not None:
                 self.scheme = kw["scheme"]
             if user is not None:
@@ -360,29 +381,7 @@ class Api:
             if restored is not None:
                 return restored
 
-        def _from_detected(cur):
-            parsed = self._adopt_parsed(cur)
-            if not parsed:
-                return h, p, kw
-            return parsed["host"], parsed["port"], {
-                "scheme": parsed["scheme"], "user": parsed["user"],
-                "password": parsed["password"]}
-
-        if target == "ps":
-            if not on:
-                h, p, kw = _from_detected(pm.get_ps_status())
-            ret = pm.set_ps_proxy(h, p, on, **kw)
-            if ret is not True:
-                return {"error": f"PowerShell: {ret}"}
-            if on:
-                notes.append("请新开一个终端后生效")
-        elif target == "sys":
-            if not on:
-                h, p, kw = _from_detected(pm.get_sys_proxy())
-            ret = pm.set_sys_proxy(h, p, on, **kw)
-            if ret is not True:
-                return {"error": f"系统代理: {ret}"}
-        elif target == "wsl":
+        if target == "wsl":
             if on and h.lower() in pm.LOOPBACK_HOSTS \
                     and pm.get_wsl_network_mode() != "Mirrored":
                 notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
@@ -408,25 +407,19 @@ class Api:
                 self._git_managed[target] = None
                 if ret is not True:
                     return {"error": f"{label}: {ret}"}
-        elif target in ("npm", "pip"):
+        elif target in self._ENDPOINT_INFO:
+            setter, label, detected_fn, on_note = self._ENDPOINT_INFO[target]
             if not on:
-                cur = pm.get_npm_proxy() if target == "npm" else pm.get_pip_proxy()
-                h, p, kw = _from_detected(cur)
-            fn = pm.set_npm_proxy if target == "npm" else pm.set_pip_proxy
-            ret = fn(h, p, on, **kw)
-            if ret is not True:
-                return {"error": f"{target}: {ret}"}
-        elif target in ("npmwsl", "pipwsl"):
-            if on and h.lower() in pm.LOOPBACK_HOSTS \
+                h, p, kw = self._detected_hpk(detected_fn(), h, p, kw)
+            if target in ("npmwsl", "pipwsl") and on \
+                    and h.lower() in pm.LOOPBACK_HOSTS \
                     and pm.get_wsl_network_mode() != "Mirrored":
                 notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
-            if not on:
-                cur = pm.get_npm_proxy_wsl() if target == "npmwsl" else pm.get_pip_proxy_wsl()
-                h, p, kw = _from_detected(cur)
-            fn = pm.set_npm_proxy_wsl if target == "npmwsl" else pm.set_pip_proxy_wsl
-            ret = fn(h, p, on, **kw)
+            ret = setter(h, p, on, **kw)
             if ret is not True:
-                return {"error": f"{target}: {ret}"}
+                return {"error": f"{label}: {ret}"}
+            if on and on_note:
+                notes.append(on_note)
         else:
             return {"error": f"未知端点 {target}"}
         return {"ok": True, "note": "；".join(notes) if notes else None}
@@ -512,7 +505,8 @@ class Api:
             "pipwsl": pm.get_pip_proxy_wsl() == wsl_managed_url,
         }
         if not any(enabled.values()):
-            self.host, self.port = new_host, new_port
+            with self._speed_lock:
+                self.host, self.port = new_host, new_port
             self.scheme, self.user, self.password = (
                 new_kw["scheme"], new_kw["user"], new_kw["password"])
             with _cfg_lock:
@@ -523,19 +517,6 @@ class Api:
         errs, notes = {}, []
         # Disable with the OLD port first (git's surgical unset needs the
         # exact managed URL), then re-enable each endpoint on the new one.
-        dis_errs = {}
-        if enabled["ps"]:
-            ret = pm.set_ps_proxy(old_h, old_p, False, **old_kw)
-            if ret is not True:
-                dis_errs["ps"] = f"PowerShell: {ret}"
-        if enabled["sys"]:
-            ret = pm.set_sys_proxy(old_h, old_p, False, **old_kw)
-            if ret is not True:
-                dis_errs["sys"] = f"系统代理: {ret}"
-        if enabled["wsl"]:
-            ret = pm.set_wsl_proxy(old_h, old_p, False, **old_kw)
-            if ret is not True:
-                dis_errs["wsl"] = f"WSL: {ret}"
         gitwsl_unset = (old_h, old_p, old_kw)
         if enabled["gitwsl"]:
             gv = (wsl_state or {}).get("git")
@@ -544,47 +525,31 @@ class Api:
                 gitwsl_unset = (parsed["host"], parsed["port"], {
                     "scheme": parsed["scheme"], "user": parsed["user"],
                     "password": parsed["password"]})
-        for tgt, label, use_wsl in (("gitwin", "Git(Windows)", False),
-                                    ("gitwsl", "Git(WSL)", True)):
-            if enabled[tgt]:
-                uh, up, ukw = gitwsl_unset if tgt == "gitwsl" else (old_h, old_p, old_kw)
-                ret = pm.set_git_proxy(uh, up, False, use_wsl=use_wsl, **ukw)
-                if ret is not True:
-                    dis_errs[tgt] = f"{label}: {ret}"
-        if enabled["npm"]:
-            ret = pm.set_npm_proxy(old_h, old_p, False, **old_kw)
-            if ret is not True:
-                dis_errs["npm"] = f"npm: {ret}"
-        if enabled["pip"]:
-            ret = pm.set_pip_proxy(old_h, old_p, False, **old_kw)
-            if ret is not True:
-                dis_errs["pip"] = f"pip: {ret}"
-        if enabled["npmwsl"]:
-            wh, wp, wkw = old_h, old_p, old_kw
-            parsed = self._adopt_parsed(pm.get_npm_proxy_wsl())
-            if parsed:
-                wh, wp, wkw = parsed["host"], parsed["port"], {
-                    "scheme": parsed["scheme"], "user": parsed["user"],
-                    "password": parsed["password"]}
-            ret = pm.set_npm_proxy_wsl(wh, wp, False, **wkw)
-            if ret is not True:
-                dis_errs["npmwsl"] = f"npm(WSL): {ret}"
-        if enabled["pipwsl"]:
-            wh, wp, wkw = old_h, old_p, old_kw
-            parsed = self._adopt_parsed(pm.get_pip_proxy_wsl())
-            if parsed:
-                wh, wp, wkw = parsed["host"], parsed["port"], {
-                    "scheme": parsed["scheme"], "user": parsed["user"],
-                    "password": parsed["password"]}
-            ret = pm.set_pip_proxy_wsl(wh, wp, False, **wkw)
-            if ret is not True:
-                dis_errs["pipwsl"] = f"pip(WSL): {ret}"
-
+        ctx = {"gitwsl_unset": gitwsl_unset}
+        # Phase 1: disable all enabled endpoints with the old address.
+        # Track successfully disabled targets so we can rollback on partial
+        # failure (Issue 17).
+        disabled_ok = []
+        dis_errs = {}
+        for tgt in self._SWITCH_TARGETS:
+            if not enabled[tgt]:
+                continue
+            err = self._switch_disable_endpoint(
+                tgt, old_h, old_p, old_kw, ctx)
+            if err is None:
+                disabled_ok.append(tgt)
+            else:
+                dis_errs[tgt] = err
+        # Rollback: if any disable failed, re-enable the ones we already
+        # disabled so the user's proxy state is not left half-broken.
         if dis_errs:
+            for tgt in disabled_ok:
+                self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)
             return {"ok": False, "applied": [],
                     "error": "；".join(dis_errs.values()), "note": None}
 
-        self.host, self.port = new_host, new_port
+        with self._speed_lock:
+            self.host, self.port = new_host, new_port
         self.scheme, self.user, self.password = (
             new_kw["scheme"], new_kw["user"], new_kw["password"])
         cfg_err = None
@@ -592,61 +557,19 @@ class Api:
             if not save_config(self._cfg_with_port(new_port)):
                 cfg_err = "配置文件写入失败（磁盘已满或权限不足）"
 
+        # Phase 2: re-enable each endpoint on the new address.
         applied = []
-        if enabled["wsl"]:
-            pm.invalidate_wsl_network_mode_cache()
-            ret = pm.set_wsl_proxy(new_host, new_port, True, **new_kw)
-            if ret is True:
-                applied.append("wsl")
+        for tgt in self._SWITCH_TARGETS:
+            if not enabled[tgt]:
+                continue
+            err, git_url = self._switch_enable_endpoint(
+                tgt, new_host, new_port, new_kw)
+            if err is None:
+                applied.append(tgt)
+                if git_url is not None:
+                    self._git_managed[tgt] = git_url
             else:
-                errs["wsl"] = f"WSL: {ret}"
-        if enabled["ps"]:
-            ret = pm.set_ps_proxy(new_host, new_port, True, **new_kw)
-            if ret is True:
-                applied.append("ps")
-            else:
-                errs["ps"] = f"PowerShell: {ret}"
-        if enabled["sys"]:
-            ret = pm.set_sys_proxy(new_host, new_port, True, **new_kw)
-            if ret is True:
-                applied.append("sys")
-            else:
-                errs["sys"] = f"系统代理: {ret}"
-        for tgt, label, use_wsl in (("gitwin", "Git(Windows)", False),
-                                    ("gitwsl", "Git(WSL)", True)):
-            if enabled[tgt]:
-                gh, gp = self._wsl_url_target(new_host, new_port) \
-                    if use_wsl else (new_host, new_port)
-                ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **new_kw)
-                if ret is True:
-                    applied.append(tgt)
-                    self._git_managed[tgt] = self._managed_url(gh, gp, **new_kw)
-                else:
-                    errs[tgt] = f"{label}: {ret}"
-        if enabled["npm"]:
-            ret = pm.set_npm_proxy(new_host, new_port, True, **new_kw)
-            if ret is True:
-                applied.append("npm")
-            else:
-                errs["npm"] = f"npm: {ret}"
-        if enabled["pip"]:
-            ret = pm.set_pip_proxy(new_host, new_port, True, **new_kw)
-            if ret is True:
-                applied.append("pip")
-            else:
-                errs["pip"] = f"pip: {ret}"
-        if enabled["npmwsl"]:
-            ret = pm.set_npm_proxy_wsl(new_host, new_port, True, **new_kw)
-            if ret is True:
-                applied.append("npmwsl")
-            else:
-                errs["npmwsl"] = f"npm(WSL): {ret}"
-        if enabled["pipwsl"]:
-            ret = pm.set_pip_proxy_wsl(new_host, new_port, True, **new_kw)
-            if ret is True:
-                applied.append("pipwsl")
-            else:
-                errs["pipwsl"] = f"pip(WSL): {ret}"
+                errs[tgt] = err
         if "wsl" in applied or "npmwsl" in applied or "pipwsl" in applied \
                 or "gitwsl" in applied:
             if new_host.lower() in pm.LOOPBACK_HOSTS \
@@ -658,6 +581,87 @@ class Api:
         return {"ok": ok, "applied": applied,
                 "error": "；".join(errs.values()) if errs else None,
                 "note": "；".join(notes) if notes else None}
+
+    # ── switch_port helpers (Issues 8 & 17) ─────────────────────────────────
+    _SWITCH_TARGETS = ("ps", "sys", "wsl", "gitwin", "gitwsl",
+                       "npm", "pip", "npmwsl", "pipwsl")
+
+    def _switch_disable_endpoint(self, target, old_h, old_p, old_kw, ctx):
+        """Disable one endpoint during port switch.
+        Returns None on success, error string on failure."""
+        if target == "ps":
+            ret = pm.set_ps_proxy(old_h, old_p, False, **old_kw)
+            return None if ret is True else f"PowerShell: {ret}"
+        if target == "sys":
+            ret = pm.set_sys_proxy(old_h, old_p, False, **old_kw)
+            return None if ret is True else f"系统代理: {ret}"
+        if target == "wsl":
+            ret = pm.set_wsl_proxy(old_h, old_p, False, **old_kw)
+            return None if ret is True else f"WSL: {ret}"
+        if target in ("gitwin", "gitwsl"):
+            label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
+            use_wsl = target == "gitwsl"
+            uh, up, ukw = ctx["gitwsl_unset"] if target == "gitwsl" \
+                else (old_h, old_p, old_kw)
+            ret = pm.set_git_proxy(uh, up, False, use_wsl=use_wsl, **ukw)
+            return None if ret is True else f"{label}: {ret}"
+        if target == "npm":
+            ret = pm.set_npm_proxy(old_h, old_p, False, **old_kw)
+            return None if ret is True else f"npm: {ret}"
+        if target == "pip":
+            ret = pm.set_pip_proxy(old_h, old_p, False, **old_kw)
+            return None if ret is True else f"pip: {ret}"
+        if target in ("npmwsl", "pipwsl"):
+            label = "npm(WSL)" if target == "npmwsl" else "pip(WSL)"
+            wh, wp, wkw = old_h, old_p, old_kw
+            getter = pm.get_npm_proxy_wsl if target == "npmwsl" \
+                else pm.get_pip_proxy_wsl
+            parsed = self._adopt_parsed(getter())
+            if parsed:
+                wh, wp, wkw = parsed["host"], parsed["port"], {
+                    "scheme": parsed["scheme"], "user": parsed["user"],
+                    "password": parsed["password"]}
+            fn = pm.set_npm_proxy_wsl if target == "npmwsl" \
+                else pm.set_pip_proxy_wsl
+            ret = fn(wh, wp, False, **wkw)
+            return None if ret is True else f"{label}: {ret}"
+        return None
+
+    def _switch_enable_endpoint(self, target, new_host, new_port, new_kw):
+        """Enable one endpoint during port switch.
+        Returns (error_or_None, git_managed_url_or_None)."""
+        if target == "wsl":
+            pm.invalidate_wsl_network_mode_cache()
+            ret = pm.set_wsl_proxy(new_host, new_port, True, **new_kw)
+            return (None if ret is True else f"WSL: {ret}", None)
+        if target == "ps":
+            ret = pm.set_ps_proxy(new_host, new_port, True, **new_kw)
+            return (None if ret is True else f"PowerShell: {ret}", None)
+        if target == "sys":
+            ret = pm.set_sys_proxy(new_host, new_port, True, **new_kw)
+            return (None if ret is True else f"系统代理: {ret}", None)
+        if target in ("gitwin", "gitwsl"):
+            label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
+            use_wsl = target == "gitwsl"
+            gh, gp = self._wsl_url_target(new_host, new_port) \
+                if use_wsl else (new_host, new_port)
+            ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **new_kw)
+            if ret is True:
+                return (None, self._managed_url(gh, gp, **new_kw))
+            return (f"{label}: {ret}", None)
+        if target == "npm":
+            ret = pm.set_npm_proxy(new_host, new_port, True, **new_kw)
+            return (None if ret is True else f"npm: {ret}", None)
+        if target == "pip":
+            ret = pm.set_pip_proxy(new_host, new_port, True, **new_kw)
+            return (None if ret is True else f"pip: {ret}", None)
+        if target in ("npmwsl", "pipwsl"):
+            label = "npm(WSL)" if target == "npmwsl" else "pip(WSL)"
+            fn = pm.set_npm_proxy_wsl if target == "npmwsl" \
+                else pm.set_pip_proxy_wsl
+            ret = fn(new_host, new_port, True, **new_kw)
+            return (None if ret is True else f"{label}: {ret}", None)
+        return (None, None)
 
     def _cfg_with_port(self, new_port):
         cfg = load_config()
@@ -676,12 +680,12 @@ class Api:
                 dt = max(now - last_t, 1e-3)
                 last_t = now
                 cur = pm.get_net_counters()
-                # Snapshot host/port atomically: do_toggle writes them as a
-                # pair on another thread without this lock.
-                host, port = self.host, self.port
                 up_str = dn_str = None
                 dn_num = 0.0
                 with self._speed_lock:
+                    # Snapshot host/port atomically under the same lock that
+                    # do_toggle / switch_port acquire when writing the pair.
+                    host, port = self.host, self.port
                     if cur is not None and self._speed_prev is not None:
                         up = (cur[0] - self._speed_prev[0]) / dt
                         dn = (cur[1] - self._speed_prev[1]) / dt
@@ -860,12 +864,13 @@ class Api:
 
     def _wsl_proxy_probe(self, proxy_url, parsed):
         """Same probe executed inside WSL via curl (through the proxy)."""
-        # URL is percent-encoded by build_proxy_url; single-quoting is safe
-        # (no apostrophe in the encoded form).
+        # Escape single quotes for bash safety even though build_proxy_url
+        # percent-encodes userinfo (defense-in-depth).
+        sq_url = proxy_url.replace("'", "'\\''")
         urls = " ".join(PROBE_URLS)
         script = (
             f"for u in {urls}; do "
-            f"out=$(curl -x '{proxy_url}' -s -o /dev/null "
+            f"out=$(curl -x '{sq_url}' -s -o /dev/null "
             f"-w '%{{http_code}} %{{time_total}}' --max-time 5 \"$u\" 2>/dev/null); "
             "code=${out%% *}; "
             "if [ \"$code\" = 204 ] || [ \"$code\" = 200 ]; then echo \"$out\"; exit 0; fi; "
@@ -928,9 +933,16 @@ class Api:
               "$f.Filter = '图片|*.png;*.jpg;*.jpeg;*.webp;*.bmp'; "
               "$f.Title = '选择背景图片'; "
               "if ($f.ShowDialog() -eq 'OK') { Write-Output $f.FileName }")
+        import tempfile
+        ps_path = None
         try:
+            # Write script to a temp file and invoke with -File instead of
+            # -Command so PowerShell does not interpret arbitrary strings.
+            fd, ps_path = tempfile.mkstemp(suffix=".ps1")
+            with os.fdopen(fd, "w", encoding="utf-8-sig") as f:
+                f.write(ps)
             r = __import__("subprocess").run(
-                ["powershell", "-NoProfile", "-STA", "-Command", ps],
+                ["powershell", "-NoProfile", "-STA", "-File", ps_path],
                 capture_output=True, timeout=120, encoding="utf-8",
                 errors="replace", creationflags=0x08000000)
             path = (r.stdout or "").strip().splitlines()
@@ -948,6 +960,11 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
         finally:
+            if ps_path:
+                try:
+                    os.unlink(ps_path)
+                except OSError:
+                    pass
             if was_pin:
                 self._apply_topmost(True)
 
@@ -1019,7 +1036,7 @@ class Api:
                 from System import Type, Func  # noqa: E402
 
                 def _move():
-                    if _resize_maximized:
+                    if _is_maximized():
                         return  # dragging a maximized window is a no-op
                     hwnd = self._hwnd()
                     if not hwnd:
@@ -1132,7 +1149,7 @@ class Api:
             self._win_rect = rect
             save_config({"win_rect": rect, "win_max": self._win_max})
         except Exception:
-            pass
+            pm.log_exception("save_geometry")
 
     def _clear_maximized_state(self):
         """Called from the WndProc hook (via _clear_fake_maximized) when a

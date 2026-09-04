@@ -115,7 +115,8 @@ def _sync_maximized_icon():
     w = _page_window_ref
     if w is None:
         return
-    state = "true" if _resize_maximized else "false"
+    with _resize_hook_lock:
+        state = "true" if _resize_maximized else "false"
 
     def _push():
         try:
@@ -134,7 +135,8 @@ def _clear_fake_maximized():
     instead of maximizing), and pushes the icon sync. WndProc context:
     still no evaluate_js here — the sync runs on its worker thread."""
     global _resize_maximized
-    _resize_maximized = False
+    with _resize_hook_lock:
+        _resize_maximized = False
     if _clear_maximized_cb is not None:
         try:
             _clear_maximized_cb()
@@ -161,34 +163,40 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
 
     (Subclassing the WebView2 child windows instead is NOT viable: doing that
     from Python tore the children down and exited the process.)"""
-    if msg == WM_NCHITTEST and not _resize_maximized and _resize_form_hwnd:
-        x = _signed16(lparam & 0xFFFF)
-        y = _signed16((lparam >> 16) & 0xFFFF)
-        r = _RECT()
-        user32.GetWindowRect(_resize_form_hwnd, ctypes.byref(r))
-        if r.left <= x <= r.right and r.top <= y <= r.bottom:
-            dpi = user32.GetDpiForWindow(hwnd) or 96
-            m = max(6, _HT_EDGE * dpi // 96)
-            on_l = x - r.left <= m
-            on_r = r.right - x <= m
-            on_t = y - r.top <= m
-            on_b = r.bottom - y <= m
-            if on_t and on_l:
-                return 13  # HTTOPLEFT
-            if on_t and on_r:
-                return 14  # HTTOPRIGHT
-            if on_b and on_l:
-                return 16  # HTBOTTOMLEFT
-            if on_b and on_r:
-                return 17  # HTBOTTOMRIGHT
-            if on_l:
-                return 10  # HTLEFT
-            if on_r:
-                return 11  # HTRIGHT
-            if on_t:
-                return 12  # HTTOP
-            if on_b:
-                return 15  # HTBOTTOM
+    if msg == WM_NCHITTEST:
+        try:
+            with _resize_hook_lock:
+                maximized = _resize_maximized
+            if not maximized and _resize_form_hwnd:
+                x = _signed16(lparam & 0xFFFF)
+                y = _signed16((lparam >> 16) & 0xFFFF)
+                r = _RECT()
+                user32.GetWindowRect(_resize_form_hwnd, ctypes.byref(r))
+                if r.left <= x <= r.right and r.top <= y <= r.bottom:
+                    dpi = user32.GetDpiForWindow(hwnd) or 96
+                    m = max(6, _HT_EDGE * dpi // 96)
+                    on_l = x - r.left <= m
+                    on_r = r.right - x <= m
+                    on_t = y - r.top <= m
+                    on_b = r.bottom - y <= m
+                    if on_t and on_l:
+                        return 13  # HTTOPLEFT
+                    if on_t and on_r:
+                        return 14  # HTTOPRIGHT
+                    if on_b and on_l:
+                        return 16  # HTBOTTOMLEFT
+                    if on_b and on_r:
+                        return 17  # HTBOTTOMRIGHT
+                    if on_l:
+                        return 10  # HTLEFT
+                    if on_r:
+                        return 11  # HTRIGHT
+                    if on_t:
+                        return 12  # HTTOP
+                    if on_b:
+                        return 15  # HTBOTTOM
+        except Exception:
+            pass
     elif msg == 0x00A3:  # WM_NCLBUTTONDBLCLK
         # Double-click on the native resize ring: HTTOP owns the top strip
         # (for vertical resize), so without this the title-bar double-click
@@ -215,7 +223,7 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
             user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
             return 0
         if sc == 0xF030:  # SC_MAXIMIZE
-            if not _resize_maximized and _restore_callback is not None:
+            if not _is_maximized() and _restore_callback is not None:
                 try:
                     _restore_callback()
                     _sync_maximized_icon()
@@ -230,7 +238,7 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
                 # return to its maximized size (work area), NOT collapse to
                 # prev bounds — only un-minimize here.
                 return 0
-            if _resize_maximized and _restore_callback is not None:
+            if _is_maximized() and _restore_callback is not None:
                 try:
                     _restore_callback()
                     _sync_maximized_icon()
@@ -245,7 +253,7 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
         # The bounds guard matters: un-minimizing ALSO arrives as
         # SIZE_RESTORED, and that path must keep the maximized state (the
         # window returns to the work area — bounds still match, so we skip).
-        if wparam == 0 and _resize_maximized:  # SIZE_RESTORED
+        if wparam == 0 and _is_maximized():  # SIZE_RESTORED
             r = _RECT()
             wa = _RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(r))
@@ -260,7 +268,7 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
         # loop ends and the bounds no longer match the work area, the user
         # really dragged it off — collapse the fake-max state. (A plain
         # caption click also enters/exits the loop, but bounds still match.)
-        if _resize_maximized and _restore_callback is not None:
+        if _is_maximized() and _restore_callback is not None:
             r = _RECT()
             wa = _RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(r))
@@ -376,7 +384,14 @@ def _apply_window_padding(window, px):
 
 def set_resize_maximized(v):
     global _resize_maximized
-    _resize_maximized = bool(v)
+    with _resize_hook_lock:
+        _resize_maximized = bool(v)
+
+
+def _is_maximized():
+    """Thread-safe read of _resize_maximized."""
+    with _resize_hook_lock:
+        return _resize_maximized
 
 
 def ensure_nonclient_drag(window=None):

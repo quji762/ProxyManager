@@ -6,6 +6,9 @@ source and from a PyInstaller --onefile extract (sys._MEIPASS).
 
 from __future__ import annotations
 
+import base64
+import ctypes
+import ctypes.wintypes
 import json
 import os
 import sys
@@ -13,7 +16,68 @@ import threading
 
 import proxy_manager as pm
 
-APP_VERSION = "1.4.0"
+# ── APP_VERSION: single source of truth from package metadata ────────────────
+try:
+    from importlib.metadata import version as _pkg_version
+    APP_VERSION = _pkg_version("proxy-manager")
+except Exception:
+    APP_VERSION = "1.4.0"
+
+# ── DPAPI helpers for password encryption ────────────────────────────────────
+_DPAPI_PREFIX = "DPAPI:"
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.wintypes.DWORD),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+_crypt32 = ctypes.WinDLL("crypt32")
+_kernel32 = ctypes.WinDLL("kernel32")
+
+
+def _dpapi_encrypt(plaintext: str) -> str:
+    """Encrypt a string with Windows DPAPI; returns base64 with DPAPI: prefix.
+    Falls back to returning the plaintext on failure (best-effort)."""
+    try:
+        data = plaintext.encode("utf-8")
+        blob_in = _DATA_BLOB(
+            len(data),
+            ctypes.cast(ctypes.create_string_buffer(data, len(data)),
+                        ctypes.POINTER(ctypes.c_char)))
+        blob_out = _DATA_BLOB()
+        if _crypt32.CryptProtectData(
+                ctypes.byref(blob_in), None, None, None, None, 0,
+                ctypes.byref(blob_out)):
+            encrypted = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+            _kernel32.LocalFree(blob_out.pbData)
+            return _DPAPI_PREFIX + base64.b64encode(encrypted).decode("ascii")
+    except Exception:
+        pass
+    return plaintext  # fallback: store as-is
+
+
+def _dpapi_decrypt(stored: str) -> str:
+    """Decrypt a DPAPI-encrypted value (identified by DPAPI: prefix).
+    Returns the plaintext, or the original string if it was not encrypted."""
+    if not stored or not stored.startswith(_DPAPI_PREFIX):
+        return stored  # legacy plaintext
+    try:
+        raw = base64.b64decode(stored[len(_DPAPI_PREFIX):])
+        blob_in = _DATA_BLOB(
+            len(raw),
+            ctypes.cast(ctypes.create_string_buffer(raw, len(raw)),
+                        ctypes.POINTER(ctypes.c_char)))
+        blob_out = _DATA_BLOB()
+        if _crypt32.CryptUnprotectData(
+                ctypes.byref(blob_in), None, None, None, None, 0,
+                ctypes.byref(blob_out)):
+            decrypted = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+            _kernel32.LocalFree(blob_out.pbData)
+            return decrypted.decode("utf-8")
+    except Exception:
+        pass
+    return stored  # fallback: treat as plaintext
 
 if getattr(sys, "frozen", False):
     PACKAGE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
@@ -100,6 +164,9 @@ def load_config():
         out["scheme"] = out["scheme"].strip().lower()
     if not pm.is_valid_userinfo(out["user"]):
         out["user"] = ""
+    # Decrypt DPAPI-encrypted password (legacy plaintext passes through)
+    if out["password"]:
+        out["password"] = _dpapi_decrypt(out["password"])
     if not pm.is_valid_userinfo(out["password"]):
         out["password"] = ""
     if out["lang"] not in ("zh", "en"):
@@ -174,7 +241,11 @@ def save_config(cfg):
                     cur = {}
             except Exception:
                 pass
-            cur.update({k: cfg[k] for k in _SAVE_KEYS if k in cfg})
+            save_data = {k: cfg[k] for k in _SAVE_KEYS if k in cfg}
+            # Encrypt password with DPAPI before persisting
+            if "password" in save_data and save_data["password"]:
+                save_data["password"] = _dpapi_encrypt(save_data["password"])
+            cur.update(save_data)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(cur, f, indent=2, ensure_ascii=False)
             return True
