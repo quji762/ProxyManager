@@ -82,7 +82,7 @@ cd ProxyManager
 pip install -r requirements.txt
 ```
 
-`requirements.txt` includes `pyinstaller`, which is only needed for building the EXE.
+`pyinstaller` is not part of the runtime dependencies; it lives in `requirements-build.txt` (or the `[build]` extra in `pyproject.toml`) and is only needed for building the EXE.
 
 ## Usage
 

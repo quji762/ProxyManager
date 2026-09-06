@@ -513,6 +513,21 @@ def get_ps_status():
         return None
 
 
+def get_ps_no_proxy():
+    """Raw user NO_PROXY env value ('' when unset)."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
+        try:
+            v, _ = winreg.QueryValueEx(key, "NO_PROXY")
+            return str(v)
+        except FileNotFoundError:
+            return ""
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        return ""
+
+
 def get_ps_proxy_vars():
     """Read HTTP_PROXY, HTTPS_PROXY and ALL_PROXY from Windows user env."""
     result = {"HTTP_PROXY": UNSET, "HTTPS_PROXY": UNSET, "ALL_PROXY": UNSET}
@@ -609,6 +624,16 @@ def _stripped_no_proxy(existing: str) -> str:
     return ",".join(e for e in _no_proxy_entries(existing) if e not in ours)
 
 
+def _broadcast_env_change():
+    """Broadcast WM_SETTINGCHANGE so already-running processes pick up the
+    user-env change (same message the system sends after env edits)."""
+    ret = ctypes.c_long()
+    user32.SendMessageTimeoutW(
+        HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
+        0x0002, 5000, ctypes.byref(ret),
+    )
+
+
 def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
     url = build_proxy_url(host, port, scheme, user, password)
     env_names = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
@@ -662,11 +687,32 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
         finally:
             winreg.CloseKey(key)
         # Broadcast env change so already-running processes pick it up.
-        ret = ctypes.c_long()
-        user32.SendMessageTimeoutW(
-            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
-            0x0002, 5000, ctypes.byref(ret),
-        )
+        _broadcast_env_change()
+        return True
+    except OSError as e:
+        return str(e)
+
+
+def set_ps_env_vars(values):
+    """Write user env vars from {name: value}, deleting keys whose value is
+    empty/None. Used to put back the exact pre-enable HTTP_PROXY /
+    HTTPS_PROXY / ALL_PROXY / NO_PROXY state, which a single URL cannot
+    express when the user's variables differed."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
+                             winreg.KEY_SET_VALUE)
+        try:
+            for n, v in values.items():
+                if v:
+                    winreg.SetValueEx(key, n, 0, winreg.REG_SZ, str(v))
+                else:
+                    try:
+                        winreg.DeleteValue(key, n)
+                    except FileNotFoundError:
+                        pass
+        finally:
+            winreg.CloseKey(key)
+        _broadcast_env_change()
         return True
     except OSError as e:
         return str(e)
@@ -803,6 +849,47 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
                                 winreg.DeleteValue(key, "ProxyOverride")
                             except FileNotFoundError:
                                 pass
+        finally:
+            winreg.CloseKey(key)
+        _wininet_notify()
+        return True
+    except OSError as e:
+        return str(e)
+
+
+def get_sys_proxy_override():
+    """Raw WinINET ProxyOverride (bypass list) value ('' when unset)."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
+                             winreg.KEY_READ)
+        try:
+            v, _ = winreg.QueryValueEx(key, "ProxyOverride")
+            return str(v)
+        except FileNotFoundError:
+            return ""
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        return ""
+
+
+def set_sys_proxy_override(override):
+    """Write ProxyOverride verbatim ('' deletes the value). Used to put back
+    the exact pre-enable bypass list instead of subtracting our entries —
+    subtraction would also drop entries the user had configured themselves
+    before this tool first ran."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
+                             winreg.KEY_SET_VALUE)
+        try:
+            if override:
+                winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
+                                  str(override))
+            else:
+                try:
+                    winreg.DeleteValue(key, "ProxyOverride")
+                except FileNotFoundError:
+                    pass
         finally:
             winreg.CloseKey(key)
         _wininet_notify()

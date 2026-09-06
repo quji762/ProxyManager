@@ -61,6 +61,38 @@ def test_save_preserves_unknown_keys(tmp_path, monkeypatch):
     assert raw["port"] == "7890"
 
 
+def test_save_config_failure_keeps_previous_file(tmp_path, monkeypatch):
+    """Regression: open('w') truncated config.json before dumping, so a
+    mid-write crash (disk full) destroyed the file including the restore
+    stash. The tmp-file + os.replace write must leave the old content intact."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(
+        json.dumps({"port": "7897", "restore": {"npm": "http://10.0.0.1:1"}}),
+        encoding="utf-8")
+
+    def _boom(obj, fh, *args, **kwargs):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+        m.setattr(config_store.json, "dump", _boom)
+        assert config_store.save_config({"port": "7890"}) is False
+    raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert raw["port"] == "7897"
+    assert raw["restore"] == {"npm": "http://10.0.0.1:1"}
+
+
+def test_save_config_leaves_no_temp_file(tmp_path, monkeypatch):
+    """The atomic write must clean up its tmp file and round-trip content."""
+    cfg_file = tmp_path / "config.json"
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    cfg = config_store.load_config()
+    cfg["port"] = "7890"
+    assert config_store.save_config(cfg) is True
+    assert config_store.load_config()["port"] == "7890"
+    assert list(tmp_path.iterdir()) == [cfg_file]
+
+
 def test_public_aliases_exist():
     assert pm.config_dir is pm._config_dir
     assert pm.is_valid_port is pm._is_valid_port

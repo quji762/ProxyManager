@@ -27,6 +27,15 @@ class Api:
         self.scheme = cfg.get("scheme", "http")
         self.user = cfg.get("user", "")
         self.password = cfg.get("password", "")
+        # Address this tool actually APPLIED to endpoints, kept current by
+        # switch_port and do_toggle enable. save_config only mirrors the form
+        # fields into self.host/self.port, so a typed-but-not-yet-applied
+        # address must not make switch_port treat the old endpoints as
+        # foreign ones (it compares against applied_*).
+        self.applied_host = cfg["host"]
+        self.applied_port = cfg["port"]
+        self.applied_kw = {"scheme": self.scheme, "user": self.user,
+                           "password": self.password}
         self._speed_lock = threading.Lock()
         self._speed_prev = pm.get_net_counters()
         self._speed = {"up": "0 B/s", "dn": "0 B/s", "dn_num": 0.0,
@@ -208,15 +217,19 @@ class Api:
             "scheme": parsed["scheme"], "user": parsed["user"],
             "password": parsed["password"]}
 
-    # Dispatch table for simple toggle endpoints: (setter, label, detected_fn, on_note).
+    # Dispatch table for simple toggle endpoints:
+    # (setter name, label, getter name, on_note). Names are resolved through
+    # getattr(pm, ...) at call time so tests can patch js_api.pm.set_* —
+    # storing the function objects themselves would bind them at class
+    # creation and silently bypass such patches (writing the real registry).
     # Git and WSL endpoints are handled separately due to their unique logic.
     _ENDPOINT_INFO = {
-        "ps":     (pm.set_ps_proxy,     "PowerShell",  pm.get_ps_status,     "请新开一个终端后生效"),
-        "sys":    (pm.set_sys_proxy,    "系统代理",    pm.get_sys_proxy,     None),
-        "npm":    (pm.set_npm_proxy,    "npm",         pm.get_npm_proxy,     None),
-        "pip":    (pm.set_pip_proxy,    "pip",         pm.get_pip_proxy,     None),
-        "npmwsl": (pm.set_npm_proxy_wsl, "npm(WSL)",   pm.get_npm_proxy_wsl, None),
-        "pipwsl": (pm.set_pip_proxy_wsl, "pip(WSL)",   pm.get_pip_proxy_wsl, None),
+        "ps":     ("set_ps_proxy",      "PowerShell",  "get_ps_status",     "请新开一个终端后生效"),
+        "sys":    ("set_sys_proxy",     "系统代理",    "get_sys_proxy",     None),
+        "npm":    ("set_npm_proxy",     "npm",         "get_npm_proxy",     None),
+        "pip":    ("set_pip_proxy",     "pip",         "get_pip_proxy",     None),
+        "npmwsl": ("set_npm_proxy_wsl", "npm(WSL)",    "get_npm_proxy_wsl", None),
+        "pipwsl": ("set_pip_proxy_wsl", "pip(WSL)",    "get_pip_proxy_wsl", None),
     }
 
     def _managed_url(self, host=None, port=None, **kw):
@@ -315,19 +328,107 @@ class Api:
         """Remember a pre-existing proxy so disable can put it back."""
         if target == "wsl" or self._restore.get(target):
             return
+        if target == "ps":
+            # PowerShell enable overwrites HTTP/HTTPS/ALL_PROXY and merges
+            # NO_PROXY — a single URL cannot round-trip a state where those
+            # differed, so stash every original value (None = was unset).
+            # Values equal to the URL this tool last applied are leftovers
+            # from a previous enable (enable → edit port → enable again),
+            # not user state: record None so the restore deletes them instead
+            # of re-arming a proxy the user is turning off.
+            ours = pm.build_proxy_url(self.applied_host, self.applied_port,
+                                      **self.applied_kw)
+            vars_ = pm.get_ps_proxy_vars()
+            env = {n: (None if v in (pm.UNSET, "") or str(v) == ours else str(v))
+                   for n, v in vars_.items()}
+            no_proxy = pm.get_ps_no_proxy()
+            if any(str(v) == ours for v in vars_.values()):
+                # Our last enable also merged our entries into NO_PROXY —
+                # stash only the user's own entries (none left → was unset).
+                no_proxy = pm._stripped_no_proxy(no_proxy)
+            env["NO_PROXY"] = no_proxy or None
+            if not any(env.values()):
+                return  # user had nothing here; the surgical disable suffices
+            self._restore[target] = {"env": env}
+            self._persist_restore()
+            return
+        if target == "sys":
+            # System enable merges our bypass entries into ProxyOverride —
+            # stash the full original list so disable puts it back verbatim
+            # instead of subtracting a fixed set (which would also drop
+            # entries the user had configured themselves).
+            override = pm.get_sys_proxy_override()
+            cur = self._detected_url(target)
+            # A detected URL equal to what this tool last applied is our own
+            # write (enable → edit port / re-enable), so the current
+            # ProxyOverride merge is ours too: keep only the user's entries
+            # and don't re-apply the old address on disable.
+            if cur and cur == pm.wininet_url(self.applied_host,
+                                             self.applied_port,
+                                             self.applied_kw["scheme"]):
+                cur = None
+                override = ";".join(
+                    e.strip() for e in override.split(";")
+                    if e.strip() and e.strip() not in pm._PROXY_OVERRIDE_OURS)
+            url = cur if (cur and cur != new_url) else None
+            if not override and not url:
+                return
+            self._restore[target] = {"url": url, "override": override or None}
+            self._persist_restore()
+            return
         cur = self._detected_url(target)
         if cur and cur != new_url:
             self._restore[target] = cur
             self._persist_restore()
 
+    def _restore_stashed(self, target, prev):
+        """Restore a dict-shaped stash (ps env vars / sys bypass list): write
+        the exact pre-enable values back instead of re-enabling through the
+        single-URL enable path. Returns None for unhandled targets."""
+        if target == "ps":
+            env = prev.get("env")
+            if not env:
+                # A dict stash always carries a non-empty env (an all-empty
+                # one is never stashed), so a missing/empty one is corrupted
+                # data — keep the stash instead of "restoring" nothing, which
+                # would silently drop the user's original values.
+                return {"error": "暂存数据不完整"}
+            ret = pm.set_ps_env_vars(env)
+            if ret is not True:
+                return {"error": f"PowerShell: {ret}"}
+            return {"ok": True, "note": None}
+        if target == "sys":
+            parsed = self._adopt_parsed(prev.get("url"))
+            if parsed:
+                ret = pm.set_sys_proxy(
+                    parsed["host"], parsed["port"], True,
+                    scheme=parsed["scheme"], user=parsed["user"],
+                    password=parsed["password"])
+                if ret is not True:
+                    return {"error": f"系统代理: {ret}"}
+            else:
+                # Only the bypass list was the user's: run the normal
+                # surgical disable first, then put the list back.
+                r = self.do_toggle("sys", False, _restoring=True)
+                if not isinstance(r, dict) or not r.get("ok"):
+                    return r if isinstance(r, dict) else {"error": "系统代理: 关闭失败"}
+            ret = pm.set_sys_proxy_override(prev.get("override") or "")
+            if ret is not True:
+                return {"error": f"系统代理: {ret}"}
+            return {"ok": True, "note": None}
+        return None
+
     def _restore_previous(self, target):
         prev = self._restore.get(target)
-        parsed = self._adopt_parsed(prev)
-        if not parsed:
-            return None
-        r = self.do_toggle(
-            target, True, parsed["host"], parsed["port"],
-            parsed["scheme"], parsed["user"], parsed["password"], True)
+        if isinstance(prev, dict):
+            r = self._restore_stashed(target, prev)
+        else:
+            parsed = self._adopt_parsed(prev)
+            if not parsed:
+                return None
+            r = self.do_toggle(
+                target, True, parsed["host"], parsed["port"],
+                parsed["scheme"], parsed["user"], parsed["password"], True)
         if isinstance(r, dict) and r.get("ok"):
             self._restore.pop(target, None)
             self._persist_restore()
@@ -361,10 +462,12 @@ class Api:
         else:
             h, p = addr if addr else (self.host, self.port)
         kw = self._proxy_kw(scheme, user, password)
-        # Keep the cache in sync so later calls without explicit address
-        # (speed probe, restart_wsl) act on the address just applied.
-        # Restoring a previous proxy must not overwrite the UI's current fields.
-        if not _restoring:
+        # Enabling applies the address: keep the cache in sync so later calls
+        # without an explicit address (speed probe, restart_wsl) act on it.
+        # Disabling must not touch the cache — its target address is whatever
+        # is being removed, not the address the UI shows. Restoring a previous
+        # proxy must not overwrite the UI's current fields either.
+        if on and not _restoring:
             with self._speed_lock:
                 self.host, self.port = h, p
             if scheme is not None:
@@ -408,9 +511,10 @@ class Api:
                 if ret is not True:
                     return {"error": f"{label}: {ret}"}
         elif target in self._ENDPOINT_INFO:
-            setter, label, detected_fn, on_note = self._ENDPOINT_INFO[target]
+            setter_name, label, detected_name, on_note = self._ENDPOINT_INFO[target]
+            setter = getattr(pm, setter_name)
             if not on:
-                h, p, kw = self._detected_hpk(detected_fn(), h, p, kw)
+                h, p, kw = self._detected_hpk(getattr(pm, detected_name)(), h, p, kw)
             if target in ("npmwsl", "pipwsl") and on \
                     and h.lower() in pm.LOOPBACK_HOSTS \
                     and pm.get_wsl_network_mode() != "Mirrored":
@@ -422,6 +526,11 @@ class Api:
                 notes.append(on_note)
         else:
             return {"error": f"未知端点 {target}"}
+        if on and not _restoring:
+            # Commit only after the endpoint write succeeded: a failed enable
+            # must not make switch_port treat the still-old endpoints as ours.
+            self.applied_host, self.applied_port = h, p
+            self.applied_kw = dict(kw)
         return {"ok": True, "note": "；".join(notes) if notes else None}
 
     def _wsl_url_target(self, host, port):
@@ -470,13 +579,25 @@ class Api:
         if (user is not None and not pm.is_valid_userinfo(new_kw["user"])) \
                 or (password is not None and not pm.is_valid_userinfo(new_kw["password"])):
             return {"error": "用户名或密码含非法字符"}
-        old_kw = self._proxy_kw()
-        if new_port == self.port and new_host == self.host and new_kw == old_kw:
+        old_kw = dict(self.applied_kw)
+        if new_port == self.applied_port and new_host == self.applied_host \
+                and new_kw == old_kw:
+            # Nothing to migrate, but re-sync the UI cache and the config
+            # file: persistSoon may have persisted a field address that was
+            # never applied to any endpoint.
+            with self._speed_lock:
+                self.host, self.port = new_host, new_port
+            self.scheme, self.user, self.password = (
+                new_kw["scheme"], new_kw["user"], new_kw["password"])
+            with _cfg_lock:
+                if not save_config(self._cfg_with_port(new_port)):
+                    return {"ok": False, "error": "配置文件写入失败（磁盘已满或权限不足）"}
             return {"ok": True, "applied": []}
 
-        # Match currently-applied endpoints against the CACHED address, not
-        # the (possibly just-edited) field host. Re-enable uses new_host.
-        old_h, old_p = self.host, str(self.port)
+        # Match currently-applied endpoints against the LAST APPLIED address,
+        # not the (possibly just-edited, possibly only saved) field host.
+        # Re-enable uses new_host.
+        old_h, old_p = self.applied_host, str(self.applied_port)
         if not valid_host(old_h) or not pm.is_valid_port(old_p):
             old_h, old_p = new_host, old_p if pm.is_valid_port(old_p) else new_port
         managed_url = pm.build_proxy_url(old_h, old_p, **old_kw)
@@ -509,6 +630,8 @@ class Api:
                 self.host, self.port = new_host, new_port
             self.scheme, self.user, self.password = (
                 new_kw["scheme"], new_kw["user"], new_kw["password"])
+            self.applied_host, self.applied_port = new_host, new_port
+            self.applied_kw = dict(new_kw)
             with _cfg_lock:
                 if not save_config(self._cfg_with_port(new_port)):
                     return {"ok": False, "error": "配置文件写入失败（磁盘已满或权限不足）"}
@@ -552,6 +675,11 @@ class Api:
             self.host, self.port = new_host, new_port
         self.scheme, self.user, self.password = (
             new_kw["scheme"], new_kw["user"], new_kw["password"])
+        # The switch committed to the new address once phase 1 succeeded;
+        # a phase-2 endpoint failure leaves that endpoint OFF, not on the
+        # old address, so applied_* still moves.
+        self.applied_host, self.applied_port = new_host, new_port
+        self.applied_kw = dict(new_kw)
         cfg_err = None
         with _cfg_lock:
             if not save_config(self._cfg_with_port(new_port)):

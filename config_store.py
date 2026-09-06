@@ -137,13 +137,16 @@ def load_config():
         "restore": {},
     }
     cfg = {}
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        if not isinstance(cfg, dict):
+    # Share the write-side lock so a concurrent save (tmp file + os.replace)
+    # is never observed half-done.
+    with _cfg_lock:
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except Exception:
             cfg = {}
-    except Exception:
-        cfg = {}
 
     if "git" in cfg and "git_win" not in cfg:
         cfg["git_win"] = cfg["git_wsl"] = bool(cfg["git"])
@@ -231,6 +234,11 @@ def save_config(cfg):
     """Write the full superset; unknown keys from future versions survive.
     Returns True on success, False if the write failed."""
     with _cfg_lock:
+        # Write to a temp file and os.replace it: open("w") would truncate
+        # config.json first, so a crash mid-dump (disk full, power loss)
+        # destroyed the file including the restore stash. os.replace is
+        # atomic on the same volume.
+        tmp = CONFIG_FILE + ".tmp"
         try:
             os.makedirs(APP_DIR, exist_ok=True)
             cur = {}
@@ -246,10 +254,17 @@ def save_config(cfg):
             if "password" in save_data and save_data["password"]:
                 save_data["password"] = _dpapi_encrypt(save_data["password"])
             cur.update(save_data)
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(cur, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, CONFIG_FILE)
             return True
         except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
             return False
 
 

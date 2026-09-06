@@ -82,7 +82,7 @@ cd ProxyManager
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 中的 `pyinstaller` 仅在打包 EXE 时需要。
+`pyinstaller` 不在运行时依赖里，位于 `requirements-build.txt`（或 `pyproject.toml` 的 `[build]` extra），仅在打包 EXE 时需要。
 
 ## 使用方法
 
