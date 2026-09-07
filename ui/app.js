@@ -121,17 +121,14 @@ function toast(msg, kind = "") {
   t._h = setTimeout(() => t.classList.remove("show"), kind === "err" ? 8000 : 2600);
 }
 
-/* Tooltip engine */
+/* Tooltip engine. Hover keeps the CSS 350ms delay; keyboard focus shows the
+   tip instantly (.fast zeroes the delay) — different intents, different timing. */
 (() => {
   const tip = $("tooltip");
   let cur = null;
-  document.addEventListener("mouseover", (e) => {
-    const el = e.target.closest("[data-tip]");
-    if (el === cur) return;
-    cur = el;
-    tip.classList.remove("show");
-    if (!el) return;
+  const show = (el, instant) => {
     tip.textContent = el.dataset.tip;
+    tip.classList.toggle("fast", instant);
     const r = el.getBoundingClientRect();
     requestAnimationFrame(() => {
       tip.style.visibility = "hidden"; tip.classList.add("show");
@@ -142,6 +139,26 @@ function toast(msg, kind = "") {
       if (y + th > innerHeight - 4) y = r.top - th - 7;
       tip.style.left = x + "px"; tip.style.top = y + "px"; tip.style.visibility = "";
     });
+  };
+  document.addEventListener("mouseover", (e) => {
+    const el = e.target.closest("[data-tip]");
+    if (el === cur) return;
+    cur = el;
+    tip.classList.remove("show");
+    if (el) show(el, false);
+  });
+  document.addEventListener("focusin", (e) => {
+    const el = e.target.closest("[data-tip]");
+    if (!el || el === cur) return;
+    cur = el;
+    tip.classList.remove("show");
+    show(el, true);
+  });
+  document.addEventListener("focusout", (e) => {
+    if (cur && e.target.closest("[data-tip]") === cur) {
+      tip.classList.remove("show");
+      cur = null;
+    }
   });
 })();
 
@@ -160,12 +177,15 @@ function _pumpDlg() {
   if (_dlgOpen || !_dlgQueue.length) return;
   const { text, okText, resolve } = _dlgQueue.shift();
   _dlgOpen = true;
+  const prevFocus = document.activeElement;
   $("dlgText").textContent = text;
   $("dlgOk").textContent = okText;
   $("overlay").classList.add("show");
+  $("dlgOk").focus();
   const done = (v) => {
     $("overlay").classList.remove("show");
     _dlgOpen = false;
+    if (prevFocus && prevFocus.isConnected) prevFocus.focus();
     resolve(v);
     _pumpDlg();
   };
@@ -210,7 +230,7 @@ function epCard(d) {
       <div class="name-row"><span class="name">${t(d.nameKey)}</span>${badge}</div>
       <div class="desc">${t(d.descKey)} · <code id="epv-${d.id}">${esc_(val)}</code></div>
     </div>
-    <div class="tgl ${on ? "on" : ""}" id="sw-${d.id}" data-ep="${d.id}" data-tip="${on ? t("clickOff") : t("clickOn")}"></div>
+    <button type="button" class="tgl ${on ? "on" : ""}" id="sw-${d.id}" data-ep="${d.id}" role="switch" aria-checked="${on}" data-tip="${on ? t("clickOff") : t("clickOn")}"></button>
   </div>`;
 }
 function renderEndpoints() {
@@ -231,12 +251,14 @@ function setLane(lane) {
   curLane = lane;
   $("tabWin").classList.toggle("active", lane === "win");
   $("tabWsl").classList.toggle("active", lane === "wsl");
-  $("netWin").style.display = lane === "win" ? "" : "none";
-  $("netWsl").style.display = lane === "wsl" ? "" : "none";
-  $("varsWin").style.display = lane === "win" ? "" : "none";
-  $("varsWsl").style.display = lane === "wsl" ? "" : "none";
+  $("tabWin").setAttribute("aria-selected", String(lane === "win"));
+  $("tabWsl").setAttribute("aria-selected", String(lane === "wsl"));
+  $("netWin").hidden = lane !== "win";
+  $("netWsl").hidden = lane !== "wsl";
+  $("varsWin").hidden = lane !== "win";
+  $("varsWsl").hidden = lane !== "wsl";
   // 重启 WSL lives on the status bar but only concerns the WSL page.
-  $("btnWslRestart").style.display = lane === "wsl" ? "" : "none";
+  $("btnWslRestart").hidden = lane !== "wsl";
   renderEndpoints();  // updateHero refreshes sbGit/sbNpm/sbPip for the lane
   refreshAll();       // probe the newly visible lane (states may be stale)
 }
@@ -398,9 +420,9 @@ function renderPorts() {
 function renderPortPop() {
   const cur = $("inPort").value.trim();
   $("portPopList").innerHTML = cfg.ports.map((p) =>
-    `<div class="row"><span class="pv">${p}${String(p) === cur ? ' <span style="color:var(--accent);font-size:10.5px">' + t("current") + '</span>' : ""}</span>
-     <span class="del" data-del="${p}" data-tip="${t("removePreset")}">×</span></div>`).join("")
-    || `<div style="font-size:11.5px;color:var(--text3);padding:2px 0">${t("noPresets")}</div>`;
+    `<div class="row"><span class="pv">${p}${String(p) === cur ? ' <span class="cur-tag">' + t("current") + '</span>' : ""}</span>
+     <button type="button" class="del" data-del="${p}" data-tip="${t("removePreset")}">×</button></div>`).join("")
+    || `<div class="empty-note">${t("noPresets")}</div>`;
   $("portPopList").querySelectorAll("[data-del]").forEach((el) => {
     el.onclick = () => {
       cfg.ports = cfg.ports.filter((x) => String(x) !== el.dataset.del);
@@ -477,22 +499,10 @@ async function applyAddress(next, prev) {
     renderPorts();
     return;
   }
-  const enabled = EP_DEFS.map((d) => d.id).filter((k) => state[k]);
+  /* Switching is trivially reversible (switch back), so no confirm dialog:
+     apply immediately and let the toast report the result — including partial
+     failures, which switchedPartial spells out per endpoint. */
   const shown = `${next.scheme}://${next.host}:${next.port}`;
-  if (enabled.length > 0) {
-    const go = await confirmDlg(t("applyAddr", { addr: shown }), t("apply"));
-    if (!go) {
-      if (prev) {
-        $("inHost").value = prev.host;
-        $("inPort").value = prev.port;
-        if ($("inScheme")) $("inScheme").value = prev.scheme || "http";
-        if ($("inUser")) $("inUser").value = prev.user || "";
-        if ($("inPass")) $("inPass").value = prev.password || "";
-      }
-      renderPorts();
-      return;
-    }
-  }
   setBusyAll(true);
   try {
     const r = await api.call("switch_port", next.port, next.host, next.scheme, next.user, next.password);
@@ -531,10 +541,8 @@ function setBusyAll(b) {
   busyAll = b;
   for (const rid of ["vtRailOn", "vtRailOff"]) {
     const rail = $(rid);
-    if (rail) {
-      rail.style.opacity = b ? ".55" : "";
-      rail.style.pointerEvents = b ? "none" : "";
-    }
+    // Real buttons: disabled blocks pointer AND keyboard activation.
+    if (rail) { rail.disabled = b; rail.style.opacity = b ? ".55" : ""; }
   }
   const btn = $("btnWslRestart");
   if (btn) btn.disabled = b;
@@ -734,7 +742,9 @@ async function allEndpoints(on, lane = null) {
 
 /* ═══════════════ Speed ticker ═══════════════ */
 function fmtMB(num) {
-  if (num < 1000) return [num.toFixed(0), "B/s"];
+  // 999.6 would round to "1000 B/s" — promote at the DISPLAY boundary
+  // (same threshold as Python's format_speed).
+  if (num < 999.5) return [num.toFixed(0), "B/s"];
   const units = [["KB", 1e3], ["MB", 1e6], ["GB", 1e9]];
   let v = num, lbl = "KB/s";
   for (const [u, f] of units) if (num >= f) { v = num / f; lbl = u + "/s"; } else break;
@@ -760,7 +770,7 @@ async function tickSpeed() {
       document.querySelector(".metric .unit").textContent = unit;
       $("spdUp").textContent = s.up;
       const full = Math.max(1, MbpsToBps(speedFullMbps ?? 40));
-      $("sparkBar").style.width = Math.min(100, (s.dn_num ?? 0) / full * 100) + "%";
+      $("sparkBar").style.transform = `scaleX(${Math.min(1, (s.dn_num ?? 0) / full)})`;
       const sb = $("sbPort");
       // The backend probes its cached address — show THAT port, not whatever
       // is sitting in the (possibly just-edited) field.
@@ -806,8 +816,8 @@ document.addEventListener("click", (e) => {
 /* ═══════════════ Theme / pin / maximize / window controls ═══════════════ */
 function applyTheme(mode) {
   document.documentElement.dataset.theme = mode;
-  $("icoMoon").style.display = mode === "dark" ? "none" : "";
-  $("icoSun").style.display = mode === "dark" ? "" : "none";
+  $("icoMoon").hidden = mode === "dark";
+  $("icoSun").hidden = mode !== "dark";
 }
 async function toggleTheme() {
   const mode = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
@@ -830,8 +840,8 @@ async function togglePin() {
 function applyMaximized(m) {
   ui.maximized = !!m;
   document.documentElement.classList.toggle("maximized", ui.maximized);
-  $("icoMax").style.display = ui.maximized ? "none" : "";
-  $("icoRestore").style.display = ui.maximized ? "" : "none";
+  $("icoMax").hidden = ui.maximized;
+  $("icoRestore").hidden = !ui.maximized;
   $("btnMax").dataset.tip = ui.maximized ? t("tipRestore") : t("tipMax");
 }
 async function toggleMaximize() {
@@ -863,6 +873,11 @@ function applyAlpha(a) {
   cfg.card_alpha = a;
   document.documentElement.style.setProperty("--card-alpha", a);
 }
+/* Settings toggles are <button role="switch">: class and ARIA move together. */
+function setTgl(el, on) {
+  el.classList.toggle("on", on);
+  el.setAttribute("aria-checked", String(!!on));
+}
 function debounce(fn, ms) {
   let h; return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
 }
@@ -877,9 +892,9 @@ async function openSettings() {
   $("rgDimVal").textContent = $("rgDim").value + "%";
   $("rgAlpha").value = Math.round(cfg.card_alpha * 100);
   $("rgAlphaVal").textContent = $("rgAlpha").value + "%";
-  $("tglAuto").classList.toggle("on", !!c.autostart);
-  $("tglQuitClear").classList.toggle("on", !!c.quit_clear);
-  $("tglWslAll").classList.toggle("on", c.wsl_all_distros !== false);
+  setTgl($("tglAuto"), !!c.autostart);
+  setTgl($("tglQuitClear"), !!c.quit_clear);
+  setTgl($("tglWslAll"), c.wsl_all_distros !== false);
   if (c.bg_path) {
     const bg = await api.call("get_background");
     if (bg && bg.error) toast(bg.error, "err");
@@ -895,7 +910,7 @@ $("settingsOv").addEventListener("mousedown", (e) => {
   if (e.target === $("settingsOv")) closeSettings();
 });
 
-/* ═══════════════ Copy on click ═══════════════ */
+/* ═══════════════ Copy on click (and keyboard: Enter/Space on the value) ═══════════════ */
 document.addEventListener("click", async (e) => {
   const el = e.target.closest("[data-copy]");
   if (!el) return;
@@ -913,6 +928,22 @@ document.addEventListener("click", async (e) => {
     el.classList.remove("copied"); el.textContent = old;
   }, 1200);
 });
+document.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") &&
+      e.target instanceof HTMLElement && e.target.hasAttribute("data-copy")) {
+    e.preventDefault();
+    e.target.click();
+  }
+});
+
+/* Optional proxy-auth disclosure under the hero config row */
+$("authToggle").onclick = () => {
+  const row = $("authRow");
+  const open = row.hidden;
+  row.hidden = !open;
+  $("authToggle").setAttribute("aria-expanded", String(open));
+  if (open) $("inUser").focus();
+};
 
 /* ═══════════════ Wiring ═══════════════ */
 /* Endpoint toggle: delegated on #epList so clicks survive innerHTML
@@ -969,6 +1000,13 @@ $("inPort").addEventListener("input", () => { $("inPort").classList.remove("bad"
 /* Channel page tabs (status bar) */
 $("tabWin").onclick = () => setLane("win");
 $("tabWsl").onclick = () => setLane("wsl");
+/* Roving between the two tabs with arrow keys, per the tablist pattern. */
+$("laneTabs").addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  setLane(curLane === "win" ? "wsl" : "win");
+  $(curLane === "win" ? "tabWin" : "tabWsl").focus();
+});
 
 /* Per-variable connectivity test chips: click -> test_channel(which); the
    chip shows 测试中… while probing, then ✓ latency (green) or ✗ reason (red),
@@ -1070,19 +1108,19 @@ $("rgAlpha").addEventListener("input", (e) => {
 $("tglAuto").onclick = async () => {
   const on = !$("tglAuto").classList.contains("on");
   const r = await api.call("set_autostart", on);
-  if (r && r.ok) { $("tglAuto").classList.toggle("on", on); toast(on ? t("autoOn") : t("autoOff"), "ok"); }
+  if (r && r.ok) { setTgl($("tglAuto"), on); toast(on ? t("autoOn") : t("autoOff"), "ok"); }
   else toast(t("setFail", { err: (r && r.error) || t("unknown") }), "err");
 };
 $("tglQuitClear").onclick = () => {
   const on = !$("tglQuitClear").classList.contains("on");
-  $("tglQuitClear").classList.toggle("on", on);
+  setTgl($("tglQuitClear"), on);
   cfg.quit_clear = on;
   api.call("save_config", { quit_clear: on });
   toast(on ? t("quitClearOn") : t("quitClearOff"), "ok");
 };
 $("tglWslAll").onclick = () => {
   const on = !$("tglWslAll").classList.contains("on");
-  $("tglWslAll").classList.toggle("on", on);
+  setTgl($("tglWslAll"), on);
   cfg.wsl_all_distros = on;
   api.call("save_config", { wsl_all_distros: on });
   toast(on ? t("wslAllOn") : t("wslAllOff"), "ok");
@@ -1110,6 +1148,11 @@ async function boot() {
   if ($("inScheme")) $("inScheme").value = c.scheme || "http";
   if ($("inUser")) $("inUser").value = c.user || "";
   if ($("inPass")) $("inPass").value = c.password || "";
+  // The optional auth row stays expanded when the saved config actually uses it.
+  if (c.user) {
+    $("authRow").hidden = false;
+    $("authToggle").setAttribute("aria-expanded", "true");
+  }
   lastApplied = {
     host: String(c.host || ""), port: String(c.port || ""),
     scheme: c.scheme || "http", user: c.user || "", password: c.password || "",

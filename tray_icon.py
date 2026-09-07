@@ -10,25 +10,27 @@ from config_store import TRAY_ICON, load_config
 from window_win32 import _sync_maximized_icon, user32
 
 
-def _tray_executable_matches(executable):
-    """Return whether a NotifyIcon entry belongs to this runtime family.
+def _own_executable_paths():
+    """Full paths this tool's process image can be recorded under. Explorer
+    stores the launched binary, which may be the WindowsApps alias while
+    sys.executable names the resolved store binary (or vice versa), so both
+    spellings are accepted."""
+    paths = {str(sys.executable or "")}
+    try:
+        paths.add(str(os.path.realpath(sys.executable)))
+    except OSError:
+        pass
+    return {p.replace("/", "\\").strip().lower() for p in paths if p}
 
-    Store Python records the real binary (for example pythonw3.13.exe), while
-    sys.executable may be the WindowsApps alias (pythonw.exe).  Matching the
-    windowless/console family keeps an unrelated python.exe tray entry from
-    making the promotion retry return before our pythonw entry exists.
-    """
-    candidate = str(executable or "").replace("/", "\\").rsplit("\\", 1)[-1].lower()
-    current = os.path.basename(sys.executable).lower()
-    if getattr(sys, "frozen", False):
-        return candidate == current
-    if current.startswith("pythonw"):
-        return candidate.startswith("pythonw") and candidate.endswith(".exe")
-    if current.startswith("python"):
-        return (candidate.startswith("python")
-                and not candidate.startswith("pythonw")
-                and candidate.endswith(".exe"))
-    return candidate == current
+
+def _tray_executable_matches(executable):
+    """Return whether a NotifyIcon entry's ExecutablePath is this tool's OWN
+    process image (slash/case-insensitive). Matching the interpreter FAMILY
+    (any pythonw*.exe / python*.exe) rewrote IsPromoted for unrelated Python
+    tray programs, so only a full-path match counts now; entries that cannot
+    be pinned to this tool are left alone."""
+    candidate = str(executable or "").replace("/", "\\").strip().lower()
+    return bool(candidate) and candidate in _own_executable_paths()
 
 
 def _promote_tray_icon(retries=6, icon=None):
@@ -36,11 +38,11 @@ def _promote_tray_icon(retries=6, icon=None):
     makes the app look like it has no tray at all. Flip Explorer's
     IsPromoted flag for our entries so the icon shows on the taskbar.
     The entry appears in the registry only after the first NIM_ADD, hence
-    the retries. Entries are matched by tooltip text (exact) — matching by
-    executable path is unreliable: pythonw vs pythonw3.13 vs packaged names
-    all differ between windowless/console/frozen launches. All matching
-    entries (windowless + console launches each register their own) are
-    promoted.
+    the retries. Entries are matched by tooltip text (exact) or by an
+    ExecutablePath equal to this tool's own process image — interpreter-
+    family matching rewrote IsPromoted for unrelated Python tray programs.
+    All matching entries (windowless + console launches each register their
+    own) are promoted.
 
     Setting IsPromoted on a LIVE icon does not move it retroactively — the
     icon stays in the overflow until it re-registers. So after the flags are
@@ -76,11 +78,12 @@ def _promote_tray_icon(retries=6, icon=None):
                         winreg.CloseKey(sk)
                 except OSError:
                     continue
-                # Win11 usually leaves Tooltip empty. Match the current
-                # interpreter family without accepting every Python tray app;
-                # accepting python.exe while we run under pythonw.exe caused
-                # this retry to finish before our own entry was registered.
-                if ((tip and pm.APP_TITLE in str(tip))
+                # Win11 usually leaves Tooltip empty. Promote only entries
+                # pinned to THIS tool: an exact tooltip match, or an
+                # ExecutablePath equal to our own process image. Anything
+                # else (e.g. another Python program's tray icon) must never
+                # get its registry entry rewritten.
+                if (str(tip or "") == pm.APP_TITLE
                         or _tray_executable_matches(exe)):
                     matches.append(sub)
         finally:
@@ -134,6 +137,12 @@ def _promote_tray_icon_async(icon=None):
 _geometry_restored = False   # bounds are reapplied only on the first loaded
 
 
+def _saved_rect_ok(r):
+    """Whether r is a usable saved (l, t, r, b) rect (physical px)."""
+    return bool(r) and all(isinstance(v, int) for v in r) \
+        and (r[2] - r[0]) >= 200 and (r[3] - r[1]) >= 150
+
+
 def _restore_window_geometry(api):
     """Reapply the previous session's window bounds (or fake-maximize) once,
     after the native handle exists. Physical px via SetWindowPos — passing
@@ -148,12 +157,19 @@ def _restore_window_geometry(api):
         return
     try:
         if api._win_max:
-            api._toggle_maximize()  # sizes to the work area; prev bounds kept
+            r = api._win_rect
+            seeded = False
+            if _saved_rect_ok(r):
+                # The window is still at its fresh default size: seed the
+                # maximize toggle's "prev bounds" with the SAVED rect so the
+                # later restore lands there instead of on the default.
+                api._prev_bounds = tuple(r)
+                seeded = True
+            api._toggle_maximize(keep_prev=seeded)  # sizes to the work area
             _sync_maximized_icon()
             return
         r = api._win_rect
-        if r and all(isinstance(v, int) for v in r) \
-                and (r[2] - r[0]) >= 200 and (r[3] - r[1]) >= 150:
+        if _saved_rect_ok(r):
             user32.SetWindowPos(hwnd, 0, r[0], r[1],
                                 r[2] - r[0], r[3] - r[1], 0x0004)
     except Exception:

@@ -26,7 +26,7 @@ from tray_icon import (
     _refresh_tray_icon, _restore_window_geometry, _show_main_window,
 )
 from window_win32 import (
-    WM_NCHITTEST, _ENUMCHILD, _RECT, _SW_RESTORE, _our_hwnds,
+    WM_NCHITTEST, _ENUMCHILD, _MIN_H, _MIN_W, _RECT, _SW_RESTORE, _our_hwnds,
     ensure_nonclient_drag, ensure_resize_hook, user32,
 )
 import window_win32 as win32
@@ -51,6 +51,8 @@ def _wake_or_exit():
     if mutex is None and last_err != 183:
         print(f"[pm] mutex create failed (err={last_err}); "
               "continuing without single-instance guard", flush=True)
+        mutex = 0  # sentinel like PM_NO_SINGLETON: falsy for CloseHandle,
+                   # non-None so main() does not quit as "already running"
     elif last_err == 183:  # ERROR_ALREADY_EXISTS
         try:
             os.makedirs(os.path.dirname(pm.SIGNAL_FILE), exist_ok=True)
@@ -100,10 +102,15 @@ def main():
     scale = dpi / 96
     win_w = min(1060, max(640, int((wa.right - wa.left) / scale)))
     win_h = min(700, max(480, int((wa.bottom - wa.top) / scale)))
+    # Same clamp as the WndProc min-track-size (WM_GETMINMAXINFO): never
+    # demand a minimum larger than the work area, or a small high-DPI screen
+    # gets a min_size the window can never reach.
+    min_w = min(_MIN_W, int((wa.right - wa.left) / scale))
+    min_h = min(_MIN_H, int((wa.bottom - wa.top) / scale))
 
     window = webview.create_window(
         pm.APP_TITLE, UI_PATH,
-        js_api=api, width=win_w, height=win_h, min_size=(920, 620),
+        js_api=api, width=win_w, height=win_h, min_size=(min_w, min_h),
         frameless=FRAMELESS, easy_drag=False, resizable=True,
         background_color=bg, on_top=cfg.get("pin", False),
         hidden=_START_HIDDEN,

@@ -487,7 +487,8 @@ def get_net_counters():
 
 def format_speed(bytes_per_sec: float) -> str:
     """Human-readable rate, e.g. 1.2 MB/s (SI, same scale as the Mbps setting)."""
-    if bytes_per_sec < 1000:
+    # 999.6 would round to "1000 B/s" — promote at the DISPLAY boundary.
+    if bytes_per_sec < 999.5:
         return f"{bytes_per_sec:.0f} B/s"
     units = ["KB", "MB", "GB"]
     val = bytes_per_sec / 1000  # 先转为 KB
@@ -697,7 +698,14 @@ def set_ps_env_vars(values):
     """Write user env vars from {name: value}, deleting keys whose value is
     empty/None. Used to put back the exact pre-enable HTTP_PROXY /
     HTTPS_PROXY / ALL_PROXY / NO_PROXY state, which a single URL cannot
-    express when the user's variables differed."""
+    express when the user's variables differed.  Only the four proxy
+    variables are accepted — this function is reachable from the webview
+    bridge, so an unrestricted key name would let it write arbitrary
+    HKCU\\Environment values."""
+    allowed = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+    values = {k: v for k, v in values.items() if k in allowed}
+    if not values:
+        return True
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
                              winreg.KEY_SET_VALUE)
@@ -1128,8 +1136,13 @@ def _bash_sq(s: str) -> str:
 
 
 def _git_wsl_unset_cmd(url: str) -> str:
-    """Bash snippet: surgical unset with --fixed-value, regex fallback."""
-    esc = re.escape(url)
+    """Bash snippet: surgical unset with --fixed-value, regex fallback.
+
+    The regex fallback embeds ``re.escape(url)`` in single quotes — re.escape
+    does NOT escape single quotes (``re.escape("a'b") == "a'b"``), so a URL
+    containing ``'`` could break out of the quoting.  Shell-escape the
+    regex-escaped string with ``_bash_sq`` to close that hole."""
+    esc = _bash_sq(re.escape(url))
     sq = _bash_sq(url)
     return (
         f"(git config --global --fixed-value --unset-all http.proxy '{sq}' "
@@ -1261,34 +1274,63 @@ def _read_ini(path):
     return _decode_ini_bytes(raw)
 
 
-def _ini_get(text, key):
-    """Value of `key` in flat INI text, or None when absent. Quotes stripped."""
-    m = re.search(rf"(?im)^[ \t]*{re.escape(key)}[ \t]*[:=][ \t]*(.*?)[ \t]*$",
-                  text)
-    if not m:
-        return None
-    return m.group(1).strip().strip('"').strip("'") or None
+def _ini_get(text, key, section=None):
+    """Value of `key` in INI text, or None when absent. Quotes stripped.
+    Without `section` the whole file is searched (npmrc is flat); with one,
+    only lines inside that section count (pip reads proxy under [global] —
+    an [install] proxy must not make the UI report enabled)."""
+    if section is None:
+        m = re.search(rf"(?im)^[ \t]*{re.escape(key)}[ \t]*[:=][ \t]*(.*?)[ \t]*$",
+                      text)
+        if not m:
+            return None
+        return m.group(1).strip().strip('"').strip("'") or None
+    cur = None
+    for line in text.splitlines():
+        m = re.match(r"^[ \t]*\[([^\]]*)\][ \t]*$", line)
+        if m:
+            cur = m.group(1).strip().lower()
+            continue
+        if cur != section.lower():
+            continue
+        m = re.match(rf"[ \t]*{re.escape(key)}[ \t]*[:=][ \t]*(.*?)[ \t]*$",
+                     line, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().strip('"').strip("'") or None
+    return None
 
 
 def _ini_edit(text, keys, url, equals, section=None, eol="\n"):
     """Rewrite `keys` lines in INI text: set them to `url`, or (url=None)
     remove each line whose value equals `equals` — surgical removal, so a
-    user-set proxy for a different endpoint survives a disable. Keys absent
-    from the file are appended right after the `[section]` header when one is
-    named (pip reads proxy from a section), else at the end (npm's .npmrc is
-    flat). Every other line, key style (`:` vs `=`), quoting and line ending
+    user-set proxy for a different endpoint survives a disable. With a
+    `section`, only lines INSIDE it are touched (pip reads proxy under
+    [global]; an [install] proxy belongs to another tool and must survive
+    verbatim). Keys absent from the section are appended right after its
+    header (created when missing), else at the end (npm's .npmrc is flat).
+    Every other line, key style (`:` vs `=`), quoting and line ending
     is preserved; appended lines use `eol` (the file's own dominant ending).
     Returns the new text."""
     line_re = re.compile(
         r"^([ \t]*)(" + "|".join(re.escape(k) for k in keys)
         + r")([ \t]*[:=][ \t]*)(.*?)([ \t]*)$", re.IGNORECASE)
-    sec_re = re.compile(rf"^[ \t]*\[{re.escape(section)}\][ \t]*$",
+    hdr_re = re.compile(r"^[ \t]*\[([^\]]*)\][ \t]*$",
                         re.IGNORECASE) if section else None
     out, seen, sec_at = [], set(), None
+    in_sec = section is None  # flat files (npm): every line is in scope
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
-        if sec_re and sec_re.match(body):
-            sec_at = len(out)
+        if hdr_re:
+            hdr = hdr_re.match(body)
+            if hdr:
+                in_sec = hdr.group(1).strip().lower() == section.lower()
+                if in_sec:
+                    sec_at = len(out)
+                out.append(line)
+                continue
+        if not in_sec:
+            out.append(line)
+            continue
         m = line_re.match(body)
         if not m:
             out.append(line)
@@ -1377,14 +1419,16 @@ def set_npm_proxy(host, port, enable=True, scheme="http", user="", password=""):
 
 
 def get_pip_proxy():
-    """pip's user-config proxy ('未设置' / '未检测到', same semantics as npm)."""
+    """pip's user-config proxy ('未设置' / '未检测到', same semantics as npm).
+    Only [global] counts: pip ignores an [install] proxy, so reporting it
+    would show enabled while pip stays direct."""
     try:
         text, _enc = _read_ini(_pip_config_path())
     except FileNotFoundError:
         return UNSET
     except OSError:
         return UNDETECTED
-    return _ini_get(text, "proxy") or UNSET
+    return _ini_get(text, "proxy", section="global") or UNSET
 
 
 def set_pip_proxy(host, port, enable=True, scheme="http", user="", password=""):

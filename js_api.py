@@ -9,11 +9,62 @@ import time
 import proxy_manager as pm
 from config_store import (
     APP_VERSION, DEFAULT_PORTS, MAX_BG_BYTES, PROBE_URLS, _cfg_lock,
+    _DPAPI_PREFIX, _dpapi_decrypt, _dpapi_encrypt,
     autostart_enabled, autostart_set, load_config, save_config, valid_host,
 )
 from window_win32 import (
     _POINT, _RECT, _is_maximized, _our_hwnds, set_resize_maximized, user32,
 )
+
+# File picker filter: must stay in sync with the extensions save_config
+# accepts and get_background can serve.
+_BG_FILTER = "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif"
+
+# 恢复暂存中的凭据保护：ps 的 env 值与其余端点的完整 URL 可能携带
+# user:pass@ 明文凭据，落盘 config.json 前逐值 DPAPI 加密（与 password
+# 字段同机制）；读回时按 DPAPI: 前缀解密，旧版明文暂存原样兼容。
+_STASH_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+def _stash_encrypt(restore):
+    out = {}
+    for target, payload in (restore or {}).items():
+        if not isinstance(payload, dict):
+            out[target] = payload
+            continue
+        p = dict(payload)
+        env = p.get("env")
+        if isinstance(env, dict):
+            p["env"] = {
+                k: (_dpapi_encrypt(v) if v else None)
+                for k, v in env.items()
+                if k in _STASH_ENV_KEYS
+            }
+        if p.get("url"):
+            p["url"] = _dpapi_encrypt(str(p["url"]))
+        out[target] = p
+    return out
+
+
+def _stash_decrypt(restore):
+    out = {}
+    for target, payload in (restore or {}).items():
+        if not isinstance(payload, dict):
+            out[target] = payload
+            continue
+        p = dict(payload)
+        env = p.get("env")
+        if isinstance(env, dict):
+            p["env"] = {
+                k: (_dpapi_decrypt(v) if v else None)
+                for k, v in env.items()
+            }
+        url = p.get("url")
+        if url and str(url).startswith(_DPAPI_PREFIX):
+            p["url"] = _dpapi_decrypt(str(url))
+        out[target] = p
+    return out
+
 
 class Api:
     """JS bridge. Every method returns JSON-serializable data and runs on its
@@ -37,6 +88,13 @@ class Api:
         self.applied_kw = {"scheme": self.scheme, "user": self.user,
                            "password": self.password}
         self._speed_lock = threading.Lock()
+        # Serializes endpoint mutations (toggles, port switch, tray-quit
+        # clear on the pystray thread): _restore / applied_* / _git_managed
+        # are only consistent when read and written inside one critical
+        # section. Must stay the OUTERMOST lock — _speed_lock and _cfg_lock
+        # are acquired inside it, never the reverse. RLock because do_toggle
+        # re-enters itself through _restore_previous.
+        self._endpoint_mutation_lock = threading.RLock()
         self._speed_prev = pm.get_net_counters()
         self._speed = {"up": "0 B/s", "dn": "0 B/s", "dn_num": 0.0,
                        "iface": pm._primary_iface or "", "alive": None,
@@ -53,7 +111,7 @@ class Api:
         # the user edited host/port still unsets the old value.
         self._git_managed = {"gitwin": None, "gitwsl": None}
         self._tray_ok = False  # close falls back to quit when no tray exists
-        self._restore = dict(cfg.get("restore") or {})
+        self._restore = _stash_decrypt(cfg.get("restore") or {})
         pm.set_wsl_apply_all(cfg.get("wsl_all_distros", True))
         threading.Thread(target=self._speed_loop, daemon=True).start()
 
@@ -83,14 +141,17 @@ class Api:
             # Validate host/port server-side: they end up inside wsl bash -c
             # and git commands downstream, and the UI only validates the
             # enable path.
-            if "host" in data:
-                h = str(data["host"]).strip()
-                if valid_host(h):
-                    self.host = h
-            if "port" in data:
-                p = str(data["port"]).strip()
-                if pm.is_valid_port(p):
-                    self.port = str(int(p))
+            # host/port 与网速探测线程共享：变更成对持锁提交，避免撕裂的
+            # (host, port) 组合被拿去做一次指向错误地址的 TCP 探测
+            with self._speed_lock:
+                if "host" in data:
+                    h = str(data["host"]).strip()
+                    if valid_host(h):
+                        self.host = h
+                if "port" in data:
+                    p = str(data["port"]).strip()
+                    if pm.is_valid_port(p):
+                        self.port = str(int(p))
             if "scheme" in data and pm.is_valid_scheme(data["scheme"]):
                 self.scheme = str(data["scheme"]).strip().lower()
             if "user" in data and pm.is_valid_userinfo(data["user"]):
@@ -154,9 +215,8 @@ class Api:
                 pm.set_wsl_apply_all(cfg["wsl_all_distros"])
             if "close_hint_done" in data:
                 cfg["close_hint_done"] = bool(data["close_hint_done"])
-            if "restore" in data and isinstance(data["restore"], dict):
-                cfg["restore"] = data["restore"]
-                self._restore = dict(data["restore"])
+            # restore 暂存属内部状态（含用户原代理 URL，可能带明文凭据）：
+            # 只由 _stash_previous/_persist_restore 维护，不接受前端覆写
             if "win_rect" in data and isinstance(data["win_rect"], list) \
                     and len(data["win_rect"]) == 4:
                 try:
@@ -299,7 +359,8 @@ class Api:
     def _persist_restore(self):
         with _cfg_lock:
             cfg = load_config()
-            cfg["restore"] = self._restore
+            # 暂存值 DPAPI 加密后落盘（含用户原代理凭据，不应明文持久化）
+            cfg["restore"] = _stash_encrypt(self._restore)
             save_config(cfg)
 
     def _detected_url(self, target):
@@ -419,6 +480,12 @@ class Api:
         return None
 
     def _restore_previous(self, target):
+        # Runs inside do_toggle's critical section; the RLock re-entry here
+        # keeps a direct future caller equally serialized.
+        with self._endpoint_mutation_lock:
+            return self._restore_previous_locked(target)
+
+    def _restore_previous_locked(self, target):
         prev = self._restore.get(target)
         if isinstance(prev, dict):
             r = self._restore_stashed(target, prev)
@@ -440,17 +507,28 @@ class Api:
 
     def clear_all_endpoints(self):
         """Disable every endpoint (used by 退出时关闭代理). Restores stashed
-        values when we had overwritten them."""
-        for t in ("ps", "sys", "wsl", "gitwin", "gitwsl", "npm", "pip",
-                  "npmwsl", "pipwsl"):
-            try:
-                self.do_toggle(t, False)
-            except Exception:
-                pm.log_exception(f"clear_all_endpoints:{t}")
-        return True
+        values when we had overwritten them. Holds the mutation lock for the
+        WHOLE sequence: a concurrent UI toggle must not interleave with the
+        quit path and leave half-cleared state."""
+        with self._endpoint_mutation_lock:
+            for t in ("ps", "sys", "wsl", "gitwin", "gitwsl", "npm", "pip",
+                      "npmwsl", "pipwsl"):
+                try:
+                    self.do_toggle(t, False)
+                except Exception:
+                    pm.log_exception(f"clear_all_endpoints:{t}")
+            return True
 
     def do_toggle(self, target, on, host=None, port=None,
                   scheme=None, user=None, password=None, _restoring=False):
+        """Serialize against the tray-quit clear (clear_all_endpoints runs
+        on the pystray thread while js_api workers toggle in parallel)."""
+        with self._endpoint_mutation_lock:
+            return self._do_toggle(target, on, host, port, scheme, user,
+                                   password, _restoring)
+
+    def _do_toggle(self, target, on, host=None, port=None,
+                   scheme=None, user=None, password=None, _restoring=False):
         # Enabling requires a valid address; disabling must never be blocked
         # by one (ps/wsl removal ignores the address, and git falls back to
         # the managed/detected URL), so only validate on the enable path.
@@ -566,6 +644,12 @@ class Api:
 
     # ── quick port switch: re-apply enabled endpoints on the new port ──
     def switch_port(self, new_port, host=None, scheme=None, user=None, password=None):
+        """Same mutation lock as do_toggle: a port switch must not interleave
+        with a tray-quit clear or a plain toggle mid-migration."""
+        with self._endpoint_mutation_lock:
+            return self._switch_port(new_port, host, scheme, user, password)
+
+    def _switch_port(self, new_port, host=None, scheme=None, user=None, password=None):
         new_port = str(new_port).strip()
         if not pm.is_valid_port(new_port):
             return {"error": "端口须为 1-65535 的整数"}
@@ -1058,7 +1142,7 @@ class Api:
         ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
               "Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
               "$f = New-Object System.Windows.Forms.OpenFileDialog; "
-              "$f.Filter = '图片|*.png;*.jpg;*.jpeg;*.webp;*.bmp'; "
+              "$f.Filter = '图片|" + _BG_FILTER + "'; "
               "$f.Title = '选择背景图片'; "
               "if ($f.ShowDialog() -eq 'OK') { Write-Output $f.FileName }")
         import tempfile
@@ -1119,7 +1203,7 @@ class Api:
             return {"data": self._bg_cache[1]}
         ext = os.path.splitext(path)[1].lower().lstrip(".")
         mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png",
-                "webp": "webp", "bmp": "bmp"}.get(ext)
+                "webp": "webp", "bmp": "bmp", "gif": "gif"}.get(ext)
         if not mime:
             return None
         try:
@@ -1225,9 +1309,13 @@ class Api:
                   f"err={err} exstyle={style & 0xffffffff:#x}", flush=True)
         return bool(ret)
 
-    def _toggle_maximize(self):
+    def _toggle_maximize(self, keep_prev=False):
         """Frameless forms cover the taskbar when natively maximized, so
         maximize = resize to the monitor work area, restore = prev bounds.
+
+        keep_prev: the tray geometry restore seeds _prev_bounds with the
+        SAVED bounds first (a fresh window still sits at its default size)
+        and passes keep_prev=True so this capture cannot clobber them.
 
         NEVER call evaluate_js from here: window_control reaches this on a
         js_api worker thread, and evaluate_js from a worker deadlocks the UI
@@ -1237,9 +1325,11 @@ class Api:
         if not hwnd:
             return
         if not self._maximized:
-            rect = _RECT()
-            user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            self._prev_bounds = (rect.left, rect.top, rect.right, rect.bottom)
+            if not keep_prev:
+                rect = _RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                self._prev_bounds = (rect.left, rect.top, rect.right,
+                                     rect.bottom)
             wa = _RECT()
             user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)  # SPI_GETWORKAREA
             user32.SetWindowPos(hwnd, 0, wa.left, wa.top,
