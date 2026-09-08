@@ -38,7 +38,7 @@ _kernel32 = ctypes.WinDLL("kernel32")
 
 def _dpapi_encrypt(plaintext: str) -> str:
     """Encrypt a string with Windows DPAPI; returns base64 with DPAPI: prefix.
-    Falls back to returning the plaintext on failure (best-effort)."""
+    Falls back to returning the plaintext on failure (best-effort, logged)."""
     try:
         data = plaintext.encode("utf-8")
         blob_in = _DATA_BLOB(
@@ -52,8 +52,11 @@ def _dpapi_encrypt(plaintext: str) -> str:
             encrypted = ctypes.string_at(blob_out.pbData, blob_out.cbData)
             _kernel32.LocalFree(blob_out.pbData)
             return _DPAPI_PREFIX + base64.b64encode(encrypted).decode("ascii")
+        # WinAPI returned FALSE (e.g. DPAPI unavailable): raise so the
+        # fallback below is logged too — never silently store plaintext.
+        raise ctypes.WinError(ctypes.GetLastError())
     except Exception:
-        pass
+        pm.log_exception("dpapi_encrypt: DPAPI 加密失败，已回退明文存储")
     return plaintext  # fallback: store as-is
 
 
@@ -75,8 +78,11 @@ def _dpapi_decrypt(stored: str) -> str:
             decrypted = ctypes.string_at(blob_out.pbData, blob_out.cbData)
             _kernel32.LocalFree(blob_out.pbData)
             return decrypted.decode("utf-8")
+        # WinAPI returned FALSE: log and fall through to the plaintext
+        # compatibility path (behavior unchanged).
+        raise ctypes.WinError(ctypes.GetLastError())
     except Exception:
-        pass
+        pm.log_exception("dpapi_decrypt: DPAPI 解密失败，已按原样返回")
     return stored  # fallback: treat as plaintext
 
 if getattr(sys, "frozen", False):

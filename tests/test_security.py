@@ -319,5 +319,75 @@ class TestGitWslUnsetEscaping(unittest.TestCase):
         self.assertNotIn("a';reboot", cmd)
 
 
+class TestDpapiFailureLogging(unittest.TestCase):
+    """DPAPI 失败时回退明文的行为保持不变，但必须留下日志痕迹——
+    系统级 DPAPI 失败时 config.json 不得无声写入明文凭据。
+    全程 mock，绝不真实触发 DPAPI 失败，也不写真实 crash.log。"""
+
+    def test_encrypt_exception_falls_back_plaintext_and_logs(self):
+        import proxy_manager as pm
+
+        with mock.patch.object(config_store._crypt32, "CryptProtectData",
+                               side_effect=OSError("mock dpapi failure")), \
+                mock.patch.object(pm, "log_exception") as fake_log:
+            self.assertEqual(config_store._dpapi_encrypt("secret"), "secret")
+        fake_log.assert_called_once()
+        msg = fake_log.call_args[0][0]
+        self.assertIn("dpapi_encrypt", msg)
+        self.assertIn("回退明文", msg)
+
+    def test_encrypt_winapi_false_falls_back_plaintext_and_logs(self):
+        """CryptProtectData 返回 FALSE（不抛异常的 DPAPI 失败形态）
+        同样必须走日志回退分支，不得静默。"""
+        import proxy_manager as pm
+
+        with mock.patch.object(config_store._crypt32, "CryptProtectData",
+                               return_value=0), \
+                mock.patch.object(pm, "log_exception") as fake_log:
+            self.assertEqual(config_store._dpapi_encrypt("secret"), "secret")
+        fake_log.assert_called_once()
+        msg = fake_log.call_args[0][0]
+        self.assertIn("dpapi_encrypt", msg)
+        self.assertIn("回退明文", msg)
+
+    def test_encrypt_success_does_not_log(self):
+        """加密成功路径不得触发失败日志。"""
+        import proxy_manager as pm
+
+        with mock.patch.object(config_store._crypt32, "CryptProtectData",
+                               return_value=1), \
+                mock.patch.object(config_store._kernel32, "LocalFree",
+                                  mock.MagicMock()), \
+                mock.patch.object(pm, "log_exception") as fake_log:
+            out = config_store._dpapi_encrypt("secret")
+        fake_log.assert_not_called()
+        self.assertTrue(out.startswith("DPAPI:"))
+        self.assertNotIn("secret", out)
+
+    def test_decrypt_exception_falls_back_to_stored_and_logs(self):
+        """解密失败保留原样返回的兼容行为，仅新增日志，不改变行为。"""
+        import proxy_manager as pm
+
+        stored = "DPAPI:AAAA"
+        with mock.patch.object(config_store._crypt32, "CryptUnprotectData",
+                               side_effect=OSError("mock dpapi failure")), \
+                mock.patch.object(pm, "log_exception") as fake_log:
+            self.assertEqual(config_store._dpapi_decrypt(stored), stored)
+        fake_log.assert_called_once()
+        msg = fake_log.call_args[0][0]
+        self.assertIn("dpapi_decrypt", msg)
+
+    def test_decrypt_winapi_false_falls_back_to_stored_and_logs(self):
+        import proxy_manager as pm
+
+        stored = "DPAPI:AAAA"
+        with mock.patch.object(config_store._crypt32, "CryptUnprotectData",
+                               return_value=0), \
+                mock.patch.object(pm, "log_exception") as fake_log:
+            self.assertEqual(config_store._dpapi_decrypt(stored), stored)
+        fake_log.assert_called_once()
+        self.assertIn("dpapi_decrypt", fake_log.call_args[0][0])
+
+
 if __name__ == "__main__":
     unittest.main()
