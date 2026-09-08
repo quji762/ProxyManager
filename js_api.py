@@ -29,19 +29,33 @@ _STASH_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 def _stash_encrypt(restore):
     out = {}
     for target, payload in (restore or {}).items():
+        if isinstance(payload, str):
+            # 裸 URL 字符串暂存（npm/pip/gitwin/gitwsl）同样可能带
+            # user:pass@ 明文凭据；已加密值保持原样避免双重加密。
+            out[target] = (_dpapi_encrypt(payload)
+                           if payload and not str(payload).startswith(_DPAPI_PREFIX)
+                           else payload)
+            continue
         if not isinstance(payload, dict):
             out[target] = payload
             continue
         p = dict(payload)
         env = p.get("env")
         if isinstance(env, dict):
-            p["env"] = {
-                k: (_dpapi_encrypt(v) if v else None)
-                for k, v in env.items()
-                if k in _STASH_ENV_KEYS
-            }
-        if p.get("url"):
-            p["url"] = _dpapi_encrypt(str(p["url"]))
+            enc_env = {}
+            for k, v in env.items():
+                if k not in _STASH_ENV_KEYS:
+                    continue
+                if not v:
+                    enc_env[k] = None
+                elif str(v).startswith(_DPAPI_PREFIX):
+                    enc_env[k] = v          # 已加密：幂等原样
+                else:
+                    enc_env[k] = _dpapi_encrypt(v)
+            p["env"] = enc_env
+        url = p.get("url")
+        if url and not str(url).startswith(_DPAPI_PREFIX):
+            p["url"] = _dpapi_encrypt(str(url))
         out[target] = p
     return out
 
@@ -49,6 +63,10 @@ def _stash_encrypt(restore):
 def _stash_decrypt(restore):
     out = {}
     for target, payload in (restore or {}).items():
+        if isinstance(payload, str):
+            # _dpapi_decrypt 自带 DPAPI: 前缀判断，旧版明文原样返回。
+            out[target] = _dpapi_decrypt(payload) if payload else payload
+            continue
         if not isinstance(payload, dict):
             out[target] = payload
             continue
@@ -136,6 +154,18 @@ class Api:
         }
 
     def save_config(self, data):
+        # "以内存态为准"的 restore 合并写，先做快照再进 _cfg_lock：
+        # - 不能在持 _cfg_lock 时再拿 _endpoint_mutation_lock——既有锁序是
+        #   mutation → cfg（do_toggle/_switch_port 持 mutation 时经
+        #   _persist_restore 拿 cfg），反向构成 AB-BA 死锁；
+        # - 也不能直接遍历 self._restore——toggle 路径持 mutation 锁插入
+        #   新 key 后等 cfg 锁落盘，加密遍历中途遇字典变更会抛 RuntimeError，
+        #   异常被前端 persistSoon 的 .catch 静默吞掉、保存丢失。
+        # dict(d) 是单条 C 级拷贝（CPython 下持锁原子完成），快照后加密只
+        # 碰私有副本；快照之后并发插入的 key 由 toggle 自己的
+        # _persist_restore 落盘，合并语义不变。
+        with self._endpoint_mutation_lock:
+            restore_snapshot = dict(self._restore)
         with _cfg_lock:
             cfg = load_config()
             # Validate host/port server-side: they end up inside wsl bash -c
@@ -228,7 +258,12 @@ class Api:
             if "win_max" in data:
                 cfg["win_max"] = bool(data["win_max"])
                 self._win_max = bool(data["win_max"])
-            cfg["restore"] = self._restore
+            # "以内存态为准"的合并语义必须保留（_persist_restore 与前端保存
+            # 并发时丢暂存），但落盘前必须 DPAPI 加密：self._restore 是内存
+            # 中的解密态明文，直接回写会把 bf9602c 的暂存加密撤销掉。
+            # _stash_encrypt 对已带 DPAPI: 前缀的值原样保留，幂等。
+            # 加密的是函数入口处的快照（见 save_config 开头注释）。
+            cfg["restore"] = _stash_encrypt(restore_snapshot)
             if not save_config(cfg):
                 return False
         return True
@@ -267,6 +302,14 @@ class Api:
             "user": user if user is not None else self.user,
             "password": password if password is not None else self.password,
         }
+
+    @staticmethod
+    def _sys_result(ret):
+        """set_sys_proxy returns True, an error string, or (True, note) when
+        a PAC (AutoConfigURL) is registered. Normalize to (ok, note)."""
+        if isinstance(ret, tuple) and len(ret) == 2 and ret[0] is True:
+            return True, ret[1]
+        return ret is True, None
 
     def _detected_hpk(self, cur, fallback_h, fallback_p, fallback_kw):
         """Parse a detected proxy URL into (host, port, kw) or return fallbacks."""
@@ -459,13 +502,15 @@ class Api:
                 return {"error": f"PowerShell: {ret}"}
             return {"ok": True, "note": None}
         if target == "sys":
+            pac_note = None
             parsed = self._adopt_parsed(prev.get("url"))
             if parsed:
                 ret = pm.set_sys_proxy(
                     parsed["host"], parsed["port"], True,
                     scheme=parsed["scheme"], user=parsed["user"],
                     password=parsed["password"])
-                if ret is not True:
+                ok, pac_note = self._sys_result(ret)
+                if not ok:
                     return {"error": f"系统代理: {ret}"}
             else:
                 # Only the bypass list was the user's: run the normal
@@ -476,7 +521,9 @@ class Api:
             ret = pm.set_sys_proxy_override(prev.get("override") or "")
             if ret is not True:
                 return {"error": f"系统代理: {ret}"}
-            return {"ok": True, "note": None}
+            # 恢复路径重新启用了用户原代理；若用户机器上有 PAC，把警示带出
+            # （_restore_previous_locked 会把它拼进最终 note）。
+            return {"ok": True, "note": pac_note}
         return None
 
     def _restore_previous(self, target):
@@ -598,7 +645,13 @@ class Api:
                     and pm.get_wsl_network_mode() != "Mirrored":
                 notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
             ret = setter(h, p, on, **kw)
-            if ret is not True:
+            if target == "sys":
+                ok, sys_note = self._sys_result(ret)
+                if not ok:
+                    return {"error": f"{label}: {ret}"}
+                if on and sys_note:
+                    notes.append(sys_note)
+            elif ret is not True:
                 return {"error": f"{label}: {ret}"}
             if on and on_note:
                 notes.append(on_note)
@@ -774,12 +827,14 @@ class Api:
         for tgt in self._SWITCH_TARGETS:
             if not enabled[tgt]:
                 continue
-            err, git_url = self._switch_enable_endpoint(
+            err, git_url, extra_note = self._switch_enable_endpoint(
                 tgt, new_host, new_port, new_kw)
             if err is None:
                 applied.append(tgt)
                 if git_url is not None:
                     self._git_managed[tgt] = git_url
+                if extra_note:
+                    notes.append(extra_note)
             else:
                 errs[tgt] = err
         if "wsl" in applied or "npmwsl" in applied or "pipwsl" in applied \
@@ -806,7 +861,8 @@ class Api:
             return None if ret is True else f"PowerShell: {ret}"
         if target == "sys":
             ret = pm.set_sys_proxy(old_h, old_p, False, **old_kw)
-            return None if ret is True else f"系统代理: {ret}"
+            ok, _note = self._sys_result(ret)
+            return None if ok else f"系统代理: {ret}"
         if target == "wsl":
             ret = pm.set_wsl_proxy(old_h, old_p, False, **old_kw)
             return None if ret is True else f"WSL: {ret}"
@@ -841,17 +897,18 @@ class Api:
 
     def _switch_enable_endpoint(self, target, new_host, new_port, new_kw):
         """Enable one endpoint during port switch.
-        Returns (error_or_None, git_managed_url_or_None)."""
+        Returns (error_or_None, git_managed_url_or_None, note_or_None)."""
         if target == "wsl":
             pm.invalidate_wsl_network_mode_cache()
             ret = pm.set_wsl_proxy(new_host, new_port, True, **new_kw)
-            return (None if ret is True else f"WSL: {ret}", None)
+            return (None if ret is True else f"WSL: {ret}", None, None)
         if target == "ps":
             ret = pm.set_ps_proxy(new_host, new_port, True, **new_kw)
-            return (None if ret is True else f"PowerShell: {ret}", None)
+            return (None if ret is True else f"PowerShell: {ret}", None, None)
         if target == "sys":
             ret = pm.set_sys_proxy(new_host, new_port, True, **new_kw)
-            return (None if ret is True else f"系统代理: {ret}", None)
+            ok, pac_note = self._sys_result(ret)
+            return (None if ok else f"系统代理: {ret}", None, pac_note)
         if target in ("gitwin", "gitwsl"):
             label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
             use_wsl = target == "gitwsl"
@@ -859,21 +916,21 @@ class Api:
                 if use_wsl else (new_host, new_port)
             ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **new_kw)
             if ret is True:
-                return (None, self._managed_url(gh, gp, **new_kw))
-            return (f"{label}: {ret}", None)
+                return (None, self._managed_url(gh, gp, **new_kw), None)
+            return (f"{label}: {ret}", None, None)
         if target == "npm":
             ret = pm.set_npm_proxy(new_host, new_port, True, **new_kw)
-            return (None if ret is True else f"npm: {ret}", None)
+            return (None if ret is True else f"npm: {ret}", None, None)
         if target == "pip":
             ret = pm.set_pip_proxy(new_host, new_port, True, **new_kw)
-            return (None if ret is True else f"pip: {ret}", None)
+            return (None if ret is True else f"pip: {ret}", None, None)
         if target in ("npmwsl", "pipwsl"):
             label = "npm(WSL)" if target == "npmwsl" else "pip(WSL)"
             fn = pm.set_npm_proxy_wsl if target == "npmwsl" \
                 else pm.set_pip_proxy_wsl
             ret = fn(new_host, new_port, True, **new_kw)
-            return (None if ret is True else f"{label}: {ret}", None)
-        return (None, None)
+            return (None if ret is True else f"{label}: {ret}", None, None)
+        return (None, None, None)
 
     def _cfg_with_port(self, new_port):
         cfg = load_config()
@@ -931,18 +988,36 @@ class Api:
 
     # ── misc actions ──
     def restart_wsl(self):
+        # 两段式加锁：pm.restart_wsl（shutdown + 最多 3 次探活）可阻塞数十
+        # 秒，绝不持 _endpoint_mutation_lock；重启用完后的"读取共享状态 →
+        # 重写 WSL 侧端点"整体在锁内 —— 与 do_toggle 持锁执行慢速端点写入
+        # 的既有设计一致，"锁外"原则只针对 pm.restart_wsl 子进程本身。
+        # host/port 按锁序（mutation → speed）读取。
         pm.invalidate_wsl_network_mode_cache()
         ret = pm.restart_wsl()
+        if ret is not True:
+            return {"ok": False, "error": str(ret)}
         # A WSL restart can move the NAT subnet; refresh the gateway IP baked
         # into every WSL-side endpoint (bashrc, git, npm, pip) when the proxy
         # is on with a loopback host.
-        if ret is True \
-                and self.host.lower() in pm.LOOPBACK_HOSTS \
-                and pm.is_valid_port(self.port) \
-                and pm.get_wsl_network_mode() != "Mirrored":
-            h, p = self.host, str(int(self.port))
-            kw = self._proxy_kw()
+        with self._endpoint_mutation_lock:
+            with self._speed_lock:
+                host, port = self.host, self.port
+            if host.lower() not in pm.LOOPBACK_HOSTS \
+                    or not pm.is_valid_port(port) \
+                    or pm.get_wsl_network_mode() == "Mirrored":
+                return {"ok": True, "error": None}
+            # 端点开关状态必须在写回段的 mutation 锁内（重）读：读取与写回
+            # 之间若有 clear_all_endpoints/do_toggle 把端点关闭，用锁外读到
+            # 的陈旧 "on" 状态会把刚关掉的端点重新启用。锁内执行 wsl.exe
+            # 慢速读与 do_toggle 持锁写端点同模式。
             wsl_state = self.refresh_item("wsl")
+            npm = pm.get_npm_proxy_wsl()
+            pipv = pm.get_pip_proxy_wsl()
+            with self._speed_lock:
+                host, port = self.host, self.port
+            h, p = host, str(int(port))
+            kw = self._proxy_kw()
             if wsl_state and wsl_state.get("on"):
                 pm.set_wsl_proxy(h, p, True, **kw)
             git = (wsl_state or {}).get("git")
@@ -950,13 +1025,11 @@ class Api:
                 gh, gp = self._wsl_url_target(h, p)
                 pm.set_git_proxy(gh, gp, True, use_wsl=True, **kw)
                 self._git_managed["gitwsl"] = self._managed_url(gh, gp, **kw)
-            npm = pm.get_npm_proxy_wsl()
             if self._adopt_parsed(npm):
                 pm.set_npm_proxy_wsl(h, p, True, **kw)
-            pipv = pm.get_pip_proxy_wsl()
             if self._adopt_parsed(pipv):
                 pm.set_pip_proxy_wsl(h, p, True, **kw)
-        return {"ok": ret is True, "error": None if ret is True else str(ret)}
+        return {"ok": True, "error": None}
 
     def copy(self, text):
         """Clipboard fallback for pages where navigator.clipboard is
@@ -974,8 +1047,8 @@ class Api:
     def test_channel(self, which):
         """Connectivity probe for one proxy variable chip. which selects the
         proxy source:
-          ps / gitwin / npm / pip  -> Windows user proxy sources
-          wsl / gitwsl / npmwsl / pipwsl -> WSL-side sources
+          ps / ps_all / gitwin / npm / pip  -> Windows user proxy sources
+          wsl / wsl_all / gitwsl / npmwsl / pipwsl -> WSL-side sources
         The probe fetches a lightweight URL THROUGH the corresponding proxy
         (source read from the same config files/env the tool manages) and
         reports success + latency. Direct (no-proxy) probes are NOT done.
@@ -986,10 +1059,13 @@ class Api:
         sources = {
             # Windows side. The _https variants probe the HTTPS_PROXY variable
             # itself, so a hand-configured https:// proxy is tested as such
-            # instead of silently reporting the HTTP row's result.
+            # instead of silently reporting the HTTP row's result. The _all
+            # variants do the same for ALL_PROXY.
             "ps":     pm.get_ps_proxy_vars,      # env vars (HTTP_PROXY)
             "ps_https": lambda: {"HTTPS_PROXY":
                                  pm.get_ps_proxy_vars()["HTTPS_PROXY"]},
+            "ps_all": lambda: {"ALL_PROXY":
+                               pm.get_ps_proxy_vars()["ALL_PROXY"]},
             "sys":    lambda: {"HTTP_PROXY": pm.get_sys_proxy()},
             "gitwin": lambda: {"HTTP_PROXY": pm.get_git_proxy_win()},
             "npm":    lambda: {"HTTP_PROXY": pm.get_npm_proxy()},
@@ -1012,6 +1088,8 @@ class Api:
             "wsl":    lambda: pm.get_wsl_proxy_vars(),
             "wsl_https": lambda: {"HTTPS_PROXY":
                                   pm.get_wsl_proxy_vars()["HTTPS_PROXY"]},
+            "wsl_all": lambda: {"ALL_PROXY":
+                                pm.get_wsl_proxy_vars()["ALL_PROXY"]},
             "gitwsl": lambda: {"HTTP_PROXY": (wsl_state or {}).get("git", pm.UNSET)},
             "npmwsl": lambda: {"HTTP_PROXY": pm.get_npm_proxy_wsl()},
             "pipwsl": lambda: {"HTTP_PROXY": pm.get_pip_proxy_wsl()},

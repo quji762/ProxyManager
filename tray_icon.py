@@ -218,9 +218,13 @@ def _make_tray(api, window):
                 try:
                     if icon is not None:
                         lang = load_config().get("lang", "zh")
-                        msg = ("Closing this tool's proxies…"
+                        # 退出清理实际做的是"关闭本工具写入的代理 + 还原用户
+                        # 覆盖前的代理"，文案要说清两者，避免用户误以为
+                        # 原有代理也被关闭了。
+                        msg = ("Closing this tool's proxies and restoring "
+                               "your previous proxy settings…"
                                if lang == "en"
-                               else "正在关闭本工具写入的代理，请稍候…")
+                               else "正在关闭本工具写入的代理并还原您原有的代理，请稍候…")
                         icon.notify(msg, pm.APP_TITLE)
                 except Exception:
                     pm.log_exception("tray_notify")

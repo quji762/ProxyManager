@@ -45,6 +45,11 @@ def _wake_or_exit():
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     kernel32.CreateMutexW.argtypes = [
         ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    # 64-bit handles must arrive intact: without the explicit argtypes a
+    # handle >= 2^32 is silently truncated to a 32-bit int and the Close
+    # fails (or closes the wrong handle).
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int  # BOOL
     mutex = kernel32.CreateMutexW(None, True,
                                   "Local\\ProxyManagerSingleInstance")
     last_err = ctypes.get_last_error()
@@ -278,7 +283,11 @@ def main():
         pm.log_crash(*sys.exc_info())
         raise
 
-    ctypes.windll.kernel32.CloseHandle(mutex) if mutex else None
+    # Same argtypes discipline as _wake_or_exit: c_void_p handle in, BOOL out.
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    _k32.CloseHandle.restype = ctypes.c_int
+    _k32.CloseHandle(ctypes.c_void_p(mutex)) if mutex else None
 
 
 if __name__ == "__main__":

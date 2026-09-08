@@ -490,7 +490,7 @@ def format_speed(bytes_per_sec: float) -> str:
     # 999.6 would round to "1000 B/s" — promote at the DISPLAY boundary.
     if bytes_per_sec < 999.5:
         return f"{bytes_per_sec:.0f} B/s"
-    units = ["KB", "MB", "GB"]
+    units = ["KB", "MB", "GB", "TB"]
     val = bytes_per_sec / 1000  # 先转为 KB
     idx = 0
     while val >= 999.95 and idx < len(units) - 1:
@@ -610,19 +610,26 @@ def _no_proxy_entries(value: str):
 
 
 def _merged_no_proxy(existing: str) -> str:
-    """User's existing NO_PROXY + our loopback entries (union, user's first)."""
+    """User's existing NO_PROXY + our loopback entries (union, user's first).
+
+    Dedup compares case-insensitively (hosts are case-insensitive), but the
+    user's original spelling is always the one kept in the output."""
     entries = _no_proxy_entries(existing)
+    seen = {e.lower() for e in entries}
     for e in NO_PROXY_VALUE.split(","):
-        if e not in entries:
+        if e.lower() not in seen:
             entries.append(e)
+            seen.add(e.lower())
     return ",".join(entries)
 
 
 def _stripped_no_proxy(existing: str) -> str:
     """User's NO_PROXY minus exactly the entries this tool manages — anything
-    the user added themselves survives a disable."""
-    ours = set(NO_PROXY_VALUE.split(","))
-    return ",".join(e for e in _no_proxy_entries(existing) if e not in ours)
+    the user added themselves survives a disable. Matching is
+    case-insensitive (hosts are case-insensitive)."""
+    ours = {e.lower() for e in NO_PROXY_VALUE.split(",")}
+    return ",".join(e for e in _no_proxy_entries(existing)
+                    if e.lower() not in ours)
 
 
 def _broadcast_env_change():
@@ -776,7 +783,10 @@ def _sys_proxy_server_to_url(server: str):
 
 
 def get_sys_proxy():
-    """WinINET user proxy ('未设置' when disabled / empty)."""
+    """WinINET user proxy ('未设置' when disabled / empty).
+
+    Callers wanting PAC (AutoConfigURL) awareness use get_sys_proxy_ex().
+    """
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
                              winreg.KEY_READ)
@@ -798,12 +808,49 @@ def get_sys_proxy():
         return UNDETECTED
 
 
+def _read_autoconfig_url():
+    """Raw WinINET AutoConfigURL (PAC script), '' when unset."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
+                             winreg.KEY_READ)
+        try:
+            v, _ = winreg.QueryValueEx(key, "AutoConfigURL")
+            return str(v)
+        except FileNotFoundError:
+            return ""
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        return ""
+
+
+def get_sys_proxy_ex():
+    """get_sys_proxy plus PAC awareness: {url, autoconfig_url, pac}.
+
+    url:    same value as get_sys_proxy() (WinINET static proxy).
+    pac:    True while an AutoConfigURL is registered — browsers then use the
+            PAC script and may ignore the static ProxyServer entirely.
+    autoconfig_url: raw PAC URL ('' when unset).
+    """
+    url = get_sys_proxy()
+    autoconfig_url = _read_autoconfig_url()
+    return {
+        "url": url,
+        "autoconfig_url": autoconfig_url,
+        "pac": bool(autoconfig_url),
+    }
+
+
 def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear Windows system proxy (Internet Options / WinINET).
     Disable is surgical: only turns it off when the current server is ours.
 
     WinINET does not honor SOCKS userinfo; SOCKS schemes write `socks=host:port`
     (no auth). HTTP schemes write `host:port` as before.
+
+    Returns True on success, an error string on failure. When a PAC
+    (AutoConfigURL) is registered, returns (True, note) — the static proxy is
+    still written, but browsers may keep routing through the PAC script.
     """
     sch = str(scheme or "http").strip().lower()
     if sch.startswith("socks"):
@@ -860,6 +907,12 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
         finally:
             winreg.CloseKey(key)
         _wininet_notify()
+        if enable:
+            pac = _read_autoconfig_url()
+            if pac:
+                return (True,
+                        f"检测到 PAC 自动配置脚本（{pac}），浏览器可能仍按 PAC 规则分流，"
+                        "静态系统代理未必生效")
         return True
     except OSError as e:
         return str(e)
