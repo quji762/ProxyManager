@@ -460,6 +460,27 @@ function expectedUrl(kind) {
     : "";
   return `${a.scheme}://${auth}${a.host}:${a.port}`;
 }
+/* Switch is ON only for THIS tool's URL (same contract as PowerShell /
+   system proxy). `allowNat` also accepts a different host — WSL NAT mode
+   rewrites 127.0.0.1 to the Windows gateway. A foreign git/npm/pip proxy
+   must show OFF so a click enables (and stashes) instead of deleting it. */
+function urlLooksOurs(v, kind, allowNat) {
+  if (v == null || UNSET.has(String(v))) return false;
+  const s = String(v);
+  if (s === expectedUrl(kind)) return true;
+  if (kind === "sys" || !allowNat) return false;
+  const a = snapshotAddr();
+  let u;
+  try { u = new URL(s); } catch (_) { return false; }
+  const sch = (u.protocol || "").replace(":", "").toLowerCase();
+  const formSch = (a.scheme || "http").toLowerCase();
+  const schOk = sch === formSch || (sch === "socks5" && formSch.startsWith("socks"));
+  if (!schOk) return false;
+  if (String(u.port || "") !== String(a.port)) return false;
+  const dec = (x) => { try { return decodeURIComponent(x || ""); } catch (_) { return x || ""; } };
+  if (dec(u.username) !== (a.user || "") || dec(u.password) !== (a.password || "")) return false;
+  return (u.hostname || "") !== a.host;
+}
 function confirmMessage(pre) {
   if (!pre) return "";
   if (pre.confirm === "port") return t("confirmPort", { host: pre.host || "", port: pre.port || "" });
@@ -513,6 +534,9 @@ async function applyAddress(next, prev) {
         if (prev) {
           $("inHost").value = prev.host;
           $("inPort").value = prev.port;
+          if ($("inScheme")) $("inScheme").value = prev.scheme || "http";
+          if ($("inUser")) $("inUser").value = prev.user || "";
+          if ($("inPass")) $("inPass").value = prev.password || "";
         }
       } else {
         lastApplied = Object.assign({}, next);
@@ -612,7 +636,7 @@ async function refreshAll() {
     wslProbed = true;  // the –/4 badge becomes real counts after first probe
     state.wsl = !!r.on;
     detected.gitwsl = r.git;
-    state.gitwsl = !UNSET.has(r.git); // mirror the actually detected state
+    state.gitwsl = urlLooksOurs(r.git, null, true);
     detected.wsl_url = state.wsl ? r.vars.HTTP_PROXY : null;
     set("vWip", r.ip);
     set("vWslHttp", r.vars.HTTP_PROXY); set("vWslHttps", r.vars.HTTPS_PROXY);
@@ -623,35 +647,35 @@ async function refreshAll() {
   if (lane === "win") track(api.call("refresh_item", "gitwin").then((v) => {
     anyOk = true;
     detected.gitwin = v;
-    state.gitwin = !UNSET.has(v);
+    state.gitwin = urlLooksOurs(v);
     set("vPsGit", v);
     renderEndpoints();
   }).catch(() => {}));
   if (lane === "win") track(api.call("refresh_item", "npm").then((v) => {
     anyOk = true;
     detected.npm = v;
-    state.npm = !UNSET.has(v);
+    state.npm = urlLooksOurs(v);
     set("vNpm", v);
     renderEndpoints();
   }).catch(() => {}));
   if (lane === "win") track(api.call("refresh_item", "pip").then((v) => {
     anyOk = true;
     detected.pip = v;
-    state.pip = !UNSET.has(v);
+    state.pip = urlLooksOurs(v);
     set("vPip", v);
     renderEndpoints();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "npmwsl").then((v) => {
     anyOk = true;
     detected.npmwsl = v;
-    state.npmwsl = !UNSET.has(v);
+    state.npmwsl = urlLooksOurs(v, null, true);
     set("vNpmWsl", v);
     renderEndpoints();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "pipwsl").then((v) => {
     anyOk = true;
     detected.pipwsl = v;
-    state.pipwsl = !UNSET.has(v);
+    state.pipwsl = urlLooksOurs(v, null, true);
     set("vPipWsl", v);
     renderEndpoints();
   }).catch(() => {}));
@@ -1154,8 +1178,10 @@ async function boot() {
     $("authToggle").setAttribute("aria-expanded", "true");
   }
   lastApplied = {
-    host: String(c.host || ""), port: String(c.port || ""),
-    scheme: c.scheme || "http", user: c.user || "", password: c.password || "",
+    host: String(c.applied_host || c.host || ""),
+    port: String(c.applied_port || c.port || ""),
+    scheme: c.applied_scheme || c.scheme || "http",
+    user: c.applied_user || "", password: c.applied_password || "",
   };
   setLang(c.lang || ((navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en"));
   if ($("inLang")) $("inLang").value = lang;
@@ -1181,7 +1207,15 @@ async function boot() {
   } catch (_) { /* cosmetic only */ }
   renderPorts();
   renderEndpoints();
-  refreshAll();
+  // Form fields may have been persistSoon'd without switch_port. If they
+  // differ from the last applied address, finish that migration now so a
+  // restart cannot leave endpoints on the old port.
+  const formAddr = snapshotAddr();
+  if (addrKey(formAddr) !== addrKey(lastApplied)) {
+    applyAddress(formAddr, lastApplied);
+  } else {
+    refreshAll();
+  }
   tickSpeed();
 }
 

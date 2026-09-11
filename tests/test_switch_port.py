@@ -109,3 +109,73 @@ def test_switch_port_migrates_after_unapplied_save_config(tmp_path, monkeypatch)
     assert "git" in names
     assert api.port == "7890"
     assert api.applied_port == "7890"
+
+
+def test_applied_survives_unapplied_save_and_reload(tmp_path, monkeypatch):
+    """persistSoon may save a typed-but-not-applied port. After restart,
+    applied_* must still be the last address actually written to endpoints
+    so switch_port can migrate them."""
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "c.json"))
+    monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api = Api()
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    assert api.save_config({"host": "127.0.0.1", "port": "7890"}) is True
+    assert api.port == "7890"
+    assert api.applied_port == "7897"
+
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api2 = Api()
+    assert api2.port == "7890"
+    assert api2.applied_port == "7897"
+    assert api2.applied_host == "127.0.0.1"
+    assert api2.applied_kw["scheme"] == "http"
+
+
+def test_switch_port_after_reload_migrates_old_applied(tmp_path, monkeypatch):
+    """Reload with form=7890 / applied=7897: switching to 7890 must still
+    treat endpoints on 7897 as ours."""
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "c.json"))
+    monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api = Api()
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    assert api.save_config({"host": "127.0.0.1", "port": "7890"}) is True
+
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api2 = Api()
+    managed = "http://127.0.0.1:7897"
+    calls = []
+
+    def record(name):
+        def _fn(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            return True
+        return _fn
+
+    with patch("js_api.pm.get_ps_status", return_value=managed), \
+         patch("js_api.pm.get_sys_proxy", return_value="未设置"), \
+         patch("js_api.pm.get_git_proxy_win", return_value="未设置"), \
+         patch("js_api.pm.get_npm_proxy", return_value="未设置"), \
+         patch("js_api.pm.get_pip_proxy", return_value="未设置"), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value="未设置"), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value="未设置"), \
+         patch.object(api2, "refresh_item",
+                      return_value={"on": False, "git": "未设置"}), \
+         patch("js_api.pm.set_ps_proxy", side_effect=record("ps")), \
+         patch("js_api.pm.set_sys_proxy", side_effect=record("sys")), \
+         patch("js_api.pm.set_git_proxy", side_effect=record("git")), \
+         patch("js_api.pm.set_wsl_proxy", side_effect=record("wsl")), \
+         patch("js_api.pm.set_npm_proxy", side_effect=record("npm")), \
+         patch("js_api.pm.set_pip_proxy", side_effect=record("pip")), \
+         patch("js_api.pm.set_npm_proxy_wsl", side_effect=record("npmwsl")), \
+         patch("js_api.pm.set_pip_proxy_wsl", side_effect=record("pipwsl")), \
+         patch("js_api.pm.get_wsl_network_mode", return_value="Mirrored"):
+        r = api2.switch_port("7890", "127.0.0.1")
+
+    names = [c[0] for c in calls]
+    assert r["ok"] is True
+    assert "ps" in names
+    assert api2.applied_port == "7890"

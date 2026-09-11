@@ -160,3 +160,69 @@ def test_restart_wsl_does_not_hold_mutation_lock_during_subprocess(
     assert lock_free_during_restart == [True]
     assert api._endpoint_mutation_lock.acquire(blocking=False)  # released
     api._endpoint_mutation_lock.release()
+
+
+def test_restart_wsl_skips_foreign_git_npm_pip(tmp_path, monkeypatch):
+    """NAT loopback rewrite after wsl --shutdown must not clobber a
+    user-configured git/npm/pip proxy that this tool did not write."""
+    api = _make_api(tmp_path, monkeypatch)
+    api.host, api.port = "127.0.0.1", "7897"
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    calls = []
+
+    def rec(name):
+        def fn(*a, **k):
+            calls.append(name)
+            return True
+        return fn
+
+    foreign = "http://company-proxy:8080"
+    with patch("js_api.pm.restart_wsl", return_value=True), \
+         patch("js_api.pm.get_wsl_network_mode", return_value="NAT"), \
+         patch("js_api.pm.get_wsl_gateway_ip", return_value="172.25.0.1"), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value=foreign), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value=foreign), \
+         patch.object(api, "refresh_item",
+                      return_value={"on": True, "git": foreign}), \
+         patch("js_api.pm.set_wsl_proxy", side_effect=rec("wsl")), \
+         patch("js_api.pm.set_git_proxy", side_effect=rec("git")), \
+         patch("js_api.pm.set_npm_proxy_wsl", side_effect=rec("npm")), \
+         patch("js_api.pm.set_pip_proxy_wsl", side_effect=rec("pip")):
+        assert api.restart_wsl()["ok"] is True
+
+    assert "wsl" in calls
+    assert "git" not in calls
+    assert "npm" not in calls
+    assert "pip" not in calls
+
+
+def test_restart_wsl_rewrites_stale_gateway(tmp_path, monkeypatch):
+    """A URL this tool wrote with the previous NAT gateway must be updated
+    after the subnet moves."""
+    api = _make_api(tmp_path, monkeypatch)
+    api.host, api.port = "127.0.0.1", "7897"
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    stale = "http://172.24.0.1:7897"
+    calls = []
+
+    def rec(name):
+        def fn(*a, **k):
+            calls.append(name)
+            return True
+        return fn
+
+    with patch("js_api.pm.restart_wsl", return_value=True), \
+         patch("js_api.pm.get_wsl_network_mode", return_value="NAT"), \
+         patch("js_api.pm.get_wsl_gateway_ip", return_value="172.25.0.1"), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value=stale), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value=stale), \
+         patch.object(api, "refresh_item",
+                      return_value={"on": True, "git": stale}), \
+         patch("js_api.pm.set_wsl_proxy", side_effect=rec("wsl")), \
+         patch("js_api.pm.set_git_proxy", side_effect=rec("git")), \
+         patch("js_api.pm.set_npm_proxy_wsl", side_effect=rec("npm")), \
+         patch("js_api.pm.set_pip_proxy_wsl", side_effect=rec("pip")):
+        assert api.restart_wsl()["ok"] is True
+
+    assert calls == ["wsl", "git", "npm", "pip"]

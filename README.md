@@ -134,6 +134,7 @@ The app stores its settings in `%APPDATA%\ProxyManager\config.json` and manages 
 | `wsl_all_distros` | bool | `true` | Write WSL endpoints to every user distro (`false` = default distro only) |
 | `close_hint_done` | bool | `false` | First-close “hides to tray” hint has been shown |
 | `restore` | object | `{}` | Stashed pre-overwrite proxy URLs, keyed by endpoint |
+| `applied` | object | form fields | Last host/port/scheme/user/password actually written to endpoints; kept separate from the form fields so a typed-but-not-yet-applied address cannot poison port switching after a restart |
 | `win_rect` | list | `null` | Last normal window bounds (physical pixels); restored on launch |
 | `win_max` | bool | `false` | Start with the window maximized |
 
@@ -146,7 +147,7 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 - Proxy URLs are `http://`, `socks5://`, or `socks5h://`, with optional userinfo. WinINET **system proxy** SOCKS writes `socks=host:port` and **does not support username/password**.
 - The password is stored in `%APPDATA%\ProxyManager\config.json` (local user file). Do not copy that file into a shared repo.
 - In WSL, the managed block and git/npm/pip proxies are applied to every user distro by default (Settings can limit this to the default distro); Docker infrastructure distros are skipped.
-- Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **quit-clears-proxy** is on). npm/pip switches still read as "on" whenever the file contains any proxy value.
+- Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **quit-clears-proxy** is on). Switches are on only for this tool's URL (including the WSL NAT gateway rewrite); a proxy the user configured for another endpoint shows off, so clicking it stashes and overwrites instead of deleting.
 - The WSL npm/pip endpoints read back and modify config files over `wsl.exe`; every read/write round-trip costs a wsl.exe call, so the WSL switches refresh a bit slower than the Windows ones.
 - **Restart WSL** terminates all processes running inside WSL.
 

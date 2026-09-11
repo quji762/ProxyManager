@@ -13,7 +13,8 @@ from config_store import (
     autostart_enabled, autostart_set, load_config, save_config, valid_host,
 )
 from window_win32 import (
-    _POINT, _RECT, _is_maximized, _our_hwnds, set_resize_maximized, user32,
+    _POINT, _RECT, _is_maximized, _our_hwnds, _work_area_for_hwnd,
+    set_resize_maximized, user32,
 )
 
 # File picker filter: must stay in sync with the extensions save_config
@@ -100,11 +101,16 @@ class Api:
         # switch_port and do_toggle enable. save_config only mirrors the form
         # fields into self.host/self.port, so a typed-but-not-yet-applied
         # address must not make switch_port treat the old endpoints as
-        # foreign ones (it compares against applied_*).
-        self.applied_host = cfg["host"]
-        self.applied_port = cfg["port"]
-        self.applied_kw = {"scheme": self.scheme, "user": self.user,
-                           "password": self.password}
+        # foreign ones (it compares against applied_*). Persisted separately
+        # so a restart cannot re-poison this cache from the form fields.
+        applied = cfg.get("applied") or {}
+        self.applied_host = applied.get("host") or cfg["host"]
+        self.applied_port = applied.get("port") or cfg["port"]
+        self.applied_kw = {
+            "scheme": applied.get("scheme") or self.scheme,
+            "user": applied.get("user") or "",
+            "password": applied.get("password") or "",
+        }
         self._speed_lock = threading.Lock()
         # Serializes endpoint mutations (toggles, port switch, tray-quit
         # clear on the pystray thread): _restore / applied_* / _git_managed
@@ -151,121 +157,123 @@ class Api:
             "quit_clear": bool(cfg.get("quit_clear", False)),
             "wsl_all_distros": bool(cfg.get("wsl_all_distros", True)),
             "close_hint_done": bool(cfg.get("close_hint_done", False)),
+            "applied_host": self.applied_host,
+            "applied_port": str(self.applied_port),
+            "applied_scheme": self.applied_kw.get("scheme", "http"),
+            "applied_user": self.applied_kw.get("user", ""),
+            "applied_password": self.applied_kw.get("password", ""),
         }
 
     def save_config(self, data):
-        # "以内存态为准"的 restore 合并写，先做快照再进 _cfg_lock：
-        # - 不能在持 _cfg_lock 时再拿 _endpoint_mutation_lock——既有锁序是
-        #   mutation → cfg（do_toggle/_switch_port 持 mutation 时经
-        #   _persist_restore 拿 cfg），反向构成 AB-BA 死锁；
-        # - 也不能直接遍历 self._restore——toggle 路径持 mutation 锁插入
-        #   新 key 后等 cfg 锁落盘，加密遍历中途遇字典变更会抛 RuntimeError，
-        #   异常被前端 persistSoon 的 .catch 静默吞掉、保存丢失。
-        # dict(d) 是单条 C 级拷贝（CPython 下持锁原子完成），快照后加密只
-        # 碰私有副本；快照之后并发插入的 key 由 toggle 自己的
-        # _persist_restore 落盘，合并语义不变。
+        # Hold mutation for the whole save (lock order mutation → cfg, same
+        # as do_toggle → _persist_restore). Snapshot restore under that lock
+        # so encrypt walks a private copy (a live dict mutating mid-iterate
+        # raises RuntimeError, swallowed by persistSoon). Releasing mutation
+        # before cfg_lock used to let a concurrent toggle persist a stash
+        # that this write then overwrote with the stale snapshot.
         with self._endpoint_mutation_lock:
             restore_snapshot = dict(self._restore)
-        with _cfg_lock:
-            cfg = load_config()
-            # Validate host/port server-side: they end up inside wsl bash -c
-            # and git commands downstream, and the UI only validates the
-            # enable path.
-            # host/port 与网速探测线程共享：变更成对持锁提交，避免撕裂的
-            # (host, port) 组合被拿去做一次指向错误地址的 TCP 探测
-            with self._speed_lock:
-                if "host" in data:
-                    h = str(data["host"]).strip()
-                    if valid_host(h):
-                        self.host = h
-                if "port" in data:
-                    p = str(data["port"]).strip()
-                    if pm.is_valid_port(p):
-                        self.port = str(int(p))
-            if "scheme" in data and pm.is_valid_scheme(data["scheme"]):
-                self.scheme = str(data["scheme"]).strip().lower()
-            if "user" in data and pm.is_valid_userinfo(data["user"]):
-                self.user = str(data["user"])
-            if "password" in data and pm.is_valid_userinfo(data["password"]):
-                self.password = str(data["password"])
-            if "lang" in data and str(data["lang"]) in ("zh", "en"):
-                cfg["lang"] = str(data["lang"])
-            cfg["host"], cfg["port"] = self.host, self.port
-            cfg["scheme"], cfg["user"], cfg["password"] = (
-                self.scheme, self.user, self.password)
-            for k in ("powershell", "wsl", "git_win", "git_wsl", "npm", "pip",
-                      "npmwsl", "pipwsl", "pin"):
-                if k in data:
-                    cfg[k] = bool(data[k])
-            if "mode" in data:
-                cfg["mode"] = str(data["mode"])
-            if "ports" in data and isinstance(data["ports"], list):
-                seen = []
-                for p in data["ports"]:
+            with _cfg_lock:
+                cfg = load_config()
+                # Validate host/port server-side: they end up inside wsl bash -c
+                # and git commands downstream, and the UI only validates the
+                # enable path.
+                # host/port 与网速探测线程共享：变更成对持锁提交，避免撕裂的
+                # (host, port) 组合被拿去做一次指向错误地址的 TCP 探测
+                with self._speed_lock:
+                    if "host" in data:
+                        h = str(data["host"]).strip()
+                        if valid_host(h):
+                            self.host = h
+                    if "port" in data:
+                        p = str(data["port"]).strip()
+                        if pm.is_valid_port(p):
+                            self.port = str(int(p))
+                if "scheme" in data and pm.is_valid_scheme(data["scheme"]):
+                    self.scheme = str(data["scheme"]).strip().lower()
+                if "user" in data and pm.is_valid_userinfo(data["user"]):
+                    self.user = str(data["user"])
+                if "password" in data and pm.is_valid_userinfo(data["password"]):
+                    self.password = str(data["password"])
+                if "lang" in data and str(data["lang"]) in ("zh", "en"):
+                    cfg["lang"] = str(data["lang"])
+                cfg["host"], cfg["port"] = self.host, self.port
+                cfg["scheme"], cfg["user"], cfg["password"] = (
+                    self.scheme, self.user, self.password)
+                for k in ("powershell", "wsl", "git_win", "git_wsl", "npm", "pip",
+                          "npmwsl", "pipwsl", "pin"):
+                    if k in data:
+                        cfg[k] = bool(data[k])
+                if "mode" in data:
+                    cfg["mode"] = str(data["mode"])
+                if "ports" in data and isinstance(data["ports"], list):
+                    seen = []
+                    for p in data["ports"]:
+                        try:
+                            pi = int(p)
+                        except (TypeError, ValueError):
+                            continue
+                        if 1 <= pi <= 65535 and pi not in seen:
+                            seen.append(pi)
+                    cfg["ports"] = seen[:12] or DEFAULT_PORTS
+                if "autostart" in data:
+                    cfg["autostart"] = bool(data["autostart"])
+                if "bg_path" in data:
+                    bp = str(data["bg_path"])
+                    ext = os.path.splitext(bp)[1].lower()
+                    if not bp:
+                        cfg["bg_path"] = ""
+                    elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif") \
+                            and os.path.isfile(bp):
+                        cfg["bg_path"] = bp
+                    # else: keep the previous value instead of persisting a
+                    # bogus/missing path that get_background would choke on.
+                if "bg_dim" in data:
                     try:
-                        pi = int(p)
+                        cfg["bg_dim"] = min(0.8, max(0.0, float(data["bg_dim"])))
                     except (TypeError, ValueError):
-                        continue
-                    if 1 <= pi <= 65535 and pi not in seen:
-                        seen.append(pi)
-                cfg["ports"] = seen[:12] or DEFAULT_PORTS
-            if "autostart" in data:
-                cfg["autostart"] = bool(data["autostart"])
-            if "bg_path" in data:
-                bp = str(data["bg_path"])
-                ext = os.path.splitext(bp)[1].lower()
-                if not bp:
-                    cfg["bg_path"] = ""
-                elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif") \
-                        and os.path.isfile(bp):
-                    cfg["bg_path"] = bp
-                # else: keep the previous value instead of persisting a
-                # bogus/missing path that get_background would choke on.
-            if "bg_dim" in data:
-                try:
-                    cfg["bg_dim"] = min(0.8, max(0.0, float(data["bg_dim"])))
-                except (TypeError, ValueError):
-                    pass
-            if "card_alpha" in data:
-                try:
-                    cfg["card_alpha"] = min(1.0, max(0.5, float(data["card_alpha"])))
-                except (TypeError, ValueError):
-                    pass
-            if "speed_full" in data:
-                try:
-                    v = float(data["speed_full"])
-                    if 0 < v <= 100000:
-                        cfg["speed_full"] = round(v, 1)
-                except (TypeError, ValueError):
-                    pass
-            if "quit_clear" in data:
-                cfg["quit_clear"] = bool(data["quit_clear"])
-            if "wsl_all_distros" in data:
-                cfg["wsl_all_distros"] = bool(data["wsl_all_distros"])
-                pm.set_wsl_apply_all(cfg["wsl_all_distros"])
-            if "close_hint_done" in data:
-                cfg["close_hint_done"] = bool(data["close_hint_done"])
-            # restore 暂存属内部状态（含用户原代理 URL，可能带明文凭据）：
-            # 只由 _stash_previous/_persist_restore 维护，不接受前端覆写
-            if "win_rect" in data and isinstance(data["win_rect"], list) \
-                    and len(data["win_rect"]) == 4:
-                try:
-                    rect = [int(v) for v in data["win_rect"]]
-                    cfg["win_rect"] = rect
-                    self._win_rect = rect
-                except (TypeError, ValueError):
-                    pass
-            if "win_max" in data:
-                cfg["win_max"] = bool(data["win_max"])
-                self._win_max = bool(data["win_max"])
-            # "以内存态为准"的合并语义必须保留（_persist_restore 与前端保存
-            # 并发时丢暂存），但落盘前必须 DPAPI 加密：self._restore 是内存
-            # 中的解密态明文，直接回写会把 bf9602c 的暂存加密撤销掉。
-            # _stash_encrypt 对已带 DPAPI: 前缀的值原样保留，幂等。
-            # 加密的是函数入口处的快照（见 save_config 开头注释）。
-            cfg["restore"] = _stash_encrypt(restore_snapshot)
-            if not save_config(cfg):
-                return False
+                        pass
+                if "card_alpha" in data:
+                    try:
+                        cfg["card_alpha"] = min(1.0, max(0.5, float(data["card_alpha"])))
+                    except (TypeError, ValueError):
+                        pass
+                if "speed_full" in data:
+                    try:
+                        v = float(data["speed_full"])
+                        if 0 < v <= 100000:
+                            cfg["speed_full"] = round(v, 1)
+                    except (TypeError, ValueError):
+                        pass
+                if "quit_clear" in data:
+                    cfg["quit_clear"] = bool(data["quit_clear"])
+                if "wsl_all_distros" in data:
+                    cfg["wsl_all_distros"] = bool(data["wsl_all_distros"])
+                    pm.set_wsl_apply_all(cfg["wsl_all_distros"])
+                if "close_hint_done" in data:
+                    cfg["close_hint_done"] = bool(data["close_hint_done"])
+                # restore 暂存属内部状态（含用户原代理 URL，可能带明文凭据）：
+                # 只由 _stash_previous/_persist_restore 维护，不接受前端覆写
+                if "win_rect" in data and isinstance(data["win_rect"], list) \
+                        and len(data["win_rect"]) == 4:
+                    try:
+                        rect = [int(v) for v in data["win_rect"]]
+                        cfg["win_rect"] = rect
+                        self._win_rect = rect
+                    except (TypeError, ValueError):
+                        pass
+                if "win_max" in data:
+                    cfg["win_max"] = bool(data["win_max"])
+                    self._win_max = bool(data["win_max"])
+                # "以内存态为准"的合并语义必须保留（_persist_restore 与前端保存
+                # 并发时丢暂存），但落盘前必须 DPAPI 加密：self._restore 是内存
+                # 中的解密态明文，直接回写会把 bf9602c 的暂存加密撤销掉。
+                # _stash_encrypt 对已带 DPAPI: 前缀的值原样保留，幂等。
+                # 加密的是函数入口处的快照（见 save_config 开头注释）。
+                cfg["restore"] = _stash_encrypt(restore_snapshot)
+                cfg["applied"] = self._applied_dict()
+                if not save_config(cfg):
+                    return False
         return True
 
     # ── status refresh: one call per slice, fired in parallel by the UI ──
@@ -399,11 +407,36 @@ class Api:
                                    "仍要写入 ~/.npmrc 代理配置吗？"}
         return {"ok": True}
 
+    def _applied_dict(self):
+        """Form of applied_* written to config.json (password encrypted later)."""
+        return {
+            "host": self.applied_host,
+            "port": str(self.applied_port),
+            "scheme": self.applied_kw.get("scheme") or "http",
+            "user": self.applied_kw.get("user") or "",
+            "password": self.applied_kw.get("password") or "",
+        }
+
+    def _ours_proxy_urls(self, target=None):
+        """URLs this tool last wrote: the applied form, plus the NAT-gateway
+        form WSL-side endpoints actually persist when the host is loopback."""
+        h = self.applied_host
+        p = str(self.applied_port)
+        kw = dict(self.applied_kw)
+        urls = {pm.build_proxy_url(h, p, **kw)}
+        if target in ("gitwsl", "npmwsl", "pipwsl") \
+                and str(h).lower() in pm.LOOPBACK_HOSTS:
+            gw = pm.get_wsl_gateway_ip()
+            if gw:
+                urls.add(pm.build_proxy_url(gw, p, **kw))
+        return urls
+
     def _persist_restore(self):
         with _cfg_lock:
             cfg = load_config()
             # 暂存值 DPAPI 加密后落盘（含用户原代理凭据，不应明文持久化）
             cfg["restore"] = _stash_encrypt(self._restore)
+            cfg["applied"] = self._applied_dict()
             save_config(cfg)
 
     def _detected_url(self, target):
@@ -481,9 +514,15 @@ class Api:
             self._persist_restore()
             return
         cur = self._detected_url(target)
-        if cur and cur != new_url:
-            self._restore[target] = cur
-            self._persist_restore()
+        if not cur or cur == new_url:
+            return
+        # Leftovers from this tool (last applied address, or the NAT
+        # gateway rewrite of it) are not user state — stashing them made
+        # disable "restore" our own URL, so the switch needed two clicks.
+        if cur in self._ours_proxy_urls(target):
+            return
+        self._restore[target] = cur
+        self._persist_restore()
 
     def _restore_stashed(self, target, prev):
         """Restore a dict-shaped stash (ps env vars / sys bypass list): write
@@ -662,6 +701,7 @@ class Api:
             # must not make switch_port treat the still-old endpoints as ours.
             self.applied_host, self.applied_port = h, p
             self.applied_kw = dict(kw)
+            self._persist_restore()
         return {"ok": True, "note": "；".join(notes) if notes else None}
 
     def _wsl_url_target(self, host, port):
@@ -937,6 +977,7 @@ class Api:
         cfg["host"], cfg["port"] = self.host, new_port
         cfg["scheme"], cfg["user"], cfg["password"] = (
             self.scheme, self.user, self.password)
+        cfg["applied"] = self._applied_dict()
         return cfg
 
     # ── live speed + port probe (sampled on a background thread) ──
@@ -1021,15 +1062,43 @@ class Api:
             if wsl_state and wsl_state.get("on"):
                 pm.set_wsl_proxy(h, p, True, **kw)
             git = (wsl_state or {}).get("git")
-            if self._adopt_parsed(git):
+            if self._is_managed_wsl_url(git, h, p, kw):
                 gh, gp = self._wsl_url_target(h, p)
                 pm.set_git_proxy(gh, gp, True, use_wsl=True, **kw)
                 self._git_managed["gitwsl"] = self._managed_url(gh, gp, **kw)
-            if self._adopt_parsed(npm):
+            if self._is_managed_wsl_url(npm, h, p, kw):
                 pm.set_npm_proxy_wsl(h, p, True, **kw)
-            if self._adopt_parsed(pipv):
+            if self._is_managed_wsl_url(pipv, h, p, kw):
                 pm.set_pip_proxy_wsl(h, p, True, **kw)
         return {"ok": True, "error": None}
+
+    def _is_managed_wsl_url(self, detected, host, port, kw):
+        """True if `detected` is a URL this tool would have written on the
+        WSL side: the current loopback form, the current NAT-gateway form,
+        or the same scheme/port/userinfo with a stale gateway host (NAT
+        subnet moved by wsl --shutdown). A user-configured proxy for a
+        different endpoint must not be rewritten."""
+        parsed = self._adopt_parsed(detected)
+        if not parsed:
+            return False
+        host, port = str(host), str(int(port))
+        kw = {
+            "scheme": kw.get("scheme") or "http",
+            "user": kw.get("user") or "",
+            "password": kw.get("password") or "",
+        }
+        candidates = {pm.build_proxy_url(host, port, **kw)}
+        wh, wp = self._wsl_url_target(host, port)
+        candidates.add(pm.build_proxy_url(wh, wp, **kw))
+        if str(detected).strip() in candidates:
+            return True
+        if host.lower() not in pm.LOOPBACK_HOSTS:
+            return False
+        return (parsed["port"] == port
+                and parsed["scheme"] == kw["scheme"]
+                and parsed["user"] == kw["user"]
+                and parsed["password"] == kw["password"]
+                and parsed["host"].lower() not in pm.LOOPBACK_HOSTS)
 
     def copy(self, text):
         """Clipboard fallback for pages where navigator.clipboard is
@@ -1408,8 +1477,7 @@ class Api:
                 user32.GetWindowRect(hwnd, ctypes.byref(rect))
                 self._prev_bounds = (rect.left, rect.top, rect.right,
                                      rect.bottom)
-            wa = _RECT()
-            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)  # SPI_GETWORKAREA
+            wa = _work_area_for_hwnd(hwnd)
             user32.SetWindowPos(hwnd, 0, wa.left, wa.top,
                                 wa.right - wa.left, wa.bottom - wa.top, 0x0004)  # NOZORDER
             self._maximized = True

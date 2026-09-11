@@ -134,6 +134,7 @@ py -3.13 app.py
 | `wsl_all_distros` | bool | `true` | WSL 端点写入所有用户发行版（`false` 则只写默认发行版） |
 | `close_hint_done` | bool | `false` | 是否已显示过首次关闭「隐藏到托盘」提示 |
 | `restore` | object | `{}` | 覆盖前暂存的代理 URL，按端点名索引 |
+| `applied` | object | 与表单字段相同 | 实际写入各端点的 host/port/scheme/user/password；与表单字段分开保存，避免“已输入但尚未应用到端点”的地址在重启后污染端口切换 |
 | `win_rect` | list | `null` | 上次正常状态的窗口位置（物理像素）；启动时恢复 |
 | `win_max` | bool | `false` | 启动时窗口最大化 |
 
@@ -146,7 +147,7 @@ py -3.13 app.py
 - 代理 URL 为 `http://`、`socks5://` 或 `socks5h://`，可带用户名密码。系统代理的 SOCKS 写入 `socks=host:port`，**不支持用户名密码**。
 - 密码保存在 `%APPDATA%\ProxyManager\config.json`（本机用户文件），不要把它提交到仓库。
 - WSL 侧的受管代码块与 git/npm/pip 代理默认应用到所有用户发行版（设置里可改为只写默认发行版）；Docker 基础设施发行版会被跳过。
-- 启用时如果该端点已有别的代理，会先暂存再覆盖；关闭（或勾选「退出时关闭代理」后从托盘退出）会把暂存值写回去。npm/pip 只要文件里还有 `proxy` 值，开关就会显示为开。
+- 启用时如果该端点已有别的代理，会先暂存再覆盖；关闭（或勾选「退出时关闭代理」后从托盘退出）会把暂存值写回去。开关仅在检测到本工具写入的 URL 时为开（含 WSL NAT 网关改写）；用户自己配的其它代理显示为关，点击是「暂存并覆盖」而不是直接删除。
 - WSL 侧 npm/pip 端点经 `wsl.exe` 读写配置文件，每次读取/写入都是一次 wsl.exe 往返，因此 WSL 开关的状态刷新比 Windows 侧慢。
 - 「重启 WSL」会终止 WSL 内正在运行的所有进程。
 

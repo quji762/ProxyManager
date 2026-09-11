@@ -66,3 +66,18 @@ def test_set_pip_proxy_enable_writes_global_only(tmp_path, monkeypatch):
     new = ini.read_text(encoding="utf-8")
     assert "[install]\nproxy = x\n" in new
     assert _ini_get(new, "proxy", section="global") == "http://127.0.0.1:7897"
+
+
+def test_get_pip_proxy_wsl_ignores_install_section(monkeypatch):
+    data = b"[install]\nproxy = http://ignored:1\n"
+    monkeypatch.setattr(pm, "_wsl_targets", lambda: [""])
+    monkeypatch.setattr(pm, "_wsl_pull_file", lambda d, p: data)
+    assert pm.get_pip_proxy_wsl() == pm.UNSET
+
+
+def test_get_pip_proxy_wsl_reads_global_only(monkeypatch):
+    data = (b"[install]\nproxy = http://ignored:1\n[global]\n"
+            b"proxy = http://127.0.0.1:7897\n")
+    monkeypatch.setattr(pm, "_wsl_targets", lambda: [""])
+    monkeypatch.setattr(pm, "_wsl_pull_file", lambda d, p: data)
+    assert pm.get_pip_proxy_wsl() == "http://127.0.0.1:7897"

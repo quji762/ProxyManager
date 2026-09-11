@@ -210,6 +210,50 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
             self.assertNotIn("gitwin", raw["restore"])
             self.assertTrue(raw["restore"]["pip"].startswith("DPAPI:"))
 
+    def test_save_config_holds_mutation_lock_during_encrypt(self):
+        """save_config must keep _endpoint_mutation_lock through DPAPI encrypt
+        and the disk write. Releasing it after the restore snapshot let a
+        concurrent toggle persist a stash that this write then overwrote."""
+        import os
+        import tempfile
+
+        import js_api
+        import proxy_manager as pm
+
+        tmp = tempfile.mkdtemp(prefix="pm_test_")
+        cfg_file = os.path.join(tmp, "c.json")
+        encrypt, decrypt = config_store._dpapi_encrypt, config_store._dpapi_decrypt
+        started = threading.Event()
+        release = threading.Event()
+
+        with mock.patch.object(pm, "winreg"), \
+                mock.patch.object(config_store, "CONFIG_FILE", cfg_file), \
+                mock.patch("proxy_manager.get_net_counters", return_value=None), \
+                mock.patch.object(js_api, "_dpapi_decrypt", decrypt):
+            api = js_api.Api()
+            api._restore = {"npm": "http://u:p@10.0.0.1:1"}
+
+            def slow_encrypt(v):
+                started.set()
+                release.wait(5)
+                return encrypt(v)
+
+            acquired = []
+
+            def saver():
+                with mock.patch.object(js_api, "_dpapi_encrypt", slow_encrypt):
+                    api.save_config({"host": "127.0.0.1"})
+
+            t = threading.Thread(target=saver, daemon=True)
+            t.start()
+            self.assertTrue(started.wait(5))
+            acquired.append(api._endpoint_mutation_lock.acquire(blocking=False))
+            if acquired[0]:
+                api._endpoint_mutation_lock.release()
+            release.set()
+            t.join(5)
+            self.assertEqual(acquired, [False])
+
     def test_save_config_concurrent_toggle_no_runtime_error(self):
         """压力回归（并发缺陷）：一个线程循环模拟 toggle 暂存插入——
         每次插入新 key 并删除最旧 key（字典有界但 size 持续变化，保证

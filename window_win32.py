@@ -14,6 +14,13 @@ class _RECT(ctypes.Structure):
                 ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint),
+                ("rcMonitor", _RECT),
+                ("rcWork", _RECT),
+                ("dwFlags", ctypes.c_uint)]
+
+
 # Explicit prototypes: without argtypes ctypes truncates handles/pointers to
 # 32 bits, which made SetWindowPos(HWND_TOPMOST, ...) silently fail (ret=0).
 user32.SetWindowPos.argtypes = [
@@ -64,7 +71,63 @@ user32.SetForegroundWindow.argtypes = [ctypes.c_ssize_t]
 user32.SetForegroundWindow.restype = ctypes.c_int
 user32.AllowSetForegroundWindow.argtypes = [ctypes.c_uint]
 user32.AllowSetForegroundWindow.restype = ctypes.c_int
+user32.MonitorFromWindow.argtypes = [ctypes.c_ssize_t, ctypes.c_uint]
+user32.MonitorFromWindow.restype = ctypes.c_ssize_t
+user32.MonitorFromRect.argtypes = [ctypes.POINTER(_RECT), ctypes.c_uint]
+user32.MonitorFromRect.restype = ctypes.c_ssize_t
+user32.GetMonitorInfoW.argtypes = [ctypes.c_ssize_t, ctypes.POINTER(_MONITORINFO)]
+user32.GetMonitorInfoW.restype = ctypes.c_int
 _SW_RESTORE = 9
+_MONITOR_DEFAULTTONEAREST = 2
+_MONITOR_DEFAULTTONULL = 0
+
+
+def _primary_work_area():
+    wa = _RECT()
+    user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+    return wa
+
+
+def _work_area_for_hwnd(hwnd):
+    """Work area of the monitor that contains `hwnd` (primary as fallback).
+
+    SPI_GETWORKAREA is the primary monitor only — fake-maximize used it
+    unconditionally, so a window on a second display jumped to monitor 1.
+    """
+    try:
+        if hwnd:
+            hmon = user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+            if hmon:
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    return mi.rcWork
+    except Exception:
+        pass
+    return _primary_work_area()
+
+
+def _clamp_rect_visible(left, top, right, bottom):
+    """If the rect intersects no monitor, move it onto the primary work area.
+
+    Unplugging a docked display left win_rect on dead coordinates — the next
+    launch restored the window off-screen with no way to reach it.
+    """
+    w, h = int(right) - int(left), int(bottom) - int(top)
+    if w < 200:
+        w = 200
+    if h < 150:
+        h = 150
+    rc = _RECT(int(left), int(top), int(left) + w, int(top) + h)
+    try:
+        if user32.MonitorFromRect(ctypes.byref(rc), _MONITOR_DEFAULTTONULL):
+            return [rc.left, rc.top, rc.right, rc.bottom]
+    except Exception:
+        pass
+    wa = _primary_work_area()
+    nw = min(w, max(200, wa.right - wa.left))
+    nh = min(h, max(150, wa.bottom - wa.top))
+    return [wa.left, wa.top, wa.left + nw, wa.top + nh]
 
 
 class _POINT(ctypes.Structure):
@@ -255,9 +318,8 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
         # window returns to the work area — bounds still match, so we skip).
         if wparam == 0 and _is_maximized():  # SIZE_RESTORED
             r = _RECT()
-            wa = _RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(r))
-            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+            wa = _work_area_for_hwnd(hwnd)
             if (r.left, r.top, r.right, r.bottom) != \
                     (wa.left, wa.top, wa.right, wa.bottom):
                 _clear_fake_maximized()
@@ -270,9 +332,8 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
         # caption click also enters/exits the loop, but bounds still match.)
         if _is_maximized() and _restore_callback is not None:
             r = _RECT()
-            wa = _RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(r))
-            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+            wa = _work_area_for_hwnd(hwnd)
             if (r.left, r.top, r.right, r.bottom) != \
                     (wa.left, wa.top, wa.right, wa.bottom):
                 _clear_fake_maximized()
@@ -283,8 +344,7 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
             dpi = user32.GetDpiForWindow(hwnd) or 96
             # Never demand a minimum larger than the work area: a 920x620
             # logical minimum overflows a 1366x768 laptop at 150% DPI.
-            wa = _RECT()
-            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+            wa = _work_area_for_hwnd(hwnd)
             max_w = max(320, wa.right - wa.left)
             max_h = max(240, wa.bottom - wa.top)
             mmi.ptMinTrackSize.x = min(_MIN_W * dpi // 96, max_w)

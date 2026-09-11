@@ -303,55 +303,79 @@ def get_local_ip():
         return UNDETECTED
 
 
-def get_wsl_ip_and_block():
-    """Fetch WSL IP, the proxy-manager shell block, and the WSL git proxy in
-    a single wsl.exe call.
+def _wsl_ip_and_block_one(distro=""):
+    """One distro: (ip, block, git) or None if wsl.exe itself failed."""
+    # Generate random separators per call so they can never collide with
+    # user content in ~/.bashrc (unlike a fixed string like "<<PM_SEP>>").
+    sep1 = uuid.uuid4().hex
+    sep2 = uuid.uuid4().hex
+    cmd = (
+        "hostname -I 2>/dev/null | awk '{print $1}';"
+        f"echo '{sep1}';"
+        f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc ~/.zshrc 2>/dev/null; "
+        "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null;"
+        f"echo '{sep2}';"
+        "git config --global --get http.proxy 2>/dev/null "
+        "|| git config --global --get https.proxy 2>/dev/null;"
+        # git --get exits 1 when the key is unset, so the raw exit code can't
+        # distinguish "works" from "fails"; `true` normalizes it to 0 iff
+        # bash actually ran. A non-zero code means wsl.exe itself failed
+        # (feature disabled / no distro installed).
+        "true"
+    )
+    r = subprocess.run(
+        ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", cmd],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
+    )
+    if r.returncode != 0:
+        return None
+    out = r.stdout or ""
+    git_part = ""
+    if sep2 in out:
+        out, git_part = out.split(sep2, 1)
+        git_part = git_part.strip()
+    if sep1 in out:
+        ip_part, block_part = out.split(sep1, 1)
+        # strip() removes the trailing newline that `echo` appends, so an
+        # empty bashrc block stays empty (falsy) - matching the semantics of
+        # the original _read_wsl_block and keeping get_wsl_status's
+        # `if not block: return None` guard working correctly.
+        block_part = block_part.strip()
+    else:
+        ip_part, block_part = out, ""
+    ip = ip_part.strip() or "未获取到"
+    git_part = git_part if git_part else UNSET
+    return (ip, block_part, git_part)
 
-    Each wsl.exe invocation costs ~5s of process-startup overhead on a cold
-    WSL instance, so merging the commands saves ~10s of refresh latency.
+
+def get_wsl_ip_and_block():
+    """Fetch WSL IP, the proxy-manager shell block, and the WSL git proxy.
+
+    Walks the same distro list as writes (`_wsl_targets`): the first IP,
+    managed block, and git proxy found win. Each distro is one wsl.exe
+    call (the three reads stay merged to keep cold-start cost down).
     Returns (ip_str, block_str, git_proxy_str)."""
     try:
-        # Generate random separators per call so they can never collide with
-        # user content in ~/.bashrc (unlike a fixed string like "<<PM_SEP>>").
-        sep1 = uuid.uuid4().hex
-        sep2 = uuid.uuid4().hex
-        cmd = (
-            "hostname -I 2>/dev/null | awk '{print $1}';"
-            f"echo '{sep1}';"
-            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc ~/.zshrc 2>/dev/null; "
-            "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null;"
-            f"echo '{sep2}';"
-            "git config --global --get http.proxy 2>/dev/null;"
-            # git --get exits 1 when the key is unset, so the raw exit code can't
-            # distinguish "works" from "fails"; `true` normalizes it to 0 iff
-            # bash actually ran. A non-zero code means wsl.exe itself failed
-            # (feature disabled / no distro installed).
-            "true"
-        )
-        r = subprocess.run(
-            ["wsl", "-e", "bash", "-c", cmd],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
-        )
-        if r.returncode != 0:
+        ip_found, block_found, git_found = "", "", UNSET
+        any_ok = False
+        for d in _wsl_targets():
+            got = _wsl_ip_and_block_one(d)
+            if got is None:
+                continue
+            any_ok = True
+            ip, block, git = got
+            if ip and ip != "未获取到" and not ip_found:
+                ip_found = ip
+            if block and not block_found:
+                block_found = block
+            if git and git != UNSET and git_found == UNSET:
+                git_found = git
+            if ip_found and block_found and git_found != UNSET:
+                break
+        if not any_ok:
             return ("WSL 不可用", "", UNSET)
-        out = r.stdout
-        git_part = ""
-        if sep2 in out:
-            out, git_part = out.split(sep2, 1)
-            git_part = git_part.strip()
-        if sep1 in out:
-            ip_part, block_part = out.split(sep1, 1)
-            # strip() removes the trailing newline that `echo` appends, so an
-            # empty bashrc block stays empty (falsy) - matching the semantics of
-            # the original _read_wsl_block and keeping get_wsl_status's
-            # `if not block: return None` guard working correctly.
-            block_part = block_part.strip()
-        else:
-            ip_part, block_part = out, ""
-        ip = ip_part.strip()
-        ip = ip if ip else "未获取到"
-        git_part = git_part if git_part else UNSET
-        return (ip, block_part, git_part)
+        return (ip_found or "未获取到", block_found, git_found)
     except Exception:
         log_exception("get_wsl_ip_and_block")
         return ("WSL 未运行", "", UNSET)
@@ -552,15 +576,25 @@ def _read_wsl_block() -> str:
     """Return the text between the proxy-manager markers in ~/.bashrc,
     ~/.zshrc, and the fish conf.d file (empty if absent). Scoping reads to
     this block avoids mis-picking up commented or user-written export lines
-    elsewhere in the file."""
+    elsewhere in the file. Walks `_wsl_targets` so a block on a non-default
+    distro is still visible when writes go to every distro."""
     try:
-        r = subprocess.run(
-            ["wsl", "-e", "bash", "-c",
-             f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' ~/.bashrc ~/.zshrc 2>/dev/null; "
-             "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
+        cmd = (
+            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' "
+            "~/.bashrc ~/.zshrc 2>/dev/null; "
+            "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null"
         )
-        return r.stdout
+        for d in _wsl_targets():
+            r = subprocess.run(
+                ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", cmd],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            text = (r.stdout or "").strip()
+            if text:
+                return r.stdout
+        return ""
     except Exception:
         return ""
 
@@ -1052,7 +1086,10 @@ def _wsl_write_failure(r, distro):
     text (redirected output may be UTF-16 and decodes as mojibake)."""
     if not wsl_available():
         return "未检测到可用的 WSL 发行版"
-    detail = (r.stderr or "").strip().splitlines()
+    stderr = r.stderr or b""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    detail = stderr.strip().splitlines()
     detail = detail[0].strip() if detail else ""
     if detail and detail.isascii():
         return f"写入 WSL 代理配置失败：{detail}"
@@ -1285,10 +1322,16 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
 
 
 def get_git_proxy_win():
-    """Read git's global http.proxy on Windows ('未设置' when unset, '未检测到'
-    when git is unavailable)."""
+    """Read git's global http.proxy on Windows, falling back to https.proxy
+    ('未设置' when unset, '未检测到' when git is unavailable)."""
     try:
         r = subprocess.run(["git", "config", "--global", "--get", "http.proxy"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        v = r.stdout.strip()
+        if v:
+            return v
+        r = subprocess.run(["git", "config", "--global", "--get", "https.proxy"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
                            creationflags=subprocess.CREATE_NO_WINDOW)
         v = r.stdout.strip()
@@ -1442,7 +1485,7 @@ def get_npm_proxy():
         return UNSET
     except OSError:
         return UNDETECTED
-    return _ini_get(text, "proxy") or UNSET
+    return _ini_get(text, "proxy") or _ini_get(text, "https-proxy") or UNSET
 
 
 def set_npm_proxy(host, port, enable=True, scheme="http", user="", password=""):
@@ -1595,7 +1638,8 @@ def get_npm_proxy_wsl(distro=None):
                 return UNDETECTED
             if data is None:
                 continue
-            v = _ini_get(_decode_ini_bytes(data)[0], "proxy")
+            text = _decode_ini_bytes(data)[0]
+            v = _ini_get(text, "proxy") or _ini_get(text, "https-proxy")
             if v:
                 return v
         return UNSET
@@ -1616,7 +1660,8 @@ def get_pip_proxy_wsl(distro=None):
                     return UNDETECTED
                 if data is None:
                     continue
-                v = _ini_get(_decode_ini_bytes(data)[0], "proxy")
+                v = _ini_get(_decode_ini_bytes(data)[0], "proxy",
+                             section="global")
                 if v:
                     return v
         return UNSET

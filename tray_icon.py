@@ -7,7 +7,7 @@ import time
 
 import proxy_manager as pm
 from config_store import TRAY_ICON, load_config
-from window_win32 import _sync_maximized_icon, user32
+from window_win32 import _clamp_rect_visible, _sync_maximized_icon, user32
 
 
 def _own_executable_paths():
@@ -163,13 +163,14 @@ def _restore_window_geometry(api):
                 # The window is still at its fresh default size: seed the
                 # maximize toggle's "prev bounds" with the SAVED rect so the
                 # later restore lands there instead of on the default.
-                api._prev_bounds = tuple(r)
+                api._prev_bounds = tuple(_clamp_rect_visible(*r))
                 seeded = True
             api._toggle_maximize(keep_prev=seeded)  # sizes to the work area
             _sync_maximized_icon()
             return
         r = api._win_rect
         if _saved_rect_ok(r):
+            r = _clamp_rect_visible(*r)
             user32.SetWindowPos(hwnd, 0, r[0], r[1],
                                 r[2] - r[0], r[3] - r[1], 0x0004)
     except Exception:

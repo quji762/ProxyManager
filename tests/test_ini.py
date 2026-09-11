@@ -1,6 +1,7 @@
 """Surgical INI editing for npm/pip config files."""
 
 from proxy_manager import _eol_of, _ini_edit, _ini_get
+import proxy_manager as pm
 
 
 def test_ini_get_quoted_and_equals():
@@ -40,3 +41,12 @@ def test_ini_edit_section_append():
 def test_eol_of():
     assert _eol_of("a\r\nb\r\n") == "\r\n"
     assert _eol_of("a\nb\n") == "\n"
+
+
+def test_get_npm_proxy_falls_back_to_https_proxy(tmp_path, monkeypatch):
+    """A .npmrc with only https-proxy must still count as configured —
+    otherwise enable overwrites it without stashing and disable drops it."""
+    npmrc = tmp_path / ".npmrc"
+    npmrc.write_text("https-proxy = http://old:1\n", encoding="utf-8")
+    monkeypatch.setattr(pm, "NPM_CONFIG_PATH", str(npmrc))
+    assert pm.get_npm_proxy() == "http://old:1"

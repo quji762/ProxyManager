@@ -116,6 +116,7 @@ _SAVE_KEYS = (
     "npm", "pip", "npmwsl", "pipwsl", "pin", "mode", "ports",
     "autostart", "bg_path", "bg_dim", "card_alpha", "speed_full",
     "quit_clear", "wsl_all_distros", "close_hint_done", "restore",
+    "applied",
     "win_rect", "win_max",
 )
 
@@ -129,6 +130,37 @@ def valid_host(h) -> bool:
         and all(c in "abcdefghijklmnopqrstuvwxyz"
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_" for c in h) \
         and "://" not in h and ":" not in h
+
+
+def _load_applied(raw, fallback):
+    """Validate the persisted applied-* address, or copy the form fields.
+
+    Legacy configs have no `applied` key; treating the form fields as
+    applied matches the previous startup behavior (no worse than today).
+    """
+    if not isinstance(raw, dict):
+        return dict(fallback)
+    host = str(raw.get("host") or "")
+    port = str(raw.get("port") or "")
+    scheme = str(raw.get("scheme") or "http").strip().lower()
+    user = str(raw.get("user") or "")
+    password = str(raw.get("password") or "")
+    if password:
+        password = _dpapi_decrypt(password)
+    if not valid_host(host):
+        host = fallback["host"]
+    if pm.is_valid_port(port):
+        port = str(int(port))
+    else:
+        port = fallback["port"]
+    if not pm.is_valid_scheme(scheme):
+        scheme = "http"
+    if not pm.is_valid_userinfo(user):
+        user = ""
+    if not pm.is_valid_userinfo(password):
+        password = ""
+    return {"host": host, "port": port, "scheme": scheme,
+            "user": user, "password": password}
 
 
 def load_config():
@@ -228,6 +260,12 @@ def load_config():
     out["win_max"] = bool(cfg.get("win_max", False))
     restore = cfg.get("restore")
     out["restore"] = restore if isinstance(restore, dict) else {}
+    # Last address actually written to endpoints. Distinct from the form
+    # fields (host/port/…) which persistSoon may save before switch_port.
+    out["applied"] = _load_applied(cfg.get("applied"), {
+        "host": out["host"], "port": out["port"], "scheme": out["scheme"],
+        "user": out["user"], "password": out["password"],
+    })
     if migrated:
         try:
             save_config(out)
@@ -259,6 +297,12 @@ def save_config(cfg):
             # Encrypt password with DPAPI before persisting
             if "password" in save_data and save_data["password"]:
                 save_data["password"] = _dpapi_encrypt(save_data["password"])
+            if "applied" in save_data and isinstance(save_data["applied"], dict):
+                ap = dict(save_data["applied"])
+                pw = ap.get("password")
+                if pw and not str(pw).startswith(_DPAPI_PREFIX):
+                    ap["password"] = _dpapi_encrypt(str(pw))
+                save_data["applied"] = ap
             cur.update(save_data)
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(cur, f, indent=2, ensure_ascii=False)

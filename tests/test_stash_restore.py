@@ -136,6 +136,51 @@ def test_ps_reenable_after_port_change_disables_cleanly(tmp_path, monkeypatch):
     assert fake.no_proxy == ""
 
 
+def test_npm_reenable_after_port_change_does_not_stash_ours(tmp_path, monkeypatch):
+    """Same contract as PowerShell: enable @7897 → enable @7890 → disable
+    must not restore 7897 (it was this tool's leftover, not user state)."""
+    api = _make_api(tmp_path, monkeypatch)
+    current = {"url": None}
+
+    def get_npm():
+        return current["url"] or pm.UNSET
+
+    def set_npm(host, port, enable=True, scheme="http", user="", password=""):
+        url = pm.build_proxy_url(host, port, scheme, user, password)
+        current["url"] = url if enable else None
+        return True
+
+    with patch("js_api.pm.get_npm_proxy", side_effect=get_npm), \
+         patch("js_api.pm.set_npm_proxy", side_effect=set_npm):
+        assert api.do_toggle("npm", True, "127.0.0.1", "7897")["ok"] is True
+        assert api._restore.get("npm") is None
+        assert api.do_toggle("npm", True, "127.0.0.1", "7890")["ok"] is True
+        assert api._restore.get("npm") is None
+        r = api.do_toggle("npm", False)
+
+    assert r["ok"] is True
+    assert "restored" not in r
+    assert current["url"] is None
+
+
+def test_npmwsl_does_not_stash_nat_gateway_url(tmp_path, monkeypatch):
+    """NAT mode writes the gateway IP; re-enable must not treat that URL as
+    a user-configured proxy (disable used to 'restore' it, needing two offs)."""
+    api = _make_api(tmp_path, monkeypatch)
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    gw_url = "http://172.24.0.1:7897"
+    current = {"url": gw_url}
+
+    with patch("js_api.pm.get_wsl_gateway_ip", return_value="172.24.0.1"), \
+         patch("js_api.pm.get_wsl_network_mode", return_value="NAT"), \
+         patch("js_api.pm.get_npm_proxy_wsl",
+               side_effect=lambda: current["url"] or pm.UNSET), \
+         patch("js_api.pm.set_npm_proxy_wsl", return_value=True):
+        assert api.do_toggle("npmwsl", True, "127.0.0.1", "7897")["ok"] is True
+        assert api._restore.get("npmwsl") is None
+
+
 def test_sys_reenable_same_addr_strips_our_bypass_entries(tmp_path, monkeypatch):
     """Enable sys twice at the same address, then disable: the bypass list
     must not keep our merged entries (they used to be stashed and written

@@ -61,6 +61,31 @@ def test_save_preserves_unknown_keys(tmp_path, monkeypatch):
     assert raw["port"] == "7890"
 
 
+def test_applied_roundtrip_and_legacy_fallback(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.json"
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
+    # Legacy file: no applied key → form fields are used.
+    cfg_file.write_text(json.dumps({"host": "10.0.0.1", "port": "1080"}),
+                        encoding="utf-8")
+    cfg = config_store.load_config()
+    assert cfg["applied"]["host"] == "10.0.0.1"
+    assert cfg["applied"]["port"] == "1080"
+    cfg["applied"] = {"host": "127.0.0.1", "port": "7897",
+                      "scheme": "socks5", "user": "alice", "password": "s3cret"}
+    cfg["host"], cfg["port"] = "10.0.0.1", "1080"
+    assert config_store.save_config(cfg) is True
+    raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert raw["applied"]["port"] == "7897"
+    assert raw["applied"]["scheme"] == "socks5"
+    assert str(raw["applied"]["password"]).startswith("DPAPI:")
+    assert "s3cret" not in raw["applied"]["password"]
+    back = config_store.load_config()
+    assert back["applied"]["password"] == "s3cret"
+    assert back["applied"]["user"] == "alice"
+    assert back["host"] == "10.0.0.1"
+
+
 def test_save_config_failure_keeps_previous_file(tmp_path, monkeypatch):
     """Regression: open('w') truncated config.json before dumping, so a
     mid-write crash (disk full) destroyed the file including the restore
