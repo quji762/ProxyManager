@@ -198,12 +198,15 @@ def test_restart_wsl_skips_foreign_git_npm_pip(tmp_path, monkeypatch):
 
 def test_restart_wsl_rewrites_stale_gateway(tmp_path, monkeypatch):
     """A URL this tool wrote with the previous NAT gateway must be updated
-    after the subnet moves."""
+    after the subnet moves. The rewrite is gated on the persisted
+    _wsl_written record: the stale file URL equals what we last wrote, the
+    current gateway does not matter."""
     api = _make_api(tmp_path, monkeypatch)
     api.host, api.port = "127.0.0.1", "7897"
     api.applied_host, api.applied_port = "127.0.0.1", "7897"
     api.applied_kw = {"scheme": "http", "user": "", "password": ""}
     stale = "http://172.24.0.1:7897"
+    api._wsl_written = {"gitwsl": stale, "npmwsl": stale, "pipwsl": stale}
     calls = []
 
     def rec(name):
@@ -226,3 +229,7 @@ def test_restart_wsl_rewrites_stale_gateway(tmp_path, monkeypatch):
         assert api.restart_wsl()["ok"] is True
 
     assert calls == ["wsl", "git", "npm", "pip"]
+    # The rewritten (new-gateway) URLs replace the stale records.
+    fresh = "http://172.25.0.1:7897"
+    assert api._wsl_written == {"gitwsl": fresh, "npmwsl": fresh,
+                                "pipwsl": fresh}

@@ -124,11 +124,11 @@ class Api:
         }
         self._speed_lock = threading.Lock()
         # Serializes endpoint mutations (toggles, port switch, tray-quit
-        # clear on the pystray thread): _restore / applied_* / _git_managed
-        # are only consistent when read and written inside one critical
-        # section. Must stay the OUTERMOST lock — _speed_lock and _cfg_lock
-        # are acquired inside it, never the reverse. RLock because do_toggle
-        # re-enters itself through _restore_previous.
+        # clear on the pystray thread): _restore / applied_* / _git_managed /
+        # _wsl_written are only consistent when read and written inside one
+        # critical section. Must stay the OUTERMOST lock — _speed_lock and
+        # _cfg_lock are acquired inside it, never the reverse. RLock because
+        # do_toggle re-enters itself through _restore_previous.
         self._endpoint_mutation_lock = threading.RLock()
         self._speed_prev = pm.get_net_counters()
         self._speed = {"up": "0 B/s", "dn": "0 B/s", "dn_num": 0.0,
@@ -145,6 +145,20 @@ class Api:
         # Last URL this tool wrote to each git endpoint, so a disable after
         # the user edited host/port still unsets the old value.
         self._git_managed = {"gitwin": None, "gitwsl": None}
+        # Last FULL URL this tool wrote to each WSL-side endpoint — the
+        # gateway-rewritten string that actually landed in the distro config
+        # (_wsl_url_target turns a loopback host into the NAT gateway IP).
+        # Persisted as config "wsl_written" and DPAPI-encrypted like the
+        # restore stash (the URL may carry user:pass@). _is_managed_wsl_url
+        # answers "is this file URL ours?" by exact comparison with the
+        # record: a user-configured LAN proxy that merely shares the applied
+        # port can never match, while the stale-gateway form after a NAT
+        # subnet change still does (the file keeps what we wrote; only the
+        # current gateway moved). Missing record → always treat as user state.
+        self._wsl_written = {"gitwsl": None, "npmwsl": None, "pipwsl": None}
+        for t, v in _stash_decrypt(cfg.get("wsl_written") or {}).items():
+            if t in self._wsl_written and isinstance(v, str) and v:
+                self._wsl_written[t] = v
         self._tray_ok = False  # close falls back to quit when no tray exists
         self._restore = _stash_decrypt(cfg.get("restore") or {})
         pm.set_wsl_apply_all(cfg.get("wsl_all_distros", True))
@@ -192,7 +206,9 @@ class Api:
                 # host/port 与网速探测线程共享：变更成对持锁提交，避免撕裂的
                 # (host, port) 组合被拿去做一次指向错误地址的 TCP 探测
                 with self._speed_lock:
-                    if "host" in data:
+                    # host 为 None/空一律跳过（不覆盖旧值）：str(None)="None"
+                    # 是纯字母，valid_host 挡不住，会把 "None" 当主机落库。
+                    if "host" in data and data["host"] is not None:
                         h = str(data["host"]).strip()
                         if valid_host(h):
                             self.host = h
@@ -202,9 +218,17 @@ class Api:
                             self.port = str(int(p))
                 if "scheme" in data and pm.is_valid_scheme(data["scheme"]):
                     self.scheme = str(data["scheme"]).strip().lower()
-                if "user" in data and pm.is_valid_userinfo(data["user"]):
+                # user/password 仅 None 跳过：is_valid_userinfo(None) 恒为
+                # True，str(None)="None" 会落库甚至被 DPAPI 加密。空字符串
+                # 仍采纳（＝清空凭据）：前端没有独立的"清除凭据"按钮，但
+                # authRow 的两个输入框可以直接删空，change → applyAddress →
+                # switch_port/persistSoon 会把空串传下来——这是 UI 实际存在
+                # 的清空凭据交互，必须保留。
+                if "user" in data and data["user"] is not None \
+                        and pm.is_valid_userinfo(data["user"]):
                     self.user = str(data["user"])
-                if "password" in data and pm.is_valid_userinfo(data["password"]):
+                if "password" in data and data["password"] is not None \
+                        and pm.is_valid_userinfo(data["password"]):
                     self.password = str(data["password"])
                 if "lang" in data and str(data["lang"]) in ("zh", "en"):
                     cfg["lang"] = str(data["lang"])
@@ -226,7 +250,10 @@ class Api:
                             continue
                         if 1 <= pi <= 65535 and pi not in seen:
                             seen.append(pi)
-                    cfg["ports"] = seen[:12] or DEFAULT_PORTS
+                    # 显式空列表原样持久化：`or DEFAULT_PORTS` 会把用户删光的
+                    # 预设静默复活成默认端口。键缺失时 load_config 仍回默认，
+                    # 前端 renderPortPop 已有空态。
+                    cfg["ports"] = seen[:12]
                 if "autostart" in data:
                     cfg["autostart"] = bool(data["autostart"])
                 if "bg_path" in data:
@@ -283,6 +310,7 @@ class Api:
                 # 加密的是函数入口处的快照（见 save_config 开头注释）。
                 cfg["restore"] = _stash_encrypt(restore_snapshot)
                 cfg["applied"] = self._applied_dict()
+                cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
                 if not save_config(cfg):
                     return False
         return True
@@ -448,6 +476,8 @@ class Api:
             # 暂存值 DPAPI 加密后落盘（含用户原代理凭据，不应明文持久化）
             cfg["restore"] = _stash_encrypt(self._restore)
             cfg["applied"] = self._applied_dict()
+            # WSL 侧"最后写入 URL"记录可能带 applied 凭据，同机制加密落盘
+            cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
             save_config(cfg)
 
     def _detected_url(self, target):
@@ -533,10 +563,13 @@ class Api:
         if cur in self._ours_proxy_urls(target):
             return
         # NAT 子网在工具外变化后的"陈旧网关"形式同样是本工具写的 URL：
-        # 当作用户代理暂存会让关闭时把它当用户状态"恢复"回来。
-        if target in ("gitwsl", "npmwsl", "pipwsl") and self._is_managed_wsl_url(
-            cur, self.applied_host, self.applied_port, self.applied_kw
-        ):
+        # 当作用户代理暂存会让关闭时把它当用户状态"恢复"回来。判定依据是
+        # "最后写入 URL"的持久化记录（精确相等，含网关改写形态）——工具写入
+        # 后文件未变、变的只是当前网关，所以陈旧网关恰好等于记录；用户手工
+        # 配置的同端口 LAN 代理则不等于记录。无记录一律当作用户状态暂存
+        # 还原：宁可工具自己的旧 URL 被多恢复一次，也不冒覆盖用户配置的风险。
+        if target in ("gitwsl", "npmwsl", "pipwsl") \
+                and self._is_managed_wsl_url(cur, target):
             return
         self._restore[target] = cur
         self._persist_restore()
@@ -715,12 +748,21 @@ class Api:
                 if ret is not True:
                     return {"error": f"{label}: {ret}"}
                 self._git_managed[target] = self._managed_url(gh, gp, **kw)
+                if use_wsl and not _restoring:
+                    # 记录本次实际写入 WSL 配置的完整 URL（gh/gp 已含网关
+                    # 改写）。恢复路径写入的是用户原 URL，不属于本工具，不记录。
+                    self._wsl_written[target] = self._managed_url(gh, gp, **kw)
             else:
                 gh, gp, gkw = self._git_unset_target(target)
                 ret = pm.set_git_proxy(gh, gp, False, use_wsl=use_wsl, **gkw)
                 self._git_managed[target] = None
                 if ret is not True:
                     return {"error": f"{label}: {ret}"}
+                if use_wsl:
+                    # 关闭成功后该端点不再有本工具写入的 URL：清掉记录，
+                    # 之后用户手写的任何 URL（哪怕碰巧相同）都按用户状态处理。
+                    self._wsl_written[target] = None
+                    self._persist_restore()
         elif target in self._ENDPOINT_INFO:
             setter_name, label, detected_name, on_note = self._ENDPOINT_INFO[target]
             setter = getattr(pm, setter_name)
@@ -745,6 +787,14 @@ class Api:
                 return {"error": f"{label}: {ret}"}
             if on and on_note:
                 notes.append(on_note)
+            if on and not _restoring and target in ("npmwsl", "pipwsl"):
+                # setter 内部做 NAT 网关改写：按同一规则（_wsl_url_target）
+                # 记录最终落盘的完整 URL。恢复路径写入的是用户原 URL，不记录。
+                self._record_wsl_write(target, h, p, kw)
+            elif not on and target in ("npmwsl", "pipwsl"):
+                # 关闭成功后清掉记录（理由同 gitwsl disable）。
+                self._wsl_written[target] = None
+                self._persist_restore()
         else:
             return {"error": f"未知端点 {target}"}
         if on and not _restoring:
@@ -833,20 +883,20 @@ class Api:
         # Detect what is currently on. Only values equal to this tool's
         # managed URL count as "ours" — a proxy the user configured by hand
         # must survive the switch untouched (one wsl.exe call for the WSL side).
-        # WSL 侧端点额外接受"陈旧网关"形式（NAT 子网在工具外变化前后只差
-        # host）：精确相等会让端口切换跳过三个 WSL 端点，留下指向旧网关
-        # + 旧端口的死代理。
+        # WSL 侧端点：与"最后写入 URL"持久化记录精确相等才算本工具的
+        # （陈旧网关形态等于记录，因为工具写入后文件未变）；用户手工配置的
+        # 同端口 LAN 代理不等于记录，端口切换绝不改写。
         wsl_state = self.refresh_item("wsl")
         enabled = {
             "ps": pm.get_ps_status() == managed_url,
             "sys": pm.get_sys_proxy() == sys_url,
             "wsl": bool((wsl_state or {}).get("on")),
             "gitwin": pm.get_git_proxy_win() == managed_url,
-            "gitwsl": self._is_managed_wsl_url((wsl_state or {}).get("git"), old_h, old_p, old_kw),
+            "gitwsl": self._is_managed_wsl_url((wsl_state or {}).get("git"), "gitwsl"),
             "npm": pm.get_npm_proxy() == managed_url,
             "pip": pm.get_pip_proxy() == managed_url,
-            "npmwsl": self._is_managed_wsl_url(pm.get_npm_proxy_wsl(), old_h, old_p, old_kw),
-            "pipwsl": self._is_managed_wsl_url(pm.get_pip_proxy_wsl(), old_h, old_p, old_kw),
+            "npmwsl": self._is_managed_wsl_url(pm.get_npm_proxy_wsl(), "npmwsl"),
+            "pipwsl": self._is_managed_wsl_url(pm.get_pip_proxy_wsl(), "pipwsl"),
         }
         if not any(enabled.values()):
             with self._speed_lock:
@@ -891,6 +941,8 @@ class Api:
         if dis_errs:
             for tgt in disabled_ok:
                 self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)
+            # 回滚的重新启用会更新 _wsl_written 记录，一并落盘
+            self._persist_restore()
             return {"ok": False, "applied": [],
                     "error": "；".join(dis_errs.values()), "note": None}
 
@@ -930,6 +982,9 @@ class Api:
                 notes.append("NAT 模式已自动改用宿主网关 IP。")
         if cfg_err:
             errs["config"] = cfg_err
+        # Phase 2 的成功启用更新了 _wsl_written 记录，随 restore/applied
+        # 一起落盘，重启后 switch_port 仍能识别"这是本工具写的"。
+        self._persist_restore()
         ok = not errs
         return {"ok": ok, "applied": applied,
                 "error": "；".join(errs.values()) if errs else None,
@@ -1002,6 +1057,8 @@ class Api:
                 if use_wsl else (new_host, new_port)
             ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **new_kw)
             if ret is True:
+                if use_wsl:
+                    self._wsl_written[target] = self._managed_url(gh, gp, **new_kw)
                 return (None, self._managed_url(gh, gp, **new_kw), None)
             return (f"{label}: {ret}", None, None)
         if target == "npm":
@@ -1015,6 +1072,8 @@ class Api:
             fn = pm.set_npm_proxy_wsl if target == "npmwsl" \
                 else pm.set_pip_proxy_wsl
             ret = fn(new_host, new_port, True, **new_kw)
+            if ret is True:
+                self._record_wsl_write(target, new_host, new_port, new_kw)
             return (None if ret is True else f"{label}: {ret}", None, None)
         return (None, None, None)
 
@@ -1108,43 +1167,53 @@ class Api:
             if wsl_state and wsl_state.get("on"):
                 pm.set_wsl_proxy(h, p, True, **kw)
             git = (wsl_state or {}).get("git")
-            if self._is_managed_wsl_url(git, h, p, kw):
+            rewrote = False
+            if self._is_managed_wsl_url(git, "gitwsl"):
                 gh, gp = self._wsl_url_target(h, p)
                 pm.set_git_proxy(gh, gp, True, use_wsl=True, **kw)
                 self._git_managed["gitwsl"] = self._managed_url(gh, gp, **kw)
-            if self._is_managed_wsl_url(npm, h, p, kw):
+                self._wsl_written["gitwsl"] = self._managed_url(gh, gp, **kw)
+                rewrote = True
+            if self._is_managed_wsl_url(npm, "npmwsl"):
                 pm.set_npm_proxy_wsl(h, p, True, **kw)
-            if self._is_managed_wsl_url(pipv, h, p, kw):
+                self._record_wsl_write("npmwsl", h, p, kw)
+                rewrote = True
+            if self._is_managed_wsl_url(pipv, "pipwsl"):
                 pm.set_pip_proxy_wsl(h, p, True, **kw)
+                self._record_wsl_write("pipwsl", h, p, kw)
+                rewrote = True
+            if rewrote:
+                # 重写后的新网关 URL 记录落盘，重启/下次判定仍然可用
+                self._persist_restore()
         return {"ok": True, "error": None}
 
-    def _is_managed_wsl_url(self, detected, host, port, kw):
-        """True if `detected` is a URL this tool would have written on the
-        WSL side: the current loopback form, the current NAT-gateway form,
-        or the same scheme/port/userinfo with a stale gateway host (NAT
-        subnet moved by wsl --shutdown). A user-configured proxy for a
-        different endpoint must not be rewritten."""
-        parsed = self._adopt_parsed(detected)
-        if not parsed:
-            return False
-        host, port = str(host), str(int(port))
-        kw = {
-            "scheme": kw.get("scheme") or "http",
-            "user": kw.get("user") or "",
-            "password": kw.get("password") or "",
-        }
-        candidates = {pm.build_proxy_url(host, port, **kw)}
+    def _record_wsl_write(self, target, host, port, kw):
+        """Remember the exact URL this tool just wrote to a WSL-side endpoint:
+        _wsl_url_target applies the same NAT gateway rewrite as the pm setters
+        (set_npm_proxy_wsl/set_pip_proxy_wsl call nat_host internally), so the
+        recorded string is what actually lands in the distro config.
+        _is_managed_wsl_url compares a detected URL against this record."""
+        if target not in ("gitwsl", "npmwsl", "pipwsl"):
+            return
         wh, wp = self._wsl_url_target(host, port)
-        candidates.add(pm.build_proxy_url(wh, wp, **kw))
-        if str(detected).strip() in candidates:
-            return True
-        if host.lower() not in pm.LOOPBACK_HOSTS:
+        self._wsl_written[target] = pm.build_proxy_url(wh, wp, **kw)
+
+    def _is_managed_wsl_url(self, detected, target):
+        """True ONLY if `detected` is exactly the URL this tool last wrote to
+        `target` (the persisted "wsl_written" record, gateway rewrite
+        included). Replaces the old "same port/scheme/userinfo + non-loopback
+        host" heuristic, which misjudged a user-configured LAN proxy sharing
+        the applied port as our own stale-gateway leftover and deleted it.
+        Exact comparison keeps the stale-gateway cleanup working (after a NAT
+        subnet change the file still holds the URL we wrote; only the current
+        gateway moved) while no URL the tool did not write can ever match.
+        No record (never written, or lost) → user state: stash/restore."""
+        if target not in ("gitwsl", "npmwsl", "pipwsl") or not detected:
             return False
-        return (parsed["port"] == port
-                and parsed["scheme"] == kw["scheme"]
-                and parsed["user"] == kw["user"]
-                and parsed["password"] == kw["password"]
-                and parsed["host"].lower() not in pm.LOOPBACK_HOSTS)
+        recorded = self._wsl_written.get(target)
+        if not recorded:
+            return False
+        return str(detected).strip() == str(recorded).strip()
 
     def copy(self, text):
         """Clipboard fallback for pages where navigator.clipboard is

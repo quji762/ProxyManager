@@ -117,6 +117,7 @@ _SAVE_KEYS = (
     "autostart", "bg_path", "bg_dim", "card_alpha", "speed_full",
     "quit_clear", "wsl_all_distros", "close_hint_done", "restore",
     "applied",
+    "wsl_written",
     "win_rect", "win_max",
 )
 
@@ -221,6 +222,8 @@ def load_config():
 
     ports = cfg.get("ports")
     if isinstance(ports, list):
+        # 键存在（即使显式 []）就按清洗结果采纳：`if seen:` 会把用户删光的
+        # 预设静默复活成默认端口。键缺失时才回落 defaults。
         seen = []
         for p in ports:
             try:
@@ -229,8 +232,7 @@ def load_config():
                 continue
             if 1 <= pi <= 65535 and pi not in seen:
                 seen.append(pi)
-        if seen:
-            out["ports"] = seen[:12]
+        out["ports"] = seen[:12]
     try:
         d = float(cfg.get("bg_dim", defaults["bg_dim"]))
         out["bg_dim"] = min(0.8, max(0.0, d))
@@ -260,6 +262,10 @@ def load_config():
     out["win_max"] = bool(cfg.get("win_max", False))
     restore = cfg.get("restore")
     out["restore"] = restore if isinstance(restore, dict) else {}
+    # Last URL actually written to each WSL-side endpoint (raw/encrypted form;
+    # js_api decrypts via _stash_decrypt, same pattern as the restore stash).
+    wsl_written = cfg.get("wsl_written")
+    out["wsl_written"] = wsl_written if isinstance(wsl_written, dict) else {}
     # Last address actually written to endpoints. Distinct from the form
     # fields (host/port/…) which persistSoon may save before switch_port.
     out["applied"] = _load_applied(cfg.get("applied"), {

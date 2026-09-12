@@ -61,6 +61,28 @@ def test_save_preserves_unknown_keys(tmp_path, monkeypatch):
     assert raw["port"] == "7890"
 
 
+def test_explicit_empty_ports_list_roundtrips(tmp_path, monkeypatch):
+    """Regression: `if seen:` used to revive an explicit empty ports list
+    into DEFAULT_PORTS on every load — the user's cleared preset list must
+    survive save → load unchanged."""
+    cfg_file = tmp_path / "config.json"
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    cfg = config_store.load_config()
+    cfg["ports"] = []
+    assert config_store.save_config(cfg) is True
+    raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert raw["ports"] == []
+    assert config_store.load_config()["ports"] == []
+
+
+def test_missing_ports_key_still_defaults(tmp_path, monkeypatch):
+    """No ports key at all (legacy/fresh config) keeps the defaults."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"host": "127.0.0.1"}), encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    assert config_store.load_config()["ports"] == list(config_store.DEFAULT_PORTS)
+
+
 def test_applied_roundtrip_and_legacy_fallback(tmp_path, monkeypatch):
     cfg_file = tmp_path / "config.json"
     monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
