@@ -62,11 +62,22 @@ def _stash_encrypt(restore):
 
 
 def _stash_decrypt(restore):
+    def _plain(value):
+        if not value:
+            return value
+        plain = _dpapi_decrypt(value)
+        # _dpapi_decrypt 解密失败时原样返回（仍带 DPAPI: 前缀）。配置文件随
+        # 用户资料迁移后必然如此；把密文写回注册表环境变量会让终端继承一个
+        # 字面量 "DPAPI:..." 代理地址。置 None 表示不可恢复。
+        if isinstance(plain, str) and plain.startswith(_DPAPI_PREFIX):
+            return None
+        return plain
+
     out = {}
     for target, payload in (restore or {}).items():
         if isinstance(payload, str):
             # _dpapi_decrypt 自带 DPAPI: 前缀判断，旧版明文原样返回。
-            out[target] = _dpapi_decrypt(payload) if payload else payload
+            out[target] = _plain(payload) if payload else payload
             continue
         if not isinstance(payload, dict):
             out[target] = payload
@@ -75,12 +86,12 @@ def _stash_decrypt(restore):
         env = p.get("env")
         if isinstance(env, dict):
             p["env"] = {
-                k: (_dpapi_decrypt(v) if v else None)
+                k: _plain(v)
                 for k, v in env.items()
             }
         url = p.get("url")
         if url and str(url).startswith(_DPAPI_PREFIX):
-            p["url"] = _dpapi_decrypt(str(url))
+            p["url"] = _plain(str(url))
         out[target] = p
     return out
 
@@ -521,6 +532,12 @@ class Api:
         # disable "restore" our own URL, so the switch needed two clicks.
         if cur in self._ours_proxy_urls(target):
             return
+        # NAT 子网在工具外变化后的"陈旧网关"形式同样是本工具写的 URL：
+        # 当作用户代理暂存会让关闭时把它当用户状态"恢复"回来。
+        if target in ("gitwsl", "npmwsl", "pipwsl") and self._is_managed_wsl_url(
+            cur, self.applied_host, self.applied_port, self.applied_kw
+        ):
+            return
         self._restore[target] = cur
         self._persist_restore()
 
@@ -575,13 +592,38 @@ class Api:
         prev = self._restore.get(target)
         if isinstance(prev, dict):
             r = self._restore_stashed(target, prev)
-        else:
-            parsed = self._adopt_parsed(prev)
-            if not parsed:
-                return None
-            r = self.do_toggle(
-                target, True, parsed["host"], parsed["port"],
-                parsed["scheme"], parsed["user"], parsed["password"], True)
+            if r is None:
+                # 旧版 dict 形态暂存（npm/pip/git 等非 ps/sys 目标，legacy 形如
+                # {"url": ...}）不被 _restore_stashed 支持：按字符串暂存恢复。
+                # 不处理的话恢复永远失败且暂存永不清除，端点卡死在开启状态。
+                legacy = prev.get("url")
+                if not isinstance(legacy, str) or not legacy:
+                    self._restore.pop(target, None)
+                    self._persist_restore()
+                    # stash_dropped=True：调用方应继续执行正常关闭而不是提前返回
+                    return {"error": "暂存数据不完整且无法恢复，已从恢复列表移除", "stash_dropped": True}
+                prev = legacy
+            else:
+                return self._finish_restore(target, r)
+        if not isinstance(prev, str) or not prev:
+            return None
+        if prev.startswith(_DPAPI_PREFIX):
+            # _stash_decrypt 已把解密失败的值置 None；仍带前缀说明是旧版残留。
+            # 拖着永远解不开的暂存只会让端点反复报"恢复失败"，移除后用户可以
+            # 直接关闭该端点再手工重配。
+            self._restore.pop(target, None)
+            self._persist_restore()
+            return {"error": "暂存数据无法解密（DPAPI），已移除暂存；端点现在可以直接关闭",
+                    "stash_dropped": True}
+        parsed = self._adopt_parsed(prev)
+        if not parsed:
+            return None
+        r = self.do_toggle(
+            target, True, parsed["host"], parsed["port"],
+            parsed["scheme"], parsed["user"], parsed["password"], True)
+        return self._finish_restore(target, r)
+
+    def _finish_restore(self, target, r):
         if isinstance(r, dict) and r.get("ok"):
             self._restore.pop(target, None)
             self._persist_restore()
@@ -646,7 +688,12 @@ class Api:
         if (not on) and (not _restoring):
             restored = self._restore_previous(target)
             if restored is not None:
-                return restored
+                if not restored.get("stash_dropped"):
+                    return restored
+                # 暂存已移除（无法解密/残留损坏）：继续执行正常关闭。
+                # 否则 quit_clear 的退出清理会静默漏掉这个端点。
+                if restored.get("error"):
+                    notes.append(restored["error"])
 
         if target == "wsl":
             if on and h.lower() in pm.LOOPBACK_HOSTS \
@@ -690,6 +737,10 @@ class Api:
                     return {"error": f"{label}: {ret}"}
                 if on and sys_note:
                     notes.append(sys_note)
+                if on and pm.sys_proxy_per_machine():
+                    notes.append(
+                        "检测到 ProxySettingsPerUser=0（按机器策略管理代理）：本工具写入的用户级代理可能不生效"
+                    )
             elif ret is not True:
                 return {"error": f"{label}: {ret}"}
             if on and on_note:
@@ -790,17 +841,20 @@ class Api:
         # Detect what is currently on. Only values equal to this tool's
         # managed URL count as "ours" — a proxy the user configured by hand
         # must survive the switch untouched (one wsl.exe call for the WSL side).
+        # WSL 侧端点额外接受"陈旧网关"形式（NAT 子网在工具外变化前后只差
+        # host）：精确相等会让端口切换跳过三个 WSL 端点，留下指向旧网关
+        # + 旧端口的死代理。
         wsl_state = self.refresh_item("wsl")
         enabled = {
             "ps": pm.get_ps_status() == managed_url,
             "sys": pm.get_sys_proxy() == sys_url,
             "wsl": bool((wsl_state or {}).get("on")),
             "gitwin": pm.get_git_proxy_win() == managed_url,
-            "gitwsl": (wsl_state or {}).get("git") == wsl_managed_url,
+            "gitwsl": self._is_managed_wsl_url((wsl_state or {}).get("git"), old_h, old_p, old_kw),
             "npm": pm.get_npm_proxy() == managed_url,
             "pip": pm.get_pip_proxy() == managed_url,
-            "npmwsl": pm.get_npm_proxy_wsl() == wsl_managed_url,
-            "pipwsl": pm.get_pip_proxy_wsl() == wsl_managed_url,
+            "npmwsl": self._is_managed_wsl_url(pm.get_npm_proxy_wsl(), old_h, old_p, old_kw),
+            "pipwsl": self._is_managed_wsl_url(pm.get_pip_proxy_wsl(), old_h, old_p, old_kw),
         }
         if not any(enabled.values()):
             with self._speed_lock:

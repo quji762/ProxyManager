@@ -146,6 +146,14 @@ def main():
     window.events.loaded += _on_loaded
 
     def _on_closing():
+        if getattr(api, "_quitting", False):
+            # 托盘退出清理中：让窗口消失但拒绝销毁，清理完成后由
+            # quit_app 的 window.destroy() 收尾。
+            try:
+                window.hide()
+            except Exception:
+                pm.log_exception("hide_during_quit")
+            return False
         if api._tray_ok:
             api._save_geometry()
             window.hide()

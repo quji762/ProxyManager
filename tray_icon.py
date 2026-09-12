@@ -207,6 +207,9 @@ def _make_tray(api, window):
         # and cancels destruction, leaving an invisible process holding the
         # singleton mutex after the tray has already stopped.
         api._tray_ok = False
+        # 退出清理期间用户点窗口 X 会触发 _on_closing：无此标志时返回 True
+        # 销毁窗口 → webview 循环退出 → 进程杀死清理线程，留下半清理状态。
+        api._quitting = True
         try:
             api._save_geometry()
         except Exception:
@@ -235,6 +238,11 @@ def _make_tray(api, window):
         try:
             icon.stop()
         finally:
+            # 销毁前必须复位 _quitting：pywebview 的 destroy() 走 Form.Close()
+            # 仍会触发 closing 事件，_on_closing 对 _quitting 一律 return False
+            # 会取消销毁 → 进程永不退出并持有单例互斥体。此刻清理已完成、
+            # _tray_ok 已为 False，复位后 _on_closing 返回 True，正常销毁。
+            api._quitting = False
             window.destroy()
 
     lang = load_config().get("lang", "zh")

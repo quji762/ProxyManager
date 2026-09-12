@@ -323,11 +323,16 @@ def _wsl_ip_and_block_one(distro=""):
         # (feature disabled / no distro installed).
         "true"
     )
-    r = subprocess.run(
-        ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", cmd],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
-    )
+    try:
+        r = subprocess.run(
+            ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", cmd],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15, creationflags=subprocess.CREATE_NO_WINDOW
+        )
+    except subprocess.TimeoutExpired:
+        # 单个发行版损坏/首次启动卡死不应让整个 WSL 状态被判"未运行"，
+        # 更不能阻断后续发行版的读取。
+        return None
     if r.returncode != 0:
         return None
     out = r.stdout or ""
@@ -585,12 +590,15 @@ def _read_wsl_block() -> str:
             "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null"
         )
         for d in _wsl_targets():
-            r = subprocess.run(
-                ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", cmd],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            try:
+                r = subprocess.run(
+                    ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", cmd],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            except subprocess.TimeoutExpired:
+                continue
             text = (r.stdout or "").strip()
             if text:
                 return r.stdout
@@ -814,6 +822,21 @@ def _sys_proxy_server_to_url(server: str):
             or s.startswith("socks4://"):
         return s
     return f"http://{s}"
+
+
+def sys_proxy_per_machine() -> bool:
+    """企业策略 ProxySettingsPerUser=0 时 WinINET 使用 HKLM 机器级代理，
+    写 HKCU 的用户级设置虽然读写一致，浏览器却不会走——开关看似生效
+    实则无效。检测到时调用方应给出警示。"""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as k:
+            value, _ = winreg.QueryValueEx(k, "ProxySettingsPerUser")
+            return int(value) == 0
+    except (OSError, ValueError):
+        return False
 
 
 def get_sys_proxy():
@@ -1622,7 +1645,13 @@ def _wsl_edit_ini(distro, path, keys, url, equals, section=None):
     new = _ini_edit(text, keys, url, equals=equals, section=section, eol=eol)
     if new == text:
         return True
-    _wsl_push_file(distro, path, new.encode(enc))
+    try:
+        payload = new.encode(enc)
+    except (UnicodeEncodeError, LookupError):
+        # mbcs 对 decode 时的 U+FFFD 或区域外字符会 strict 失败，令关闭路径
+        # 静默"成功"而代理 URL 原样留在发行版里。回退 UTF-8 按字节写回。
+        payload = new.encode("utf-8")
+    _wsl_push_file(distro, path, payload)
     return True
 
 
