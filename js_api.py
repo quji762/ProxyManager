@@ -830,14 +830,6 @@ class Api:
             old_h, old_p = new_host, old_p if pm.is_valid_port(old_p) else new_port
         managed_url = pm.build_proxy_url(old_h, old_p, **old_kw)
         sys_url = pm.wininet_url(old_h, old_p, old_kw["scheme"])
-        # The WSL npm/pip endpoints write the gateway URL in NAT mode, so the
-        # "is this ours" comparison must use the same substituted URL.
-        wsl_managed_url = managed_url
-        if old_h.lower() in pm.LOOPBACK_HOSTS \
-                and pm.get_wsl_network_mode() != "Mirrored":
-            gw = pm.get_wsl_gateway_ip()
-            if gw:
-                wsl_managed_url = pm.build_proxy_url(gw, old_p, **old_kw)
         # Detect what is currently on. Only values equal to this tool's
         # managed URL count as "ours" — a proxy the user configured by hand
         # must survive the switch untouched (one wsl.exe call for the WSL side).
