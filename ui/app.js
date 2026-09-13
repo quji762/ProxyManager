@@ -215,7 +215,7 @@ const EP_DEFS = [
   { id: "pipwsl", lane: "wsl",  nameKey: "ep.pipwsl", descKey: "ep.pipwslDesc" },
 ];
 const state = { ps: false, sys: false, wsl: false, gitwin: false, gitwsl: false, npm: false, pip: false, npmwsl: false, pipwsl: false, busy: {} };
-const cfg = { ports: [], bg_path: "", bg_dim: 0.45, card_alpha: 0.92, close_hint_done: false, quit_clear: false, wsl_all_distros: true };
+const cfg = { ports: [], bg_path: "", bg_dim: 0.45, card_alpha: 0.92, close_hint_done: false, quit_clear: false, wsl_all_distros: true, wsl_written: {} };
 const ui = { pinned: false, maximized: false };
 
 /* ═══════════════ Endpoints render (two channel lanes) ═══════════════ */
@@ -461,25 +461,19 @@ function expectedUrl(kind) {
   return `${a.scheme}://${auth}${a.host}:${a.port}`;
 }
 /* Switch is ON only for THIS tool's URL (same contract as PowerShell /
-   system proxy). `allowNat` also accepts a different host — WSL NAT mode
-   rewrites 127.0.0.1 to the Windows gateway. A foreign git/npm/pip proxy
-   must show OFF so a click enables (and stashes) instead of deleting it. */
-function urlLooksOurs(v, kind, allowNat) {
+   system proxy). `allowNat` endpoints additionally accept the exact URL
+   this tool last wrote (`writtenUrl` — the NAT gateway rewrite form kept
+   in the backend's wsl_written record). A foreign git/npm/pip proxy must
+   show OFF so a click enables (and stashes) instead of deleting it. */
+function urlLooksOurs(v, kind, allowNat, writtenUrl) {
   if (v == null || UNSET.has(String(v))) return false;
   const s = String(v);
   if (s === expectedUrl(kind)) return true;
   if (kind === "sys" || !allowNat) return false;
-  const a = snapshotAddr();
-  let u;
-  try { u = new URL(s); } catch (_) { return false; }
-  const sch = (u.protocol || "").replace(":", "").toLowerCase();
-  const formSch = (a.scheme || "http").toLowerCase();
-  const schOk = sch === formSch || (sch === "socks5" && formSch.startsWith("socks"));
-  if (!schOk) return false;
-  if (String(u.port || "") !== String(a.port)) return false;
-  const dec = (x) => { try { return decodeURIComponent(x || ""); } catch (_) { return x || ""; } };
-  if (dec(u.username) !== (a.user || "") || dec(u.password) !== (a.password || "")) return false;
-  return (u.hostname || "") !== a.host;
+  // 精确比较，不做"同端口/协议/凭据 + 主机不同"的启发式：那会把用户手工
+  // 配置的同端口 LAN 代理误标为已开启，点击关闭一次即删——与后端
+  // _is_managed_wsl_url 的"无记录一律当用户状态"契约对齐
+  return !!writtenUrl && s === String(writtenUrl);
 }
 function confirmMessage(pre) {
   if (!pre) return "";
@@ -636,7 +630,7 @@ async function refreshAll() {
     wslProbed = true;  // the –/4 badge becomes real counts after first probe
     state.wsl = !!r.on;
     detected.gitwsl = r.git;
-    state.gitwsl = urlLooksOurs(r.git, null, true);
+    state.gitwsl = urlLooksOurs(r.git, null, true, cfg.wsl_written.gitwsl);
     detected.wsl_url = state.wsl ? r.vars.HTTP_PROXY : null;
     set("vWip", r.ip);
     set("vWslHttp", r.vars.HTTP_PROXY); set("vWslHttps", r.vars.HTTPS_PROXY);
@@ -668,14 +662,14 @@ async function refreshAll() {
   if (lane === "wsl") track(api.call("refresh_item", "npmwsl").then((v) => {
     anyOk = true;
     detected.npmwsl = v;
-    state.npmwsl = urlLooksOurs(v, null, true);
+    state.npmwsl = urlLooksOurs(v, null, true, cfg.wsl_written.npmwsl);
     set("vNpmWsl", v);
     renderEndpoints();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "pipwsl").then((v) => {
     anyOk = true;
     detected.pipwsl = v;
-    state.pipwsl = urlLooksOurs(v, null, true);
+    state.pipwsl = urlLooksOurs(v, null, true, cfg.wsl_written.pipwsl);
     set("vPipWsl", v);
     renderEndpoints();
   }).catch(() => {}));
@@ -1191,6 +1185,7 @@ async function boot() {
   cfg.close_hint_done = !!c.close_hint_done;
   cfg.quit_clear = !!c.quit_clear;
   cfg.wsl_all_distros = c.wsl_all_distros !== false;
+  cfg.wsl_written = c.wsl_written || {};
   applyAlpha(c.card_alpha ?? 0.92);
   speedFullMbps = Math.max(0.1, +c.speed_full || 40);
   cfg.bg_dim = c.bg_dim ?? 0.45;

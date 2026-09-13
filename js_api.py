@@ -187,6 +187,10 @@ class Api:
             "applied_scheme": self.applied_kw.get("scheme", "http"),
             "applied_user": self.applied_kw.get("user", ""),
             "applied_password": self.applied_kw.get("password", ""),
+            # WSL 侧"最后写入 URL"记录（内存明文，仅下发本机 UI）：前端徽章
+            # 以"精确等于记录"判定 ON，与后端 _is_managed_wsl_url 同契约，
+            # 取代会把用户同端口 LAN 代理误标为已开启的旧启发式
+            "wsl_written": {k: v for k, v in (self._wsl_written or {}).items() if v},
         }
 
     def save_config(self, data):
@@ -666,8 +670,29 @@ class Api:
             return r
         return r if isinstance(r, dict) else {"error": "恢复覆盖前的代理失败"}
 
+    def _quit_clear_owns(self, target):
+        """退出清理的归属判定：True 才对该端点执行 disable。
+
+        ps/sys/wsl 的关闭是外科式删除（只移除本工具写入的管理块/环境形态），
+        恒可执行。其余 URL 型端点遵守"无记录一律当用户状态"契约：有暂存
+        （本工具启用时记下的用户原值，关闭走恢复路径）或检测值等于本工具
+        最后写入/应用的 URL（_wsl_written 精确记录、applied 的直接/网关改写
+        形态）才算本工具所有；用户手工配置的任意代理一律跳过，绝不删除。
+        与 _stash_previous 对遗留值的判定同口径。"""
+        if target in ("ps", "sys", "wsl"):
+            return True
+        if self._restore.get(target):
+            return True
+        cur = self._detected_url(target)
+        if not cur:
+            return True  # 未配置任何代理：disable 是无害空操作
+        if target in ("gitwsl", "npmwsl", "pipwsl") \
+                and self._is_managed_wsl_url(cur, target):
+            return True
+        return cur in self._ours_proxy_urls(target)
+
     def clear_all_endpoints(self):
-        """Disable every endpoint (used by 退出时关闭代理). Restores stashed
+        """Disable every endpoint this tool owns (used by 退出时关闭代理). Restores stashed
         values when we had overwritten them. Holds the mutation lock for the
         WHOLE sequence: a concurrent UI toggle must not interleave with the
         quit path and leave half-cleared state."""
@@ -675,6 +700,10 @@ class Api:
             for t in ("ps", "sys", "wsl", "gitwin", "gitwsl", "npm", "pip",
                       "npmwsl", "pipwsl"):
                 try:
+                    if not self._quit_clear_owns(t):
+                        # 本工具从未写入（无暂存、无记录、检测值不等于
+                        # applied/管理 URL）：当作用户状态，退出清理不得触碰
+                        continue
                     self.do_toggle(t, False)
                 except Exception:
                     pm.log_exception(f"clear_all_endpoints:{t}")
@@ -1013,6 +1042,15 @@ class Api:
             uh, up, ukw = ctx["gitwsl_unset"] if target == "gitwsl" \
                 else (old_h, old_p, old_kw)
             ret = pm.set_git_proxy(uh, up, False, use_wsl=use_wsl, **ukw)
+            if ret is True:
+                # 与 _do_toggle 的 disable 成功路径同口径：关掉后清掉会话内
+                # 管理记录与"最后写入 URL"记录，此后文件里任何 URL（哪怕
+                # 碰巧相同）都按用户状态处理。否则 switch_port phase-2 启用
+                # 失败后记录残留，用户按原样手工重建同 URL 会被误判为工具所写
+                self._git_managed[target] = None
+                if use_wsl:
+                    self._wsl_written[target] = None
+                    self._persist_restore()
             return None if ret is True else f"{label}: {ret}"
         if target == "npm":
             ret = pm.set_npm_proxy(old_h, old_p, False, **old_kw)
@@ -1033,6 +1071,10 @@ class Api:
             fn = pm.set_npm_proxy_wsl if target == "npmwsl" \
                 else pm.set_pip_proxy_wsl
             ret = fn(wh, wp, False, **wkw)
+            if ret is True:
+                # 同 gitwsl：disable 成功即清"最后写入 URL"记录（_do_toggle 口径）
+                self._wsl_written[target] = None
+                self._persist_restore()
             return None if ret is True else f"{label}: {ret}"
         return None
 

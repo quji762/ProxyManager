@@ -241,3 +241,52 @@ def test_record_encrypted_at_rest(tmp_path, monkeypatch):
     api2 = _make_api(tmp_path, monkeypatch)
     assert api2._wsl_written["npmwsl"] == \
         "http://alice:s3cret@172.24.0.1:7897"
+
+
+class FakeWinEndpoint:
+    """Blanket unset like the real npm/pip config delete: any disable removes
+    whatever is configured, ours or not — which is exactly why quit-clear
+    must gate on ownership before calling the setter."""
+
+    def __init__(self, url=None):
+        self.url = url
+        self.disable_calls = 0
+
+    def get(self):
+        return self.url or pm.UNSET
+
+    def setter(self, host, port, enable=True, scheme="http",
+               user="", password=""):
+        if not enable:
+            self.disable_calls += 1
+            self.url = None
+        else:
+            self.url = pm.build_proxy_url(host, port, scheme, user, password)
+        return True
+
+
+def test_quit_clear_skips_user_configured_npm(tmp_path, monkeypatch):
+    """退出清理只关本工具写入的端点：用户手工配置的 npm 代理（无暂存、无
+    记录、不等于 applied）不得被删除——"无记录一律当用户状态"契约必须
+    覆盖退出清理路径（此前对 9 个端点无条件 disable，按检测值盲删）。"""
+    api = _make_api(tmp_path, monkeypatch)
+    npm = FakeWinEndpoint("http://10.0.0.8:10809")
+    with patch("js_api.pm.get_ps_status", return_value=pm.UNSET),          patch("js_api.pm.get_sys_proxy", return_value=pm.UNSET),          patch("js_api.pm.get_git_proxy_win", return_value=pm.UNSET),          patch("js_api.pm.get_npm_proxy", side_effect=npm.get),          patch("js_api.pm.get_pip_proxy", return_value=pm.UNSET),          patch("js_api.pm.get_npm_proxy_wsl", return_value=pm.UNSET),          patch("js_api.pm.get_pip_proxy_wsl", return_value=pm.UNSET),          patch("js_api.pm.set_ps_proxy", return_value=True),          patch("js_api.pm.set_sys_proxy", return_value=True),          patch("js_api.pm.set_git_proxy", return_value=True),          patch("js_api.pm.set_wsl_proxy", return_value=True),          patch("js_api.pm.set_npm_proxy", side_effect=npm.setter),          patch("js_api.pm.set_pip_proxy", return_value=True),          patch("js_api.pm.set_npm_proxy_wsl", return_value=True),          patch("js_api.pm.set_pip_proxy_wsl", return_value=True),          patch.object(api, "refresh_item",
+                      return_value={"on": False, "git": pm.UNSET}):
+        assert api.clear_all_endpoints() is True
+    assert npm.url == "http://10.0.0.8:10809"
+    assert npm.disable_calls == 0
+
+
+def test_quit_clear_still_disables_recorded_npmwsl(tmp_path, monkeypatch):
+    """有"最后写入 URL"记录的端点仍会被退出清理正常关闭并清掉记录。"""
+    api = _make_api(tmp_path, monkeypatch)
+    npmwsl = FakeWslEndpoint("172.24.0.1")
+    with _npmwsl_patches(npmwsl),          patch("js_api.pm.get_ps_status", return_value=pm.UNSET),          patch("js_api.pm.get_sys_proxy", return_value=pm.UNSET),          patch("js_api.pm.get_git_proxy_win", return_value=pm.UNSET),          patch("js_api.pm.get_npm_proxy", return_value=pm.UNSET),          patch("js_api.pm.get_pip_proxy", return_value=pm.UNSET),          patch("js_api.pm.set_ps_proxy", return_value=True),          patch("js_api.pm.set_sys_proxy", return_value=True),          patch("js_api.pm.set_git_proxy", return_value=True),          patch("js_api.pm.set_wsl_proxy", return_value=True),          patch("js_api.pm.set_npm_proxy", return_value=True),          patch("js_api.pm.set_pip_proxy", return_value=True),          patch("js_api.pm.set_pip_proxy_wsl", return_value=True),          patch.object(api, "refresh_item",
+                      return_value={"on": False, "git": pm.UNSET}):
+        assert api.do_toggle("npmwsl", True, "127.0.0.1", "7897")["ok"] is True
+        assert npmwsl.url is not None
+        assert api._wsl_written["npmwsl"]
+        assert api.clear_all_endpoints() is True
+    assert npmwsl.url is None
+    assert api._wsl_written["npmwsl"] is None
