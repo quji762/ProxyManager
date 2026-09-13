@@ -673,19 +673,24 @@ class Api:
     def _quit_clear_owns(self, target):
         """退出清理的归属判定：True 才对该端点执行 disable。
 
-        ps/sys/wsl 的关闭是外科式删除（只移除本工具写入的管理块/环境形态），
-        恒可执行。其余 URL 型端点遵守"无记录一律当用户状态"契约：有暂存
-        （本工具启用时记下的用户原值，关闭走恢复路径）或检测值等于本工具
-        最后写入/应用的 URL（_wsl_written 精确记录、applied 的直接/网关改写
-        形态）才算本工具所有；用户手工配置的任意代理一律跳过，绝不删除。
-        与 _stash_previous 对遗留值的判定同口径。"""
-        if target in ("ps", "sys", "wsl"):
+        统一按"检测值属于本工具"判定：检测值等于本工具最后写入/应用的 URL
+        （_wsl_written 精确记录、applied 的直接/网关改写形态）才算本工具
+        所有；用户手工配置（或中途改成）的任意代理一律跳过，绝不删除——
+        也不把启用前暂存的旧值恢复回来盖掉用户的新配置。ps/sys 并非外科式
+        （禁用 URL 由当前检测值重建，同样会删到用户配置），与 npm/pip/git
+        同口径对待；只有 wsl 端点的管理块删除是真正外科式，恒可执行。
+        wsl 侧端点（gitwsl/npmwsl/pipwsl）在无记录时直接判否，不为检测值
+        付出 WSL 子进程的退出时延（记录丢失按"无记录=用户状态"契约处理）。
+        检测值为空（未配置任何代理）视为无害空操作放行：有暂存时 do_toggle
+        的恢复路径恰好把用户原值装回去。"""
+        if target == "wsl":
             return True
-        if self._restore.get(target):
-            return True
+        if target in ("gitwsl", "npmwsl", "pipwsl") \
+                and not self._wsl_written.get(target):
+            return False
         cur = self._detected_url(target)
         if not cur:
-            return True  # 未配置任何代理：disable 是无害空操作
+            return True
         if target in ("gitwsl", "npmwsl", "pipwsl") \
                 and self._is_managed_wsl_url(cur, target):
             return True

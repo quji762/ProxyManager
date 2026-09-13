@@ -605,6 +605,14 @@ async function refreshAll() {
     el.classList.toggle("unset", UNSET.has(String(v)));
   };
   let anyOk = false;
+  // wsl_written 记录随每次刷新先重取：do_toggle/switch_port 会改写"最后写入
+  // URL"记录，若只在 boot 拉一次，NAT 模式下启用成功后徽章会拿着过期记录
+  // 错翻 OFF，且该端点经 UI 关不掉。先于各端点探测完成（本机 IPC，代价可
+  // 忽略），保证下方 state 计算用到的记录是新值
+  try {
+    const c = await api.call("get_config");
+    if (c) cfg.wsl_written = c.wsl_written || {};
+  } catch (_) { /* 配置拉取失败沿用旧记录，与既有降级一致 */ }
   // Only the visible lane is probed: WSL slices cost a wsl.exe round-trip
   // each, and the hidden lane's states are refreshed when its tab opens.
   const lane = curLane;

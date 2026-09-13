@@ -290,3 +290,31 @@ def test_quit_clear_still_disables_recorded_npmwsl(tmp_path, monkeypatch):
         assert api.clear_all_endpoints() is True
     assert npmwsl.url is None
     assert api._wsl_written["npmwsl"] is None
+
+
+def test_quit_clear_skips_user_sys_proxy(tmp_path, monkeypatch):
+    """ps/sys 与 URL 型端点同口径归属判定：用户手工配置的系统代理（无暂存、
+    检测值不等于 applied）不得被退出清理关闭/删除——set_sys_proxy 的禁用
+    会整项清除 ProxyServer，并非外科式。"""
+    api = _make_api(tmp_path, monkeypatch)
+    sys_calls = []
+    with patch("js_api.pm.get_ps_status", return_value=pm.UNSET), \
+         patch("js_api.pm.get_sys_proxy", return_value="http://192.168.1.50:7897"), \
+         patch("js_api.pm.get_git_proxy_win", return_value=pm.UNSET), \
+         patch("js_api.pm.get_npm_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value=pm.UNSET), \
+         patch("js_api.pm.set_ps_proxy", return_value=True), \
+         patch("js_api.pm.set_sys_proxy",
+               side_effect=lambda *a, **k: sys_calls.append(a) or True), \
+         patch("js_api.pm.set_git_proxy", return_value=True), \
+         patch("js_api.pm.set_wsl_proxy", return_value=True), \
+         patch("js_api.pm.set_npm_proxy", return_value=True), \
+         patch("js_api.pm.set_pip_proxy", return_value=True), \
+         patch("js_api.pm.set_npm_proxy_wsl", return_value=True), \
+         patch("js_api.pm.set_pip_proxy_wsl", return_value=True), \
+         patch.object(api, "refresh_item",
+                      return_value={"on": False, "git": pm.UNSET}):
+        assert api.clear_all_endpoints() is True
+    assert sys_calls == []
