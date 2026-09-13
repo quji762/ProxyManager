@@ -462,11 +462,18 @@ class Api:
 
     def _ours_proxy_urls(self, target=None):
         """URLs this tool last wrote: the applied form, plus the NAT-gateway
-        form WSL-side endpoints actually persist when the host is loopback."""
+        form WSL-side endpoints actually persist when the host is loopback.
+        WinINET (sys) stores host:port WITHOUT userinfo — that credential-less
+        form is what get_sys_proxy reads back, so it counts as ours too
+        (same contract as _switch_port's wininet_url comparison). Otherwise a
+        credentials-configured user quitting with quit_clear would leave the
+        system proxy stuck ON, pointing at a dead port."""
         h = self.applied_host
         p = str(self.applied_port)
         kw = dict(self.applied_kw)
         urls = {pm.build_proxy_url(h, p, **kw)}
+        if target == "sys":
+            urls.add(pm.wininet_url(h, p, kw.get("scheme", "http")))
         if target in ("gitwsl", "npmwsl", "pipwsl") \
                 and str(h).lower() in pm.LOOPBACK_HOSTS:
             gw = pm.get_wsl_gateway_ip()

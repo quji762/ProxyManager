@@ -318,3 +318,35 @@ def test_quit_clear_skips_user_sys_proxy(tmp_path, monkeypatch):
                       return_value={"on": False, "git": pm.UNSET}):
         assert api.clear_all_endpoints() is True
     assert sys_calls == []
+
+
+def test_quit_clear_closes_own_sys_proxy_with_credentials(tmp_path, monkeypatch):
+    """回归（安全审查 P1）：WinINET ProxyServer 不含 userinfo——配置了凭据时
+    sys 的检测值（http://host:port）与本工具 applied 的完整 URL（含
+    user:pass@）不等，归属判定不得因此漏判，退出清理必须关闭本工具开启的
+    系统代理（否则退出后系统代理指向死端口，全系统断网）。"""
+    api = _make_api(tmp_path, monkeypatch)
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "alice", "password": "s3cret"}
+    sys_calls = []
+    with patch("js_api.pm.get_sys_proxy", return_value="http://127.0.0.1:7897"), \
+         patch("js_api.pm.get_ps_status", return_value=pm.UNSET), \
+         patch("js_api.pm.get_git_proxy_win", return_value=pm.UNSET), \
+         patch("js_api.pm.get_npm_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value=pm.UNSET), \
+         patch("js_api.pm.set_sys_proxy",
+               side_effect=lambda *a, **k: sys_calls.append(a) or True), \
+         patch("js_api.pm.set_ps_proxy", return_value=True), \
+         patch("js_api.pm.set_git_proxy", return_value=True), \
+         patch("js_api.pm.set_wsl_proxy", return_value=True), \
+         patch("js_api.pm.set_npm_proxy", return_value=True), \
+         patch("js_api.pm.set_pip_proxy", return_value=True), \
+         patch("js_api.pm.set_npm_proxy_wsl", return_value=True), \
+         patch("js_api.pm.set_pip_proxy_wsl", return_value=True), \
+         patch.object(api, "refresh_item",
+                      return_value={"on": False, "git": pm.UNSET}):
+        assert api._quit_clear_owns("sys") is True
+        assert api.clear_all_endpoints() is True
+    assert len(sys_calls) == 1
