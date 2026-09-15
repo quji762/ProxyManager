@@ -11,6 +11,7 @@ import ctypes
 import ctypes.wintypes
 import json
 import os
+import shutil
 import sys
 import threading
 
@@ -125,6 +126,10 @@ PROBE_URLS = (
 
 _cfg_lock = threading.RLock()
 
+# Set on the first bak/corrupt recovery this process sees; sticky so the UI
+# can toast after Api.__init__ already consumed load_config().
+_load_warning = None  # None | "bak" | "corrupt"
+
 _SAVE_KEYS = (
     "host", "port", "scheme", "user", "password", "lang",
     "powershell", "wsl", "git_win", "git_wsl",
@@ -175,7 +180,53 @@ def _load_applied(raw, fallback):
             "user": user, "password": password}
 
 
+def config_load_warning():
+    """'bak' if this process recovered from config.json.bak, 'corrupt' if
+    both the primary file and the bak were unreadable, else None."""
+    return _load_warning
+
+
+def _load_json_object(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("config root must be a JSON object")
+    return data
+
+
+def _recover_from_bak():
+    """Quarantine the unreadable primary file, then try config.json.bak.
+
+    The restore stash lives in the JSON: swallowing a parse error as `{}`
+    meant disable/quit-clear could no longer put the user's previous proxy
+    back. A successful save (and the first successful load) keep a bak.
+    """
+    corrupt = CONFIG_FILE + ".corrupt"
+    bak = CONFIG_FILE + ".bak"
+    try:
+        if os.path.isfile(CONFIG_FILE):
+            os.replace(CONFIG_FILE, corrupt)
+    except OSError:
+        try:
+            shutil.copy2(CONFIG_FILE, corrupt)
+        except OSError:
+            pass
+    try:
+        data = _load_json_object(bak)
+    except FileNotFoundError:
+        return {}, "corrupt"
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        pm.log_exception("load_config: .bak 也无法读取")
+        return {}, "corrupt"
+    try:
+        shutil.copy2(bak, CONFIG_FILE)
+    except OSError:
+        pass
+    return data, "bak"
+
+
 def load_config():
+    global _load_warning
     defaults = {
         "host": pm.DEFAULT_HOST, "port": pm.DEFAULT_PORT,
         "scheme": "http", "user": "", "password": "", "lang": "zh",
@@ -187,16 +238,27 @@ def load_config():
         "restore": {},
     }
     cfg = {}
+    source = "missing"
     # Share the write-side lock so a concurrent save (tmp file + os.replace)
     # is never observed half-done.
     with _cfg_lock:
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if not isinstance(cfg, dict):
-                cfg = {}
-        except Exception:
-            cfg = {}
+            cfg = _load_json_object(CONFIG_FILE)
+            source = "file"
+        except FileNotFoundError:
+            cfg, source = {}, "missing"
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            pm.log_exception("load_config: 主配置损坏，将尝试 .bak")
+            cfg, source = _recover_from_bak()
+        if source == "file":
+            bak = CONFIG_FILE + ".bak"
+            if not os.path.isfile(bak):
+                try:
+                    shutil.copy2(CONFIG_FILE, bak)
+                except OSError:
+                    pass
+    if source in ("bak", "corrupt") and _load_warning is None:
+        _load_warning = source
 
     if "git" in cfg and "git_win" not in cfg:
         cfg["git_win"] = cfg["git_wsl"] = bool(cfg["git"])
@@ -328,6 +390,10 @@ def save_config(cfg):
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, CONFIG_FILE)
+            try:
+                shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
+            except OSError:
+                pass
             return True
         except OSError:
             try:

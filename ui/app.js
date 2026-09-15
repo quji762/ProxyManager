@@ -1197,6 +1197,8 @@ async function boot() {
   };
   setLang(c.lang || ((navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en"));
   if ($("inLang")) $("inLang").value = lang;
+  if (c.config_load === "bak") toast(t("configRecovered"), "");
+  else if (c.config_load === "corrupt") toast(t("configCorrupt"), "err");
   applyTheme(c.mode || "light");
   applyPin(!!c.pin);
   cfg.ports = (c.ports || []).map(String);

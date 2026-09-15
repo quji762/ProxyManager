@@ -112,7 +112,7 @@ py -3.13 app.py
 | `port` | string | `7897` | 代理端口（1–65535） |
 | `scheme` | string | `http` | `http` / `socks5` / `socks5h` |
 | `user` | string | `""` | 可选用户名（不含 `:`、`@`、空白） |
-| `password` | string | `""` | 可选密码（存在本机配置文件中） |
+| `password` | string | `""` | 可选密码（本机配置文件中经 DPAPI 加密；DPAPI 失败时回退明文） |
 | `lang` | string | `zh` | 界面语言：`zh` 或 `en` |
 | `powershell` | bool | `true` | PowerShell 端点开关状态 |
 | `wsl` | bool | `true` | WSL 端点开关状态 |
@@ -145,7 +145,7 @@ py -3.13 app.py
 - WSL 终端端点会写入 `~/.bashrc`、`~/.zshrc` 和 fish 的 `~/.config/fish/conf.d/proxy-manager.fish`。其他 shell 会在写入前提示。
 - PowerShell 端点写的是用户环境变量，对变更之后新开的终端和进程生效。已经打开的窗口仍是旧环境，需要新开一个。
 - 代理 URL 为 `http://`、`socks5://` 或 `socks5h://`，可带用户名密码。系统代理的 SOCKS 写入 `socks=host:port`，**不支持用户名密码**。
-- 密码保存在 `%APPDATA%\ProxyManager\config.json`（本机用户文件），不要把它提交到仓库。
+- 密码保存在 `%APPDATA%\ProxyManager\config.json`（本机用户文件），用当前 Windows 用户的 DPAPI 加密。换机或换账户无法解密；DPAPI 失败时会回退明文并写一条崩溃日志。不要把该文件提交到仓库。每次成功保存会另写 `config.json.bak`；主文件损坏时从备份恢复（含覆盖前暂存），并弹出提示。
 - WSL 侧的受管代码块与 git/npm/pip 代理默认应用到所有用户发行版（设置里可改为只写默认发行版）；Docker 基础设施发行版会被跳过。
 - 启用时如果该端点已有别的代理，会先暂存再覆盖；关闭（或勾选「退出时关闭代理」后从托盘退出）会把暂存值写回去。开关仅在检测到本工具写入的 URL 时为开（含 WSL NAT 网关改写）；用户自己配的其它代理显示为关，点击是「暂存并覆盖」而不是直接删除。
 - WSL 侧 npm/pip 端点经 `wsl.exe` 读写配置文件，每次读取/写入都是一次 wsl.exe 往返，因此 WSL 开关的状态刷新比 Windows 侧慢。

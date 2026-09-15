@@ -1680,13 +1680,29 @@ def _wsl_pull_file(distro, path):
     return r.stdout
 
 
+def _wsl_push_script(path: str) -> str:
+    """Bash that replaces `path` with stdin without truncating the target first.
+
+    `cat "$tmp" > "$path"` empties the destination before the copy finishes, so
+    a full disk or a killed wsl.exe leaves ~/.npmrc / pip.conf as a 0-byte
+    file. mktemp in the same directory + `mv -f` is atomic on the same fs
+    (same contract as Windows `_atomic_write_text`). A cat-to-tmp failure
+    deletes the temp file and never touches the original.
+    """
+    return (
+        f'dir=$(dirname "{path}"); '
+        f'mkdir -p "$dir" || exit 1; '
+        f'tmp=$(mktemp "$dir/.pmXXXXXX") || exit 1; '
+        f'cat > "$tmp" || {{ rm -f "$tmp"; exit 1; }}; '
+        f'mv -f "$tmp" "{path}" || {{ rm -f "$tmp"; exit 1; }}'
+    )
+
+
 def _wsl_push_file(distro, path, data: bytes):
     """Atomically replace a file in a distro with `data` (arrives on stdin)."""
     shown = path
     path = _bash_path(path)
-    # mkdir first: a failure here must not strand the mktemp file mid-pipeline.
-    script = (f'mkdir -p "$(dirname "{path}")" && tmp=$(mktemp) && cat > "$tmp" && '
-              f'cat "$tmp" > "{path}" && rm -f "$tmp"')
+    script = _wsl_push_script(path)
     r = subprocess.run(
         ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", script],
         input=data, capture_output=True, timeout=15,

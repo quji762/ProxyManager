@@ -112,7 +112,7 @@ The app stores its settings in `%APPDATA%\ProxyManager\config.json` and manages 
 | `port` | string | `7897` | Proxy port (1–65535) |
 | `scheme` | string | `http` | `http`, `socks5`, or `socks5h` |
 | `user` | string | `""` | Optional proxy username (no `:` `@` or whitespace) |
-| `password` | string | `""` | Optional proxy password (stored in this config file) |
+| `password` | string | `""` | Optional proxy password (DPAPI-encrypted in this config file; falls back to plaintext if DPAPI fails) |
 | `lang` | string | `zh` | UI language: `zh` or `en` |
 | `powershell` | bool | `true` | PowerShell endpoint switch state |
 | `wsl` | bool | `true` | WSL endpoint switch state |
@@ -145,7 +145,7 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 - The WSL terminal endpoint writes `~/.bashrc`, `~/.zshrc`, and fish `~/.config/fish/conf.d/proxy-manager.fish`. Other shells are warned before writing.
 - The PowerShell endpoint sets user environment variables, which apply to terminals and processes started after the change. Already-open windows keep their old environment until you open a new one.
 - Proxy URLs are `http://`, `socks5://`, or `socks5h://`, with optional userinfo. WinINET **system proxy** SOCKS writes `socks=host:port` and **does not support username/password**.
-- The password is stored in `%APPDATA%\ProxyManager\config.json` (local user file). Do not copy that file into a shared repo.
+- The password is stored in `%APPDATA%\ProxyManager\config.json` (local user file), encrypted with Windows DPAPI bound to the current user. Treat the file as a secret anyway; DPAPI cannot be decrypted after copying to another machine or Windows account. If DPAPI fails, the value is stored in plaintext and a line is written to the crash log. Do not copy that file into a shared repo. A successful save also writes `config.json.bak`; a corrupt primary file is recovered from that backup (including the restore stash) and the UI shows a toast.
 - In WSL, the managed block and git/npm/pip proxies are applied to every user distro by default (Settings can limit this to the default distro); Docker infrastructure distros are skipped.
 - Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **quit-clears-proxy** is on). Switches are on only for this tool's URL (including the WSL NAT gateway rewrite); a proxy the user configured for another endpoint shows off, so clicking it stashes and overwrites instead of deleting.
 - The WSL npm/pip endpoints read back and modify config files over `wsl.exe`; every read/write round-trip costs a wsl.exe call, so the WSL switches refresh a bit slower than the Windows ones.

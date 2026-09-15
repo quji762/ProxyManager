@@ -51,6 +51,50 @@ class TestAtomicIniWrite:
         assert list(tmp_path.glob("*.tmp")) == []
 
 
+class TestWslPushAtomic:
+    def test_script_uses_same_dir_mv_not_truncate(self):
+        script = pm._wsl_push_script("$HOME/.npmrc")
+        assert "mv -f" in script
+        assert 'cat "$tmp" >' not in script
+        assert ".pmXXXXXX" in script
+        assert 'mkdir -p "$dir"' in script
+        assert 'rm -f "$tmp"' in script
+
+    def test_push_file_passes_atomic_script(self, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            seen["input"] = kw.get("input")
+
+            class R:
+                returncode = 0
+                stdout = b""
+                stderr = b""
+            return R()
+
+        monkeypatch.setattr(pm.subprocess, "run", fake_run)
+        pm._wsl_push_file("Ubuntu", "~/.npmrc", b"proxy=http://127.0.0.1:7897\n")
+        script = seen["cmd"][-1]
+        assert "mv -f" in script
+        assert 'cat "$tmp" >' not in script
+        assert seen["input"] == b"proxy=http://127.0.0.1:7897\n"
+        assert "Ubuntu" in seen["cmd"]
+
+    def test_push_file_nonzero_raises(self, monkeypatch):
+        class R:
+            returncode = 1
+            stdout = b""
+            stderr = b"ENOSPC"
+        monkeypatch.setattr(pm.subprocess, "run", lambda *a, **k: R())
+        try:
+            pm._wsl_push_file(None, "~/.npmrc", b"x")
+        except OSError as e:
+            assert "写入" in str(e)
+        else:
+            raise AssertionError("expected OSError")
+
+
 class TestSysProxyWriteOrder:
     def test_proxy_server_written_before_enable_flag(self):
         """ProxyEnable must not be set if ProxyServer write fails."""

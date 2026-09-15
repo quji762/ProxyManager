@@ -137,7 +137,10 @@ def test_save_config_leaves_no_temp_file(tmp_path, monkeypatch):
     cfg["port"] = "7890"
     assert config_store.save_config(cfg) is True
     assert config_store.load_config()["port"] == "7890"
-    assert list(tmp_path.iterdir()) == [cfg_file]
+    names = {p.name for p in tmp_path.iterdir()}
+    assert cfg_file.name in names
+    assert f"{cfg_file.name}.bak" in names
+    assert not any(n.endswith(".tmp") for n in names)
 
 
 def test_public_aliases_exist():
@@ -146,3 +149,65 @@ def test_public_aliases_exist():
     assert pm.get_wsl_gateway_ip is pm._get_wsl_gateway_ip
     assert callable(pm.log_exception)
     assert callable(pm.log_crash)
+
+
+def test_corrupt_config_recovers_restore_from_bak(tmp_path, monkeypatch):
+    """A truncated/unreadable config.json must not drop the restore stash
+    when a last-good bak exists — otherwise disable/quit-clear cannot put
+    the user's previous proxy back."""
+    cfg_file = tmp_path / "config.json"
+    bak = tmp_path / "config.json.bak"
+    good = {"port": "7897", "restore": {"npm": "http://10.0.0.1:1"}}
+    bak.write_text(json.dumps(good), encoding="utf-8")
+    cfg_file.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    config_store._load_warning = None
+    cfg = config_store.load_config()
+    assert cfg["restore"] == {"npm": "http://10.0.0.1:1"}
+    assert cfg["port"] == "7897"
+    assert config_store.config_load_warning() == "bak"
+    recovered = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert recovered["restore"] == good["restore"]
+    assert (tmp_path / "config.json.corrupt").read_text(encoding="utf-8") == "{not-json"
+
+
+def test_corrupt_config_without_bak_quarantines_and_defaults(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text("{nope", encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    config_store._load_warning = None
+    cfg = config_store.load_config()
+    assert cfg["restore"] == {}
+    assert cfg["port"] == pm.DEFAULT_PORT
+    assert config_store.config_load_warning() == "corrupt"
+    assert not cfg_file.exists()
+    assert (tmp_path / "config.json.corrupt").read_text(encoding="utf-8") == "{nope"
+
+
+def test_missing_config_is_not_a_corrupt_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "config.json"))
+    config_store._load_warning = None
+    cfg = config_store.load_config()
+    assert cfg["restore"] == {}
+    assert config_store.config_load_warning() is None
+
+
+def test_non_object_json_is_treated_as_corrupt(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    config_store._load_warning = None
+    cfg = config_store.load_config()
+    assert cfg["restore"] == {}
+    assert config_store.config_load_warning() == "corrupt"
+
+
+def test_save_config_writes_bak(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.json"
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
+    cfg = config_store.load_config()
+    cfg["restore"] = {"npm": "http://10.0.0.1:1"}
+    assert config_store.save_config(cfg) is True
+    bak = json.loads((tmp_path / "config.json.bak").read_text(encoding="utf-8"))
+    assert bak["restore"] == {"npm": "http://10.0.0.1:1"}

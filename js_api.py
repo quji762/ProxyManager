@@ -11,6 +11,7 @@ from config_store import (
     APP_VERSION, DEFAULT_PORTS, MAX_BG_BYTES, PROBE_URLS, _cfg_lock,
     _DPAPI_PREFIX, _dpapi_decrypt, _dpapi_encrypt,
     autostart_enabled, autostart_set, load_config, save_config, valid_host,
+    config_load_warning,
 )
 from window_win32 import (
     _POINT, _RECT, _is_maximized, _our_hwnds, _work_area_for_hwnd,
@@ -191,6 +192,7 @@ class Api:
             # 以"精确等于记录"判定 ON，与后端 _is_managed_wsl_url 同契约，
             # 取代会把用户同端口 LAN 代理误标为已开启的旧启发式
             "wsl_written": {k: v for k, v in (self._wsl_written or {}).items() if v},
+            "config_load": config_load_warning() or "ok",
         }
 
     def save_config(self, data):
