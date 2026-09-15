@@ -770,10 +770,16 @@ class Api:
                     notes.append(restored["error"])
 
         if target == "wsl":
-            if on and h.lower() in pm.LOOPBACK_HOSTS \
-                    and pm.get_wsl_network_mode() != "Mirrored":
-                notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
-            ret = pm.set_wsl_proxy(h, p, on, **kw)
+            if on:
+                # 单次解析：写入与提示共用同一 (wh, wp)，避免 setter 内再探
+                # 一次网关导致“提示说已改写、落盘却是回环”的脱钩。
+                wh, wp = self._wsl_url_target(h, p)
+                nat_note = self._wsl_nat_note(h, p, wh, wp)
+                if nat_note:
+                    notes.append(nat_note)
+                ret = pm.set_wsl_proxy(wh, wp, True, **kw)
+            else:
+                ret = pm.set_wsl_proxy(h, p, False, **kw)
             if ret is not True:
                 return {"error": f"WSL: {ret}"}
             if on:
@@ -783,8 +789,10 @@ class Api:
             use_wsl = target == "gitwsl"
             if on:
                 gh, gp = self._wsl_url_target(h, p) if use_wsl else (h, p)
-                if use_wsl and (gh, gp) != (h, p):
-                    notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
+                if use_wsl:
+                    nat_note = self._wsl_nat_note(h, p, gh, gp)
+                    if nat_note:
+                        notes.append(nat_note)
                 ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **kw)
                 if ret is not True:
                     return {"error": f"{label}: {ret}"}
@@ -796,9 +804,10 @@ class Api:
             else:
                 gh, gp, gkw = self._git_unset_target(target)
                 ret = pm.set_git_proxy(gh, gp, False, use_wsl=use_wsl, **gkw)
-                self._git_managed[target] = None
                 if ret is not True:
+                    # 失败时保留 _git_managed：下次 disable 仍知道该卸哪条 URL
                     return {"error": f"{label}: {ret}"}
+                self._git_managed[target] = None
                 if use_wsl:
                     # 关闭成功后该端点不再有本工具写入的 URL：清掉记录，
                     # 之后用户手写的任何 URL（哪怕碰巧相同）都按用户状态处理。
@@ -809,11 +818,15 @@ class Api:
             setter = getattr(pm, setter_name)
             if not on:
                 h, p, kw = self._detected_hpk(getattr(pm, detected_name)(), h, p, kw)
-            if target in ("npmwsl", "pipwsl") and on \
-                    and h.lower() in pm.LOOPBACK_HOSTS \
-                    and pm.get_wsl_network_mode() != "Mirrored":
-                notes.append("NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。")
-            ret = setter(h, p, on, **kw)
+            if on and target in ("npmwsl", "pipwsl"):
+                # 与 gitwsl 同构：先解析网关，再写入，并用同一 (wh, wp) 记录。
+                wh, wp = self._wsl_url_target(h, p)
+                nat_note = self._wsl_nat_note(h, p, wh, wp)
+                if nat_note:
+                    notes.append(nat_note)
+                ret = setter(wh, wp, True, **kw)
+            else:
+                ret = setter(h, p, on, **kw)
             if target == "sys":
                 ok, sys_note = self._sys_result(ret)
                 if not ok:
@@ -829,9 +842,8 @@ class Api:
             if on and on_note:
                 notes.append(on_note)
             if on and not _restoring and target in ("npmwsl", "pipwsl"):
-                # setter 内部做 NAT 网关改写：按同一规则（_wsl_url_target）
-                # 记录最终落盘的完整 URL。恢复路径写入的是用户原 URL，不记录。
-                self._record_wsl_write(target, h, p, kw)
+                # 记录与写入同一 host/port，杜绝二次探测造成的记录漂移
+                self._wsl_written[target] = self._managed_url(wh, wp, **kw)
             elif not on and target in ("npmwsl", "pipwsl"):
                 # 关闭成功后清掉记录（理由同 gitwsl disable）。
                 self._wsl_written[target] = None
@@ -857,6 +869,23 @@ class Api:
             if gw:
                 return gw, port
         return host, port
+
+    def _wsl_nat_note(self, orig_host, orig_port, write_host, write_port):
+        """User-facing NAT message, keyed off the ACTUAL write target.
+
+        Returns the success note only when the rewrite really happened
+        ((write_host, write_port) != (orig_host, orig_port)). When a rewrite
+        was required but the gateway was unavailable, warn instead of
+        claiming success — the file still holds 127.0.0.1.
+        """
+        if str(orig_host).lower() not in pm.LOOPBACK_HOSTS:
+            return None
+        if pm.get_wsl_network_mode() == "Mirrored":
+            return None
+        if (str(write_host), str(write_port)) != (str(orig_host), str(orig_port)):
+            return "NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。"
+        return ("NAT 模式下无法获取宿主网关 IP，仍写入 127.0.0.1，"
+                "WSL 内代理可能不可达")
 
     def _git_unset_target(self, target):
         """Address whose git proxy a disable should remove: this session's
@@ -1016,11 +1045,8 @@ class Api:
                     notes.append(extra_note)
             else:
                 errs[tgt] = err
-        if "wsl" in applied or "npmwsl" in applied or "pipwsl" in applied \
-                or "gitwsl" in applied:
-            if new_host.lower() in pm.LOOPBACK_HOSTS \
-                    and pm.get_wsl_network_mode() != "Mirrored":
-                notes.append("NAT 模式已自动改用宿主网关 IP。")
+        # 各 WSL 端点的 NAT 提示由 _switch_enable_endpoint 按“实际是否改写”
+        # 各自产生；这里不再无条件追加一句可能失真的总提示。
         if cfg_err:
             errs["config"] = cfg_err
         # Phase 2 的成功启用更新了 _wsl_written 记录，随 restore/applied
@@ -1095,8 +1121,11 @@ class Api:
         Returns (error_or_None, git_managed_url_or_None, note_or_None)."""
         if target == "wsl":
             pm.invalidate_wsl_network_mode_cache()
-            ret = pm.set_wsl_proxy(new_host, new_port, True, **new_kw)
-            return (None if ret is True else f"WSL: {ret}", None, None)
+            # 与 do_toggle 同构：单次解析后写入，不再让 setter 二次探测网关
+            wh, wp = self._wsl_url_target(new_host, new_port)
+            ret = pm.set_wsl_proxy(wh, wp, True, **new_kw)
+            note = self._wsl_nat_note(new_host, new_port, wh, wp) if ret is True else None
+            return (None if ret is True else f"WSL: {ret}", None, note)
         if target == "ps":
             ret = pm.set_ps_proxy(new_host, new_port, True, **new_kw)
             return (None if ret is True else f"PowerShell: {ret}", None, None)
@@ -1111,9 +1140,11 @@ class Api:
                 if use_wsl else (new_host, new_port)
             ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **new_kw)
             if ret is True:
+                note = self._wsl_nat_note(new_host, new_port, gh, gp) \
+                    if use_wsl else None
                 if use_wsl:
                     self._wsl_written[target] = self._managed_url(gh, gp, **new_kw)
-                return (None, self._managed_url(gh, gp, **new_kw), None)
+                return (None, self._managed_url(gh, gp, **new_kw), note)
             return (f"{label}: {ret}", None, None)
         if target == "npm":
             ret = pm.set_npm_proxy(new_host, new_port, True, **new_kw)
@@ -1125,10 +1156,13 @@ class Api:
             label = "npm(WSL)" if target == "npmwsl" else "pip(WSL)"
             fn = pm.set_npm_proxy_wsl if target == "npmwsl" \
                 else pm.set_pip_proxy_wsl
-            ret = fn(new_host, new_port, True, **new_kw)
+            wh, wp = self._wsl_url_target(new_host, new_port)
+            ret = fn(wh, wp, True, **new_kw)
             if ret is True:
-                self._record_wsl_write(target, new_host, new_port, new_kw)
-            return (None if ret is True else f"{label}: {ret}", None, None)
+                self._wsl_written[target] = self._managed_url(wh, wp, **new_kw)
+                note = self._wsl_nat_note(new_host, new_port, wh, wp)
+                return (None, None, note)
+            return (f"{label}: {ret}", None, None)
         return (None, None, None)
 
     def _cfg_with_port(self, new_port):
@@ -1218,23 +1252,24 @@ class Api:
                 host, port = self.host, self.port
             h, p = host, str(int(port))
             kw = self._proxy_kw()
+            # 单次解析：所有 WSL 侧重写共用同一网关结果，写入与记录保持一致
+            wh, wp = self._wsl_url_target(h, p)
             if wsl_state and wsl_state.get("on"):
-                pm.set_wsl_proxy(h, p, True, **kw)
+                pm.set_wsl_proxy(wh, wp, True, **kw)
             git = (wsl_state or {}).get("git")
             rewrote = False
             if self._is_managed_wsl_url(git, "gitwsl"):
-                gh, gp = self._wsl_url_target(h, p)
-                pm.set_git_proxy(gh, gp, True, use_wsl=True, **kw)
-                self._git_managed["gitwsl"] = self._managed_url(gh, gp, **kw)
-                self._wsl_written["gitwsl"] = self._managed_url(gh, gp, **kw)
+                pm.set_git_proxy(wh, wp, True, use_wsl=True, **kw)
+                self._git_managed["gitwsl"] = self._managed_url(wh, wp, **kw)
+                self._wsl_written["gitwsl"] = self._managed_url(wh, wp, **kw)
                 rewrote = True
             if self._is_managed_wsl_url(npm, "npmwsl"):
-                pm.set_npm_proxy_wsl(h, p, True, **kw)
-                self._record_wsl_write("npmwsl", h, p, kw)
+                pm.set_npm_proxy_wsl(wh, wp, True, **kw)
+                self._wsl_written["npmwsl"] = self._managed_url(wh, wp, **kw)
                 rewrote = True
             if self._is_managed_wsl_url(pipv, "pipwsl"):
-                pm.set_pip_proxy_wsl(h, p, True, **kw)
-                self._record_wsl_write("pipwsl", h, p, kw)
+                pm.set_pip_proxy_wsl(wh, wp, True, **kw)
+                self._wsl_written["pipwsl"] = self._managed_url(wh, wp, **kw)
                 rewrote = True
             if rewrote:
                 # 重写后的新网关 URL 记录落盘，重启/下次判定仍然可用
@@ -1242,11 +1277,10 @@ class Api:
         return {"ok": True, "error": None}
 
     def _record_wsl_write(self, target, host, port, kw):
-        """Remember the exact URL this tool just wrote to a WSL-side endpoint:
-        _wsl_url_target applies the same NAT gateway rewrite as the pm setters
-        (set_npm_proxy_wsl/set_pip_proxy_wsl call nat_host internally), so the
-        recorded string is what actually lands in the distro config.
-        _is_managed_wsl_url compares a detected URL against this record."""
+        """Deprecated helper kept for compatibility. Prefer assigning
+        ``_wsl_written[target] = _managed_url(wh, wp, **kw)`` with the SAME
+        host/port that was passed to the setter — a second ``_wsl_url_target``
+        probe here could disagree with the write when the gateway flaps."""
         if target not in ("gitwsl", "npmwsl", "pipwsl"):
             return
         wh, wp = self._wsl_url_target(host, port)

@@ -288,7 +288,9 @@ def save_config(cfg):
         # config.json first, so a crash mid-dump (disk full, power loss)
         # destroyed the file including the restore stash. os.replace is
         # atomic on the same volume.
-        tmp = CONFIG_FILE + ".tmp"
+        # Unique per-process tmp name: _cfg_lock is process-local, so two
+        # instances (PM_NO_SINGLETON / failed mutex) must not share one tmp.
+        tmp = f"{CONFIG_FILE}.{os.getpid()}.tmp"
         try:
             os.makedirs(APP_DIR, exist_ok=True)
             cur = {}

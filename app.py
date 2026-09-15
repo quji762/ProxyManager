@@ -124,6 +124,9 @@ def main():
     win32._restore_callback = api._toggle_maximize
     win32._clear_maximized_cb = api._clear_maximized_state
     win32._page_window_ref = window
+    # Set by _watch_wake when a second launch asks us to show. _on_loaded
+    # honors it so a --tray start that was already woken is not re-hidden.
+    _wake_requested = threading.Event()
 
     try:
         _make_tray(api, window)
@@ -137,7 +140,9 @@ def main():
         ensure_resize_hook(window)
         ensure_nonclient_drag(window)
         _restore_window_geometry(api)
-        if _START_HIDDEN:
+        # --tray 启动时若二次实例已在 loaded 前唤醒过，绝不能再 hide，
+        # 否则 show() 会被这里无条件盖掉，用户双击“没反应”。
+        if _START_HIDDEN and not _wake_requested.is_set():
             try:
                 window.hide()
             except Exception:
@@ -158,6 +163,14 @@ def main():
             api._save_geometry()
             window.hide()
             return False
+        # 无托盘：这是真正的退出（Alt+F4 / 任务栏关闭）。必须与
+        # window_control("close") 同口径处理 quit_clear，否则代理会残留。
+        try:
+            api._save_geometry()
+            if load_config().get("quit_clear"):
+                api.clear_all_endpoints()
+        except Exception:
+            pm.log_exception("closing_quit_clear")
         return True
 
     try:
@@ -189,6 +202,7 @@ def main():
                 time.sleep(1.5)
                 continue
             try:
+                _wake_requested.set()
                 _refresh_tray_icon(api)
                 _show_main_window(api)
             except Exception:

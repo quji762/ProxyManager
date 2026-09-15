@@ -16,8 +16,9 @@ from js_api import Api
 
 class FakeWslEndpoint:
     """In-memory stand-in for one WSL-side endpoint (npmrc / pip.conf / git
-    config). Applies the same NAT loopback→gateway rewrite as the real pm
-    setters, so the stored URL matches what _record_wsl_write computes."""
+    config). Host is used as-is — js_api now resolves the NAT gateway once
+    before calling the setter, matching the real pm setters after the
+    single-resolve fix."""
 
     def __init__(self, gateway):
         self.url = None
@@ -31,9 +32,8 @@ class FakeWslEndpoint:
                user="", password=""):
         self.calls.append((host, str(port), enable))
         if enable:
-            write_host = self.gateway \
-                if str(host).lower() in pm.LOOPBACK_HOSTS else host
-            self.url = pm.build_proxy_url(write_host, port, scheme, user,
+            # js_api 传入的已是解析后的 host；不再做二次 NAT
+            self.url = pm.build_proxy_url(host, port, scheme, user,
                                           password)
         elif self.url == pm.build_proxy_url(host, port, scheme, user,
                                             password):
@@ -193,8 +193,10 @@ def test_record_persists_across_restart_and_switch_migrates(tmp_path,
 
     assert r["ok"] is True
     assert r["applied"] == ["npmwsl"]
+    # disable 用文件里检测到的网关 URL；enable 先经 _wsl_url_target 解析
+    # 成网关再写入（与记录同源），不再把原始 127.0.0.1 传给 setter
     assert fake2.calls == [("172.24.0.1", "7897", False),
-                           ("127.0.0.1", "7890", True)]
+                           ("172.24.0.1", "7890", True)]
     assert fake2.url == "http://172.24.0.1:7890"
     assert api2._wsl_written["npmwsl"] == "http://172.24.0.1:7890"
 

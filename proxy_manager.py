@@ -692,16 +692,28 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
                              winreg.KEY_SET_VALUE | winreg.KEY_READ)
         try:
             if enable:
-                for n in env_names:
-                    winreg.SetValueEx(key, n, 0, winreg.REG_SZ, url)
-                # Keep loopback traffic direct without clobbering a user-set
-                # NO_PROXY: merge ours in on enable, strip only ours on disable.
+                # Roll back on mid-loop failure so HTTP_PROXY is not left set
+                # while HTTPS_PROXY/ALL_PROXY were never written.
+                written = []
                 try:
-                    prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
-                except FileNotFoundError:
-                    prev = ""
-                winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ,
-                                  _merged_no_proxy(prev))
+                    for n in env_names:
+                        winreg.SetValueEx(key, n, 0, winreg.REG_SZ, url)
+                        written.append(n)
+                    # Keep loopback traffic direct without clobbering a user-set
+                    # NO_PROXY: merge ours in on enable, strip only ours on disable.
+                    try:
+                        prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
+                    except FileNotFoundError:
+                        prev = ""
+                    winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ,
+                                      _merged_no_proxy(prev))
+                except OSError:
+                    for n in written:
+                        try:
+                            winreg.DeleteValue(key, n)
+                        except FileNotFoundError:
+                            pass
+                    raise
             else:
                 # Surgical: only drop values equal to the URL this tool manages.
                 # A proxy the user set by hand for another endpoint survives.
@@ -920,8 +932,11 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
                              winreg.KEY_SET_VALUE | winreg.KEY_READ)
         try:
             if enable:
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                # Server first, then the enable flag: a failed ProxyServer
+                # write must not leave ProxyEnable=1 pointing at a stale/empty
+                # value (which breaks every browser on the machine).
                 winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
                 try:
                     prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
                 except FileNotFoundError:
@@ -1120,7 +1135,11 @@ def _wsl_write_failure(r, distro):
 
 
 def set_wsl_proxy(host, port, enable=True, scheme="http", user="", password=""):
-    write_host = nat_host(host) if enable else host
+    # NAT rewrite is the caller's job (js_api resolves via _wsl_url_target
+    # ONCE, then writes and records the same host). Doing nat_host here would
+    # be a second independent gateway probe and could disagree with the
+    # "last written URL" record.
+    write_host = host
     url = build_proxy_url(write_host, port, scheme, user, password)
     # Merge loopback bypass entries into whatever NO_PROXY the user already
     # exported earlier in bashrc / the environment, instead of overwriting.
@@ -1151,12 +1170,16 @@ unset _pm_np _pm_e
         begin, end = re.escape(WSL_PROXY_BEGIN), re.escape(WSL_PROXY_END)
         create = '[ -f "$f" ] || : > "$f"; ' if enable else '[ -f "$f" ] || return; '
         append = 'cat "$block" >> "$f"; ' if enable else ''
+        # sed 备份 + cat 回写（保留 stow/chezmoi 符号链接）：ENOSPC 时
+        # cat > "$f" 会截断 .bashrc，先 cp 一份，失败再灌回去。
         script = (
             ('block=$(mktemp); cat > "$block"; ' if enable else '')
             + 'apply_posix() { f="$1"; ' + create
             + '[ -n "$(tail -c1 "$f" 2>/dev/null)" ] && printf \'\\n\' >> "$f"; '
-            + f'tmp=$(mktemp) && sed \'/{begin}/,/{end}/d\' "$f" > "$tmp" '
-            + '&& cat "$tmp" > "$f"; rm -f "$tmp"; '
+            + f'tmp=$(mktemp) && bak=$(mktemp) && cp -a "$f" "$bak" 2>/dev/null '
+            + f'&& sed \'/{begin}/,/{end}/d\' "$f" > "$tmp" '
+            + '&& { cat "$tmp" > "$f" || cat "$bak" > "$f"; } '
+            + '; rm -f "$tmp" "$bak"; '
             + append
             + '}; '
             + 'apply_posix "$HOME/.bashrc"; apply_posix "$HOME/.zshrc"; '
@@ -1283,8 +1306,12 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                 try:
                     if enable:
                         sq = _bash_sq(url)
-                        cmd = (f"git config --global --replace-all http.proxy '{sq}' && "
-                               f"git config --global --replace-all https.proxy '{sq}'")
+                        # https 失败时回滚 http，避免半开状态
+                        cmd = (
+                            f"git config --global --replace-all http.proxy '{sq}' && "
+                            f"(git config --global --replace-all https.proxy '{sq}' || "
+                            f"(git config --global --unset-all http.proxy 2>/dev/null; exit 1))"
+                        )
                     elif host or port:
                         # Remove only values equal to the URL this tool manages;
                         # any proxy value the user set themselves survives.
@@ -1314,12 +1341,23 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                 return "; ".join(errs)
         else:
             if enable:
+                # http.proxy 成功、https.proxy 失败时回滚，避免半开状态
+                written = []
                 for key in ("http.proxy", "https.proxy"):
-                    r = subprocess.run(["git", "config", "--global", "--replace-all", key, url],
-                                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                    r = subprocess.run(
+                        ["git", "config", "--global", "--replace-all", key, url],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=15,
+                        creationflags=subprocess.CREATE_NO_WINDOW)
                     if r.returncode != 0:
-                        return (r.stderr or f"exit {r.returncode}").strip() or f"exit {r.returncode}"
+                        for k in written:
+                            subprocess.run(
+                                ["git", "config", "--global", "--unset-all", k],
+                                capture_output=True, timeout=15,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+                        return (r.stderr or f"exit {r.returncode}").strip() \
+                            or f"exit {r.returncode}"
+                    written.append(key)
             else:
                 if host or port:
                     # Surgical: remove only the value this tool set, so a
@@ -1511,6 +1549,28 @@ def get_npm_proxy():
     return _ini_get(text, "proxy") or _ini_get(text, "https-proxy") or UNSET
 
 
+def _atomic_write_text(path, text, encoding="utf-8"):
+    """Write `text` to `path` via tmp + os.replace so a mid-write failure
+    (disk full, AV lock) cannot truncate the original file. Same contract
+    as config_store.save_config. newline="" keeps \\r\\n verbatim."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding=encoding, newline="", errors="replace") as f:
+            f.write(text)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def set_npm_proxy(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear npm's proxy + https-proxy in ~/.npmrc. npm re-reads this
     file on every invocation, so the next npm command picks the change up.
@@ -1527,11 +1587,8 @@ def set_npm_proxy(host, port, enable=True, scheme="http", user="", password=""):
                         equals=url, eol=_eol_of(text))
         if new != text:
             os.makedirs(os.path.dirname(NPM_CONFIG_PATH), exist_ok=True)
-            # newline="" keeps \r\n verbatim (text mode would translate \n
-            # to \r\n and double the \r on CRLF files). Always plain UTF-8:
-            # it's the only encoding npm reads.
-            with open(NPM_CONFIG_PATH, "w", encoding="utf-8", newline="") as f:
-                f.write(new)
+            # Always plain UTF-8: it's the only encoding npm reads.
+            _atomic_write_text(NPM_CONFIG_PATH, new, encoding="utf-8")
         return True
     except OSError as e:
         return True if not enable else str(e)
@@ -1569,8 +1626,7 @@ def set_pip_proxy(host, port, enable=True, scheme="http", user="", password=""):
                         equals=url, section="global", eol=_eol_of(text))
         if new != text:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding=enc, newline="", errors="replace") as f:
-                f.write(new)
+            _atomic_write_text(path, new, encoding=enc)
         return True
     except OSError as e:
         return True if not enable else str(e)
@@ -1658,20 +1714,25 @@ def _wsl_edit_ini(distro, path, keys, url, equals, section=None):
 def get_npm_proxy_wsl(distro=None):
     """npm proxy inside the distro(s). Reads every user distro and returns
     the first proxy found (multi-distro setups are rare and usually kept in
-    sync; the badge shows one URL). '未设置' / '未检测到' as elsewhere."""
+    sync; the badge shows one URL). '未设置' / '未检测到' as elsewhere.
+
+    A broken distro must not abort the walk: continue to the next one and
+    only report 未检测到 when at least one pull failed and nothing was found."""
     try:
+        any_err = False
         for d in (_wsl_targets()):
             try:
                 data = _wsl_pull_file(d, _NPMrc_PATH_WSL)
             except OSError:
-                return UNDETECTED
+                any_err = True
+                continue
             if data is None:
                 continue
             text = _decode_ini_bytes(data)[0]
             v = _ini_get(text, "proxy") or _ini_get(text, "https-proxy")
             if v:
                 return v
-        return UNSET
+        return UNDETECTED if any_err else UNSET
     except Exception:
         log_exception("get_npm_proxy_wsl")
         return UNDETECTED
@@ -1679,21 +1740,25 @@ def get_npm_proxy_wsl(distro=None):
 
 def get_pip_proxy_wsl(distro=None):
     """pip proxy inside the distro(s): XDG pip.conf first, then the legacy
-    ~/.pip/pip.conf (both are read by pip itself, in that order)."""
+    ~/.pip/pip.conf (both are read by pip itself, in that order).
+
+    Same continue-on-error contract as get_npm_proxy_wsl."""
     try:
+        any_err = False
         for d in (_wsl_targets()):
             for path in (_PIP_CONF_PATH_WSL, _PIP_CONF_LEGACY_WSL):
                 try:
                     data = _wsl_pull_file(d, path)
                 except OSError:
-                    return UNDETECTED
+                    any_err = True
+                    continue
                 if data is None:
                     continue
                 v = _ini_get(_decode_ini_bytes(data)[0], "proxy",
                              section="global")
                 if v:
                     return v
-        return UNSET
+        return UNDETECTED if any_err else UNSET
     except Exception:
         log_exception("get_pip_proxy_wsl")
         return UNDETECTED
@@ -1701,9 +1766,12 @@ def get_pip_proxy_wsl(distro=None):
 
 def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear npm's proxy + https-proxy in every user distro's ~/.npmrc.
-    Same disable contract as the Windows npm endpoint. NAT mode swaps a
-    loopback host for the Windows gateway IP, same as the WSL shell block."""
-    write_host = nat_host(host) if enable else host
+    Same disable contract as the Windows npm endpoint.
+
+    Host is used as-is: NAT loopback→gateway rewrite happens in js_api
+    (_wsl_url_target) so the written URL and the wsl_written record share
+    one gateway probe. Passing a loopback host writes 127.0.0.1 literally."""
+    write_host = host
     url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
@@ -1725,9 +1793,11 @@ def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
 
 def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=""):
     """Write/clear `proxy` under [global] in every user distro's XDG
-    pip.conf; disable also cleans the legacy ~/.pip/pip.conf. NAT mode swaps
-    a loopback host for the Windows gateway IP."""
-    write_host = nat_host(host) if enable else host
+    pip.conf; disable also cleans the legacy ~/.pip/pip.conf.
+
+    Host is used as-is (see set_npm_proxy_wsl): NAT rewrite is done once in
+    js_api before the call."""
+    write_host = host
     url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
