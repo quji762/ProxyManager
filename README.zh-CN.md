@@ -166,7 +166,8 @@ ProxyManager/
 ├── assets/
 ├── build.bat                  # 安装 requirements-build.txt 后打包
 ├── start.bat
-├── requirements.txt           # 运行时依赖
+├── pyproject.toml             # 版本号、运行时依赖、ruff/pytest 配置
+├── requirements.txt           # 运行时依赖（与 pyproject 同一组 pin）
 ├── requirements-build.txt     # 运行时 + PyInstaller
 └── .github/workflows/         # ci.yml 与 release.yml
 ```

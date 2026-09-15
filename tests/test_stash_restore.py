@@ -271,3 +271,20 @@ def test_corrupt_ps_stash_kept_and_reported(tmp_path, monkeypatch, bad):
     assert "暂存数据不完整" in r.get("error", "")
     assert api._restore.get("ps") == dict(bad)      # kept, not popped
     assert set_env == []                            # nothing was written
+
+
+def test_failed_enable_drops_new_stash_and_keeps_form_address(
+        tmp_path, monkeypatch):
+    """A failed enable must not keep a stash of the user's URL (disable would
+    then think we overwrote it) and must not retarget applied_*/host."""
+    api = _make_api(tmp_path, monkeypatch)
+    api.host, api.port = "127.0.0.1", "7897"
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    with patch("js_api.pm.get_npm_proxy",
+               return_value="http://corp:8080"), \
+         patch("js_api.pm.set_npm_proxy", return_value="disk full"):
+        r = api.do_toggle("npm", True, "127.0.0.1", "1080")
+    assert r.get("ok") is not True
+    assert api._restore.get("npm") is None
+    assert api.applied_port == "7897"
+    assert api.port == "7897"

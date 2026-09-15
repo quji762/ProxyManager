@@ -88,3 +88,16 @@ def test_promote_writes_only_own_entries(monkeypatch):
     assert tray_icon._promote_tray_icon(retries=1) is True
     assert set(fake.writes) == {("tip", "IsPromoted", 1),
                                 ("ours", "IsPromoted", 1)}
+
+
+def test_promote_matches_english_tooltip(monkeypatch):
+    monkeypatch.setattr(sys, "executable", r"C:\Py313\pythonw.exe")
+    fake = _FakeNotifyIconReg({
+        "en": {"Tooltip": ("Proxy Manager", 1),
+               "ExecutablePath": (r"C:\Somewhere\else.exe", 1)},
+        "foreign": {"Tooltip": ("Other Manager", 1),
+                    "ExecutablePath": (r"C:\Other\pythonw.exe", 1)},
+    })
+    fake.install(monkeypatch)
+    assert tray_icon._promote_tray_icon(retries=1) is True
+    assert fake.writes == [("en", "IsPromoted", 1)]

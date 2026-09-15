@@ -105,3 +105,30 @@ def test_ps_all_unset_reports_not_set(tmp_path, monkeypatch):
         r = api.test_channel("ps_all")
     assert r.get("ok") is False
     assert "未设置" in r.get("error", "")
+
+
+def test_http_probe_err_maps_fail_token():
+    from js_api import Api
+    assert Api._http_probe_err("FAIL") == "连接失败"
+    assert Api._http_probe_err("000") == "连接失败"
+    assert Api._http_probe_err("0") == "连接失败"
+    assert Api._http_probe_err("") == "连接失败"
+    assert Api._http_probe_err("503") == "HTTP 503"
+    assert Api._http_probe_err("204") == "HTTP 204"
+
+
+def test_wsl_proxy_probe_fail_token_is_not_http_status(tmp_path, monkeypatch):
+    """The bash loop echoes FAIL when every URL misses — must not surface
+    as 'HTTP FAIL' on the test chip."""
+    api = _make_api(tmp_path, monkeypatch)
+
+    class _R:
+        stdout = "FAIL\n"
+        returncode = 0
+
+    with patch("js_api.subprocess.run", return_value=_R()), \
+            patch("js_api.pm.wsl_available", return_value=True):
+        r = api._wsl_proxy_probe("http://127.0.0.1:7897", {})
+    assert r.get("ok") is False
+    assert r.get("error") == "连接失败"
+    assert "FAIL" not in r.get("error", "")

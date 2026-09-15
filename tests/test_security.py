@@ -432,6 +432,12 @@ class TestDpapiFailureLogging(unittest.TestCase):
         fake_log.assert_called_once()
         self.assertIn("dpapi_decrypt", fake_log.call_args[0][0])
 
+    def test_crypt_apis_have_64bit_argtypes(self):
+        """DATA_BLOB pointers must not be truncated on Win64."""
+        self.assertTrue(config_store._crypt32.CryptProtectData.argtypes)
+        self.assertTrue(config_store._crypt32.CryptUnprotectData.argtypes)
+        self.assertTrue(config_store._kernel32.LocalFree.argtypes)
+
 
 if __name__ == "__main__":
     unittest.main()

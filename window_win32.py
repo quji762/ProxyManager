@@ -373,7 +373,9 @@ def install_resize_hook(hwnd):
             _GWL_STYLE = -16
             WS_MINIMIZEBOX = 0x00020000
             style = user32.GetWindowLongPtrW(hwnd, _GWL_STYLE)
-            if not style & WS_MINIMIZEBOX:
+            # 0 is "call failed / invalid hwnd", not "window has no styles".
+            # OR-ing MINIMIZEBOX onto 0 would wipe WS_VISIBLE/WS_POPUP.
+            if style and not (style & WS_MINIMIZEBOX):
                 user32.SetWindowLongPtrW(hwnd, _GWL_STYLE, style | WS_MINIMIZEBOX)
                 # SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED
                 user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)

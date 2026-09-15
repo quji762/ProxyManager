@@ -16,8 +16,8 @@ import threading
 import time
 
 import proxy_manager as pm
-from config_store import (  # noqa: F401  (re-exported for tests)
-    APP_VERSION, CONFIG_FILE, UI_PATH, load_config, save_config,
+from config_store import (  # noqa: F401  (APP_VERSION re-exported for tests)
+    APP_VERSION, UI_PATH, load_config, save_config,
     valid_host as _valid_host,
 )
 from js_api import Api

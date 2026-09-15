@@ -233,3 +233,29 @@ def test_restart_wsl_rewrites_stale_gateway(tmp_path, monkeypatch):
     fresh = "http://172.25.0.1:7897"
     assert api._wsl_written == {"gitwsl": fresh, "npmwsl": fresh,
                                 "pipwsl": fresh}
+
+
+def test_restart_wsl_uses_applied_address_not_form(tmp_path, monkeypatch):
+    """Form fields may have been edited but not applied; NAT rewrite after
+    wsl --shutdown must retarget the applied loopback, not the form."""
+    api = _make_api(tmp_path, monkeypatch)
+    api.host, api.port = "10.0.0.1", "1080"
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    written = []
+
+    def capture(h, p, on=True, **k):
+        written.append((h, str(p)))
+        return True
+
+    with patch("js_api.pm.restart_wsl", return_value=True), \
+         patch("js_api.pm.get_wsl_network_mode", return_value="NAT"), \
+         patch("js_api.pm.get_wsl_gateway_ip", return_value="172.25.0.1"), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value=pm.UNSET), \
+         patch.object(api, "refresh_item",
+                      return_value={"on": True, "git": pm.UNSET}), \
+         patch("js_api.pm.set_wsl_proxy", side_effect=capture):
+        assert api.restart_wsl()["ok"] is True
+
+    assert written == [("172.25.0.1", "7897")]

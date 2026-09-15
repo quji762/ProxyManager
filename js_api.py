@@ -742,23 +742,23 @@ class Api:
         else:
             h, p = addr if addr else (self.host, self.port)
         kw = self._proxy_kw(scheme, user, password)
-        # Enabling applies the address: keep the cache in sync so later calls
-        # without an explicit address (speed probe, restart_wsl) act on it.
-        # Disabling must not touch the cache — its target address is whatever
-        # is being removed, not the address the UI shows. Restoring a previous
-        # proxy must not overwrite the UI's current fields either.
-        if on and not _restoring:
-            with self._speed_lock:
-                self.host, self.port = h, p
-            if scheme is not None:
-                self.scheme = kw["scheme"]
-            if user is not None:
-                self.user = kw["user"]
-            if password is not None:
-                self.password = kw["password"]
         notes = []
+        # Stash the pre-enable value first (after a successful write the file
+        # already holds OUR url, so it would be too late). If the write then
+        # fails, drop a stash we just created so a later disable does not
+        # "restore" something we never actually overwrote.
+        had_stash = target in self._restore
         if on and not _restoring:
             self._stash_previous(target, self._managed_url(h, p, **kw))
+
+        def _fail(msg, error_key=None):
+            if on and not _restoring and not had_stash and target in self._restore:
+                self._restore.pop(target, None)
+                self._persist_restore()
+            err = {"error": msg}
+            if error_key:
+                err["error_key"] = error_key
+            return err
         if (not on) and (not _restoring):
             restored = self._restore_previous(target)
             if restored is not None:
@@ -781,7 +781,7 @@ class Api:
             else:
                 ret = pm.set_wsl_proxy(h, p, False, **kw)
             if ret is not True:
-                return {"error": f"WSL: {ret}"}
+                return _fail(f"WSL: {ret}")
             if on:
                 notes.append("已写入 ~/.bashrc、~/.zshrc 与 fish conf.d，请新开终端后生效")
         elif target in ("gitwin", "gitwsl"):
@@ -795,7 +795,7 @@ class Api:
                         notes.append(nat_note)
                 ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **kw)
                 if ret is not True:
-                    return {"error": f"{label}: {ret}"}
+                    return _fail(f"{label}: {ret}")
                 self._git_managed[target] = self._managed_url(gh, gp, **kw)
                 if use_wsl and not _restoring:
                     # 记录本次实际写入 WSL 配置的完整 URL（gh/gp 已含网关
@@ -806,7 +806,7 @@ class Api:
                 ret = pm.set_git_proxy(gh, gp, False, use_wsl=use_wsl, **gkw)
                 if ret is not True:
                     # 失败时保留 _git_managed：下次 disable 仍知道该卸哪条 URL
-                    return {"error": f"{label}: {ret}"}
+                    return _fail(f"{label}: {ret}")
                 self._git_managed[target] = None
                 if use_wsl:
                     # 关闭成功后该端点不再有本工具写入的 URL：清掉记录，
@@ -830,7 +830,7 @@ class Api:
             if target == "sys":
                 ok, sys_note = self._sys_result(ret)
                 if not ok:
-                    return {"error": f"{label}: {ret}"}
+                    return _fail(f"{label}: {ret}")
                 if on and sys_note:
                     notes.append(sys_note)
                 if on and pm.sys_proxy_per_machine():
@@ -838,7 +838,7 @@ class Api:
                         "检测到 ProxySettingsPerUser=0（按机器策略管理代理）：本工具写入的用户级代理可能不生效"
                     )
             elif ret is not True:
-                return {"error": f"{label}: {ret}"}
+                return _fail(f"{label}: {ret}")
             if on and on_note:
                 notes.append(on_note)
             if on and not _restoring and target in ("npmwsl", "pipwsl"):
@@ -849,10 +849,19 @@ class Api:
                 self._wsl_written[target] = None
                 self._persist_restore()
         else:
-            return {"error": f"未知端点 {target}"}
+            return _fail(f"未知端点 {target}")
         if on and not _restoring:
             # Commit only after the endpoint write succeeded: a failed enable
-            # must not make switch_port treat the still-old endpoints as ours.
+            # must not make switch_port treat the still-old endpoints as ours,
+            # and must not retarget the speed probe / restart_wsl rewrite.
+            with self._speed_lock:
+                self.host, self.port = h, p
+            if scheme is not None:
+                self.scheme = kw["scheme"]
+            if user is not None:
+                self.user = kw["user"]
+            if password is not None:
+                self.password = kw["password"]
             self.applied_host, self.applied_port = h, p
             self.applied_kw = dict(kw)
             self._persist_restore()
@@ -1235,9 +1244,11 @@ class Api:
         # into every WSL-side endpoint (bashrc, git, npm, pip) when the proxy
         # is on with a loopback host.
         with self._endpoint_mutation_lock:
-            with self._speed_lock:
-                host, port = self.host, self.port
-            if host.lower() not in pm.LOOPBACK_HOSTS \
+            # Rewrite currently-applied endpoints, not the (possibly uncommitted)
+            # form fields. Flushing snapshotAddr() before restart used to retarget
+            # WSL files while Windows endpoints stayed on the old port.
+            host, port = self.applied_host, self.applied_port
+            if not host or str(host).lower() not in pm.LOOPBACK_HOSTS \
                     or not pm.is_valid_port(port) \
                     or pm.get_wsl_network_mode() == "Mirrored":
                 return {"ok": True, "error": None}
@@ -1248,10 +1259,13 @@ class Api:
             wsl_state = self.refresh_item("wsl")
             npm = pm.get_npm_proxy_wsl()
             pipv = pm.get_pip_proxy_wsl()
-            with self._speed_lock:
-                host, port = self.host, self.port
+            host, port = self.applied_host, self.applied_port
             h, p = host, str(int(port))
-            kw = self._proxy_kw()
+            kw = {
+                "scheme": self.applied_kw.get("scheme") or "http",
+                "user": self.applied_kw.get("user") or "",
+                "password": self.applied_kw.get("password") or "",
+            }
             # 单次解析：所有 WSL 侧重写共用同一网关结果，写入与记录保持一致
             wh, wp = self._wsl_url_target(h, p)
             if wsl_state and wsl_state.get("on"):
@@ -1275,16 +1289,6 @@ class Api:
                 # 重写后的新网关 URL 记录落盘，重启/下次判定仍然可用
                 self._persist_restore()
         return {"ok": True, "error": None}
-
-    def _record_wsl_write(self, target, host, port, kw):
-        """Deprecated helper kept for compatibility. Prefer assigning
-        ``_wsl_written[target] = _managed_url(wh, wp, **kw)`` with the SAME
-        host/port that was passed to the setter — a second ``_wsl_url_target``
-        probe here could disagree with the write when the gateway flaps."""
-        if target not in ("gitwsl", "npmwsl", "pipwsl"):
-            return
-        wh, wp = self._wsl_url_target(host, port)
-        self._wsl_written[target] = pm.build_proxy_url(wh, wp, **kw)
 
     def _is_managed_wsl_url(self, detected, target):
         """True ONLY if `detected` is exactly the URL this tool last wrote to
@@ -1419,10 +1423,24 @@ class Api:
                 parts = (r.stdout or "").strip().split()
                 if len(parts) >= 2 and parts[0] in ("200", "204"):
                     return {"ok": True, "ms": int(float(parts[1]) * 1000)}
-                last_err = f"HTTP {parts[0]}" if parts else "连接失败"
+                last_err = self._http_probe_err(parts[0] if parts else "")
             except Exception as e:
                 last_err = str(e)[:160] or "连接失败"
         return {"ok": False, "error": last_err}
+
+    @staticmethod
+    def _http_probe_err(token):
+        """Map curl/wsl probe tokens to a user-facing error.
+
+        The WSL script echoes FAIL when every URL misses; curl prints 000
+        when it cannot talk to the proxy. Neither is an HTTP status.
+        """
+        code = str(token or "").strip()
+        if not code or code in ("FAIL", "000", "0"):
+            return "连接失败"
+        if code.isdigit():
+            return f"HTTP {code}"
+        return "连接失败"
 
     def _wsl_proxy_probe(self, proxy_url, parsed):
         """Same probe executed inside WSL via curl (through the proxy)."""
@@ -1448,7 +1466,7 @@ class Api:
                 return {"ok": True, "ms": int(float(out[1]) * 1000)}
             if not pm.wsl_available():
                 return {"ok": False, "error": "WSL 不可用"}
-            return {"ok": False, "error": f"HTTP {out[0]}" if out else "连接失败"}
+            return {"ok": False, "error": self._http_probe_err(out[0] if out else "")}
         except Exception as e:
             return {"ok": False, "error": str(e)[:120] or "连接失败"}
 

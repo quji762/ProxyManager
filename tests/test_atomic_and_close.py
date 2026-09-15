@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """Regression: atomic file writes, registry rollback, native-close quit_clear."""
 
-import os
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 import config_store
 import proxy_manager as pm
@@ -84,9 +81,6 @@ class TestSysProxyWriteOrder:
 class TestConfigTmpUnique:
     def test_tmp_path_includes_pid(self):
         # Pure string check: save_config builds tmp as CONFIG_FILE.<pid>.tmp
-        pid = os.getpid()
-        # Re-implement the construction used in save_config
-        expected_suffix = f".{pid}.tmp"
         # Read the source to confirm the pattern is present
         import inspect
         src = inspect.getsource(config_store.save_config)

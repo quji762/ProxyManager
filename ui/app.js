@@ -365,8 +365,10 @@ async function toggleEndpoint(ep, on) {
     else {
       // Flip the row immediately; a refresh corrects it. A disable that
       // restored a stashed proxy actually leaves the endpoint ON.
+      const restored = !!(r && (r.restored || (r.note && r.note.includes("已恢复覆盖前的代理"))));
       state[ep] = on;
-      if (r && (r.restored || (r.note && r.note.includes("已恢复覆盖前的代理")))) {
+      if (on && !restored) lastApplied = Object.assign({}, a);
+      if (restored) {
         state[ep] = true;
         toast(r.note || t("restored"), "ok");
       } else if (r && r.note) {
@@ -446,8 +448,15 @@ function snapshotAddr() {
 function addrKey(a) {
   return [a.scheme, a.user, a.password, a.host, a.port].join("\0");
 }
-function expectedUrl(kind) {
-  const a = snapshotAddr();
+function appliedAddr() {
+  // Switches compare against the address last written to endpoints, not the
+  // in-progress form. Typing a new port then hitting refresh used to flip
+  // PowerShell/system-proxy OFF because expectedUrl() read the input box.
+  if (lastApplied && lastApplied.host && lastApplied.port) return lastApplied;
+  return snapshotAddr();
+}
+function expectedUrl(kind, addr) {
+  const a = addr || appliedAddr();
   // WinINET writes host:port or socks=host:port — no userinfo, and SOCKS5h
   // comes back as socks5://. Compare against that reconstructed URL or the
   // system-proxy switch flips off right after enable.
@@ -458,7 +467,7 @@ function expectedUrl(kind) {
   const auth = a.user
     ? encodeURIComponent(a.user) + (a.password ? ":" + encodeURIComponent(a.password) : "") + "@"
     : "";
-  return `${a.scheme}://${auth}${a.host}:${a.port}`;
+  return `${(a.scheme || "http")}://${auth}${a.host}:${a.port}`;
 }
 /* Switch is ON only for THIS tool's URL (same contract as PowerShell /
    system proxy). `allowNat` endpoints additionally accept the exact URL
@@ -749,8 +758,10 @@ async function allEndpoints(on, lane = null) {
       try {
         const r = await api.call("do_toggle", d.id, on, a.host, a.port, a.scheme, a.user, a.password);
         if (r && r.error) { toast(r.error_key ? t(r.error_key) : r.error, "err"); hadError = true; break; }
+        const restored = !!(r && (r.restored || (r.note && r.note.includes("已恢复覆盖前的代理"))));
         state[d.id] = on;
-        if (r && (r.restored || (r.note && r.note.includes("已恢复覆盖前的代理")))) state[d.id] = true;
+        if (on && !restored) lastApplied = Object.assign({}, a);
+        if (restored) state[d.id] = true;
       } finally {
         setBusy(d.id, false);
       }
@@ -1000,8 +1011,7 @@ $("btnWslRestart").onclick = async () => {
   if (!go) return;
   setBusyAll(true);
   try {
-    /* Flush the current address: the rewrite after restart uses it. */
-    await api.call("save_config", snapshotAddr());
+    /* Rewrite uses applied_* on the Python side, not the in-progress form. */
     const r = await api.call("restart_wsl");
     if (r && r.error) toast(t("restartFail", { err: r.error }), "err");
     else { toast(t("restartOk"), "ok"); refreshAll(); }
@@ -1219,7 +1229,46 @@ async function boot() {
   } else {
     refreshAll();
   }
+  // Win lane paints first; WSL counts fill in without blocking (and without
+  // forcing the user onto the WSL tab). A cold WSL start still costs time,
+  // but the dash (`–/4`) is only a brief placeholder.
+  probeWslCounts();
   tickSpeed();
+}
+
+function probeWslCounts() {
+  const paint = () => {
+    updateHero();
+    if (curLane === "wsl") renderEndpoints();
+  };
+  const take = (p, fn) => p.then(fn).catch(() => { wslProbed = true; paint(); });
+  // Wait for wsl_written so NAT badges don't flicker OFF on a stale record.
+  api.call("get_config").then((c) => {
+    if (c) cfg.wsl_written = c.wsl_written || {};
+  }).catch(() => {}).finally(() => {
+    take(api.call("refresh_item", "wsl"), (r) => {
+      wslProbed = true;
+      if (r) {
+        state.wsl = !!r.on;
+        detected.gitwsl = r.git;
+        state.gitwsl = urlLooksOurs(r.git, null, true, cfg.wsl_written.gitwsl);
+        detected.wsl_url = state.wsl ? r.vars.HTTP_PROXY : null;
+      }
+      paint();
+    });
+    take(api.call("refresh_item", "npmwsl"), (v) => {
+      detected.npmwsl = v;
+      state.npmwsl = urlLooksOurs(v, null, true, cfg.wsl_written.npmwsl);
+      wslProbed = true;
+      paint();
+    });
+    take(api.call("refresh_item", "pipwsl"), (v) => {
+      detected.pipwsl = v;
+      state.pipwsl = urlLooksOurs(v, null, true, cfg.wsl_written.pipwsl);
+      wslProbed = true;
+      paint();
+    });
+  });
 }
 
 if (HAS_BRIDGE()) boot();

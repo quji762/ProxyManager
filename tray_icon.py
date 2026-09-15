@@ -83,7 +83,7 @@ def _promote_tray_icon(retries=6, icon=None):
                 # ExecutablePath equal to our own process image. Anything
                 # else (e.g. another Python program's tray icon) must never
                 # get its registry entry rewritten.
-                if (str(tip or "") == pm.APP_TITLE
+                if (str(tip or "") in (pm.APP_TITLE, "Proxy Manager")
                         or _tray_executable_matches(exe)):
                     matches.append(sub)
         finally:
@@ -248,13 +248,14 @@ def _make_tray(api, window):
     lang = load_config().get("lang", "zh")
     show_lbl = "Show window" if lang == "en" else "显示主窗口"
     quit_lbl = "Quit" if lang == "en" else "退出"
+    tray_tip = "Proxy Manager" if lang == "en" else pm.APP_TITLE
     menu = pystray.Menu(
         pystray.MenuItem(show_lbl, show, default=True),
         pystray.MenuItem(quit_lbl, quit_app),
     )
     icon = pystray.Icon("proxy_manager", Image.open(
         TRAY_ICON).convert("RGBA"),
-        "代理管理器", menu)
+        tray_tip, menu)
     ready = threading.Event()
 
     def setup(active_icon):

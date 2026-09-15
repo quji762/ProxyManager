@@ -1,6 +1,6 @@
 """Config persistence, host validation, and HKCU autostart.
 
-Lives next to app.py so package_dir() resolves ui/ and assets/ both from
+Lives next to app.py so PACKAGE_DIR resolves ui/ and assets/ both from
 source and from a PyInstaller --onefile extract (sys._MEIPASS).
 """
 
@@ -32,8 +32,23 @@ class _DATA_BLOB(ctypes.Structure):
                 ("pbData", ctypes.POINTER(ctypes.c_char))]
 
 
-_crypt32 = ctypes.WinDLL("crypt32")
-_kernel32 = ctypes.WinDLL("kernel32")
+_crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+# Without argtypes, 64-bit pointers in DATA_BLOB are truncated the same way
+# SetWindowPos(HWND) used to be. LocalFree must also see a full HANDLE.
+_crypt32.CryptProtectData.argtypes = [
+    ctypes.POINTER(_DATA_BLOB), ctypes.c_wchar_p, ctypes.POINTER(_DATA_BLOB),
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.wintypes.DWORD,
+    ctypes.POINTER(_DATA_BLOB)]
+_crypt32.CryptProtectData.restype = ctypes.wintypes.BOOL
+_crypt32.CryptUnprotectData.argtypes = [
+    ctypes.POINTER(_DATA_BLOB), ctypes.c_void_p, ctypes.POINTER(_DATA_BLOB),
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.wintypes.DWORD,
+    ctypes.POINTER(_DATA_BLOB)]
+_crypt32.CryptUnprotectData.restype = ctypes.wintypes.BOOL
+_kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+_kernel32.LocalFree.restype = ctypes.c_void_p
 
 
 def _dpapi_encrypt(plaintext: str) -> str:
@@ -54,7 +69,7 @@ def _dpapi_encrypt(plaintext: str) -> str:
             return _DPAPI_PREFIX + base64.b64encode(encrypted).decode("ascii")
         # WinAPI returned FALSE (e.g. DPAPI unavailable): raise so the
         # fallback below is logged too — never silently store plaintext.
-        raise ctypes.WinError(ctypes.GetLastError())
+        raise ctypes.WinError(ctypes.get_last_error())
     except Exception:
         pm.log_exception("dpapi_encrypt: DPAPI 加密失败，已回退明文存储")
     return plaintext  # fallback: store as-is
@@ -80,7 +95,7 @@ def _dpapi_decrypt(stored: str) -> str:
             return decrypted.decode("utf-8")
         # WinAPI returned FALSE: log and fall through to the plaintext
         # compatibility path (behavior unchanged).
-        raise ctypes.WinError(ctypes.GetLastError())
+        raise ctypes.WinError(ctypes.get_last_error())
     except Exception:
         pm.log_exception("dpapi_decrypt: DPAPI 解密失败，已按原样返回")
     return stored  # fallback: treat as plaintext
@@ -120,10 +135,6 @@ _SAVE_KEYS = (
     "wsl_written",
     "win_rect", "win_max",
 )
-
-
-def package_dir() -> str:
-    return PACKAGE_DIR
 
 
 def valid_host(h) -> bool:

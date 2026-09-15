@@ -172,7 +172,8 @@ ProxyManager/
 │   └── tray.png
 ├── build.bat                  # PyInstaller (installs requirements-build.txt)
 ├── start.bat
-├── requirements.txt           # Runtime dependencies
+├── pyproject.toml             # Version, runtime deps, ruff/pytest config
+├── requirements.txt           # Runtime dependencies (same pins as pyproject)
 ├── requirements-build.txt     # Runtime + PyInstaller
 └── .github/workflows/         # ci.yml (ruff + pytest) and release.yml
 ```

@@ -36,8 +36,7 @@ _CRASH_LOG = os.path.join(_APPDATA, "ProxyManager", "crash.log")
 
 # Single-instance wake signal: a second launch writes "show" and exits; the
 # running instance polls for it and brings its window back.
-_SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
-SIGNAL_FILE = _SIGNAL_FILE
+SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
 
 
 def _log_crash(exc_type, exc_val, exc_tb):
@@ -133,8 +132,6 @@ def _config_dir() -> str:
 
 
 config_dir = _config_dir  # public alias
-
-CONFIG_FILE = os.path.join(_config_dir(), "config.json")
 
 WSL_PROXY_BEGIN = "# >>> proxy-manager begin >>>"
 WSL_PROXY_END   = "# <<< proxy-manager end <<<"
@@ -266,30 +263,6 @@ def wininet_url(host, port, scheme="http") -> str:
 
 def is_proxy_url(url) -> bool:
     return parse_proxy_url(url) is not None
-
-
-def rewrite_proxy_host(url, new_host) -> str:
-    """Keep scheme/userinfo/port, replace host (WSL NAT gateway swap)."""
-    parsed = parse_proxy_url(url)
-    if not parsed:
-        return url
-    return build_proxy_url(
-        new_host, parsed["port"], parsed["scheme"],
-        parsed["user"], parsed["password"])
-
-
-def nat_host(host: str) -> str:
-    """In WSL2 NAT mode, loopback inside the distro does not reach Windows;
-    return the host gateway IP. Mirrored mode and non-loopback hosts pass through."""
-    if str(host).lower() in LOOPBACK_HOSTS and get_wsl_network_mode() != "Mirrored":
-        gw = _get_wsl_gateway_ip()
-        if gw:
-            return gw
-    return host
-
-
-def _proxy_kwargs(scheme="http", user="", password=""):
-    return {"scheme": scheme or "http", "user": user or "", "password": password or ""}
 
 
 # ─── Network Info ─────────────────────────────────────────────────────────────
@@ -1176,7 +1149,7 @@ unset _pm_np _pm_e
             ('block=$(mktemp); cat > "$block"; ' if enable else '')
             + 'apply_posix() { f="$1"; ' + create
             + '[ -n "$(tail -c1 "$f" 2>/dev/null)" ] && printf \'\\n\' >> "$f"; '
-            + f'tmp=$(mktemp) && bak=$(mktemp) && cp -a "$f" "$bak" 2>/dev/null '
+            + 'tmp=$(mktemp) && bak=$(mktemp) && cp -a "$f" "$bak" 2>/dev/null '
             + f'&& sed \'/{begin}/,/{end}/d\' "$f" > "$tmp" '
             + '&& { cat "$tmp" > "$f" || cat "$bak" > "$f"; } '
             + '; rm -f "$tmp" "$bak"; '
@@ -1213,7 +1186,7 @@ unset _pm_np _pm_e
             b64 = _b64.b64encode(fish_text.encode("utf-8")).decode("ascii")
             script += (
                 'mkdir -p "$HOME/.config/fish/conf.d"; '
-                f'echo {b64} | (base64 -d 2>/dev/null || base64 --decode) '
+                f"printf '%s\\n' '{b64}' | (base64 -d 2>/dev/null || base64 --decode) "
                 '> "$HOME/.config/fish/conf.d/proxy-manager.fish"; '
                 'rm -f "$block"'
             )
@@ -1247,6 +1220,36 @@ unset _pm_np _pm_e
         if not enable:
             return True
         return str(e) or "WSL 操作失败"
+
+
+def _git_win_get(key: str):
+    """Current git global value for `key`, or None if unset / git missing."""
+    try:
+        r = subprocess.run(
+            ["git", "config", "--global", "--get", key],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+    except FileNotFoundError:
+        return None
+    if r.returncode != 0:
+        return None
+    v = (r.stdout or "").strip()
+    return v or None
+
+
+def _git_win_restore_key(key: str, prev) -> None:
+    """Put `key` back to `prev` (None → unset all values)."""
+    if prev:
+        subprocess.run(
+            ["git", "config", "--global", "--replace-all", key, prev],
+            capture_output=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        subprocess.run(
+            ["git", "config", "--global", "--unset-all", key],
+            capture_output=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
 
 
 def _git_win_unset(url: str) -> None:
@@ -1306,11 +1309,16 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                 try:
                     if enable:
                         sq = _bash_sq(url)
-                        # https 失败时回滚 http，避免半开状态
+                        # https 失败时把 http.proxy 恢复成写入前的值（没有则
+                        # unset），避免半开，也避免把用户原来的代理删掉。
                         cmd = (
+                            "old_http=$(git config --global --get http.proxy 2>/dev/null || true); "
                             f"git config --global --replace-all http.proxy '{sq}' && "
                             f"(git config --global --replace-all https.proxy '{sq}' || "
-                            f"(git config --global --unset-all http.proxy 2>/dev/null; exit 1))"
+                            "{ if [ -n \"$old_http\" ]; then "
+                            "git config --global --replace-all http.proxy \"$old_http\"; "
+                            "else git config --global --unset-all http.proxy 2>/dev/null; fi; "
+                            "exit 1; })"
                         )
                     elif host or port:
                         # Remove only values equal to the URL this tool manages;
@@ -1341,7 +1349,11 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                 return "; ".join(errs)
         else:
             if enable:
-                # http.proxy 成功、https.proxy 失败时回滚，避免半开状态
+                # Snapshot first so a failed https.proxy write can put http.proxy
+                # back to the user's value instead of --unset-all (which dropped
+                # a proxy this tool had already replaced).
+                prev = {key: _git_win_get(key)
+                        for key in ("http.proxy", "https.proxy")}
                 written = []
                 for key in ("http.proxy", "https.proxy"):
                     r = subprocess.run(
@@ -1351,10 +1363,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                         creationflags=subprocess.CREATE_NO_WINDOW)
                     if r.returncode != 0:
                         for k in written:
-                            subprocess.run(
-                                ["git", "config", "--global", "--unset-all", k],
-                                capture_output=True, timeout=15,
-                                creationflags=subprocess.CREATE_NO_WINDOW)
+                            _git_win_restore_key(k, prev.get(k))
                         return (r.stderr or f"exit {r.returncode}").strip() \
                             or f"exit {r.returncode}"
                     written.append(key)

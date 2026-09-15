@@ -6,8 +6,6 @@ continue-on-error."""
 
 from unittest.mock import patch
 
-import pytest
-
 import config_store
 import proxy_manager as pm
 from js_api import Api
@@ -117,7 +115,8 @@ class TestGitHalfWriteRollback:
             class R:
                 returncode = 0
                 stderr = ""
-            if len(cmd) > 4 and cmd[4] == "https.proxy":
+                stdout = ""
+            if len(cmd) > 4 and cmd[3] == "--replace-all" and cmd[4] == "https.proxy":
                 R.returncode = 1
                 R.stderr = "boom"
             return R()
@@ -125,12 +124,37 @@ class TestGitHalfWriteRollback:
         with patch.object(pm.subprocess, "run", side_effect=fake_run):
             ret = pm.set_git_proxy("127.0.0.1", "7897", True, use_wsl=False)
 
-        assert ret != True
+        assert ret is not True
         keys = [c[4] for c in ran if len(c) > 4]
         assert "http.proxy" in keys and "https.proxy" in keys
-        # 回滚：最后一条必须是 unset http.proxy
+        # 写入前没有用户值：回滚必须 unset，不能把用户代理留在半开状态
         last = ran[-1]
         assert last[3] == "--unset-all" and last[4] == "http.proxy"
+
+    def test_windows_enable_restores_previous_http_proxy(self, monkeypatch):
+        """https.proxy 失败时必须把 http.proxy 写回用户原值，而不是 unset。"""
+        ran = []
+
+        def fake_run(cmd, **kw):
+            ran.append(list(cmd))
+            class R:
+                returncode = 0
+                stderr = ""
+                stdout = ""
+            if cmd[3:] == ["--get", "http.proxy"]:
+                R.stdout = "http://corp:8080\n"
+            if len(cmd) > 4 and cmd[3] == "--replace-all" and cmd[4] == "https.proxy":
+                R.returncode = 1
+                R.stderr = "boom"
+            return R()
+
+        with patch.object(pm.subprocess, "run", side_effect=fake_run):
+            ret = pm.set_git_proxy("127.0.0.1", "7897", True, use_wsl=False)
+
+        assert ret is not True
+        last = ran[-1]
+        assert last[3] == "--replace-all" and last[4] == "http.proxy"
+        assert last[5] == "http://corp:8080"
 
     def test_do_toggle_git_disable_keeps_managed_url_on_failure(
             self, tmp_path, monkeypatch):

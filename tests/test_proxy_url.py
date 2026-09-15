@@ -39,16 +39,6 @@ def test_is_proxy_url():
     assert not pm.is_proxy_url("未设置")
 
 
-def test_rewrite_proxy_host_keeps_auth():
-    url = pm.build_proxy_url("127.0.0.1", "7897", "socks5", "u", "p")
-    out = pm.rewrite_proxy_host(url, "172.24.0.1")
-    parsed = pm.parse_proxy_url(out)
-    assert parsed["host"] == "172.24.0.1"
-    assert parsed["user"] == "u"
-    assert parsed["password"] == "p"
-    assert parsed["scheme"] == "socks5"
-
-
 def test_is_valid_scheme_and_userinfo():
     assert pm.is_valid_scheme("http")
     assert pm.is_valid_scheme("SOCKS5")
