@@ -167,15 +167,15 @@ def is_valid_scheme(s) -> bool:
 def is_valid_userinfo(s) -> bool:
     """Username or password: empty is fine; letters, digits, '.', '_' and '-' only.
 
-    Tight charset so JS encodeURIComponent and Python quote() produce the same
-    bytes — a looser set (e.g. `!'()*`) diverged and made switches flip off.
+    Tight charset so JS encodeURIComponent and Python quote(safe="!") produce
+    the same bytes. `@` and `!` are allowed (common proxy passwords).
     """
     if s is None:
         return True
     text = str(s)
     if not text:
         return True
-    return text.isascii() and all(c.isalnum() or c in "._-" for c in text)
+    return text.isascii() and all(c.isalnum() or c in "._-@!" for c in text)
 
 
 def build_proxy_url(host, port, scheme="http", user="", password="") -> str:
@@ -185,9 +185,9 @@ def build_proxy_url(host, port, scheme="http", user="", password="") -> str:
         sch = "http"
     auth = ""
     if user:
-        auth = quote(str(user), safe="")
+        auth = quote(str(user), safe="!")
         if password:
-            auth += ":" + quote(str(password), safe="")
+            auth += ":" + quote(str(password), safe="!")
         auth += "@"
     return f"{sch}://{auth}{host}:{port}"
 
@@ -1070,8 +1070,9 @@ def _wsl_distros():
                            creationflags=subprocess.CREATE_NO_WINDOW)
         if r.returncode != 0:
             return []
-        names = (r.stdout.decode("utf-16-le", errors="ignore")
-                 .replace("\x00", "").lstrip("\ufeff").split())
+        raw = (r.stdout.decode("utf-16-le", errors="ignore")
+               .replace("\x00", "").lstrip("\ufeff"))
+        names = [n.strip() for n in raw.replace("\r\n", "\n").split("\n") if n.strip()]
         return [n for n in names if n and not n.startswith("docker-desktop")]
     except Exception:
         return []

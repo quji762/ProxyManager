@@ -364,35 +364,35 @@ class TestGitWslUnsetEscaping(unittest.TestCase):
 
 
 class TestDpapiFailureLogging(unittest.TestCase):
-    """DPAPI 失败时回退明文的行为保持不变，但必须留下日志痕迹——
-    系统级 DPAPI 失败时 config.json 不得无声写入明文凭据。
+    """DPAPI 失败时拒绝明文落盘，并留下日志。
     全程 mock，绝不真实触发 DPAPI 失败，也不写真实 crash.log。"""
 
-    def test_encrypt_exception_falls_back_plaintext_and_logs(self):
+    def test_encrypt_exception_raises_and_logs(self):
         import proxy_manager as pm
 
         with mock.patch.object(config_store._crypt32, "CryptProtectData",
                                side_effect=OSError("mock dpapi failure")), \
                 mock.patch.object(pm, "log_exception") as fake_log:
-            self.assertEqual(config_store._dpapi_encrypt("secret"), "secret")
+            with self.assertRaises(config_store.DpapiError):
+                config_store._dpapi_encrypt("secret")
         fake_log.assert_called_once()
         msg = fake_log.call_args[0][0]
         self.assertIn("dpapi_encrypt", msg)
-        self.assertIn("回退明文", msg)
+        self.assertIn("拒绝明文", msg)
 
-    def test_encrypt_winapi_false_falls_back_plaintext_and_logs(self):
-        """CryptProtectData 返回 FALSE（不抛异常的 DPAPI 失败形态）
-        同样必须走日志回退分支，不得静默。"""
+    def test_encrypt_winapi_false_raises_and_logs(self):
+        """CryptProtectData 返回 FALSE 同样拒绝明文落盘。"""
         import proxy_manager as pm
 
         with mock.patch.object(config_store._crypt32, "CryptProtectData",
                                return_value=0), \
                 mock.patch.object(pm, "log_exception") as fake_log:
-            self.assertEqual(config_store._dpapi_encrypt("secret"), "secret")
+            with self.assertRaises(config_store.DpapiError):
+                config_store._dpapi_encrypt("secret")
         fake_log.assert_called_once()
         msg = fake_log.call_args[0][0]
         self.assertIn("dpapi_encrypt", msg)
-        self.assertIn("回退明文", msg)
+        self.assertIn("拒绝明文", msg)
 
     def test_encrypt_success_does_not_log(self):
         """加密成功路径不得触发失败日志。"""
@@ -431,6 +431,23 @@ class TestDpapiFailureLogging(unittest.TestCase):
             self.assertEqual(config_store._dpapi_decrypt(stored), stored)
         fake_log.assert_called_once()
         self.assertIn("dpapi_decrypt", fake_log.call_args[0][0])
+
+    def test_save_config_does_not_write_plaintext_on_encrypt_failure(self):
+        import tempfile
+        from pathlib import Path
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cfg_path = Path(tmp.name) / "config.json"
+        (Path(tmp.name) / "config.json").write_text("{}", encoding="utf-8")
+        with mock.patch.object(config_store, "CONFIG_FILE", str(cfg_path)), \
+                mock.patch.object(config_store, "APP_DIR", tmp.name), \
+                mock.patch.object(config_store, "_dpapi_encrypt",
+                                  side_effect=config_store.DpapiError("nope")):
+            with self.assertRaises(config_store.DpapiError):
+                config_store.save_config({"password": "super-secret", "host": "127.0.0.1"})
+        text = cfg_path.read_text(encoding="utf-8")
+        self.assertNotIn("super-secret", text)
 
     def test_crypt_apis_have_64bit_argtypes(self):
         """DATA_BLOB pointers must not be truncated on Win64."""

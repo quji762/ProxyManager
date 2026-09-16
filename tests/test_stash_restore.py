@@ -107,6 +107,15 @@ def _make_api(tmp_path, monkeypatch):
         return Api()
 
 
+def test_restore_success_payload_has_note_key():
+    from js_api import _mark_restored
+
+    out = _mark_restored({"ok": True, "note": None})
+    assert out["restored"] is True
+    assert out["note_key"] == "restored"
+    assert out["ok"] is True
+
+
 def test_ps_reenable_after_port_change_disables_cleanly(tmp_path, monkeypatch):
     """Enable @7897 → edit port → enable @7890 → disable: the first disable
     must clear everything (the tool's own 7897 values are not user state and

@@ -6,6 +6,49 @@ import config_store
 from js_api import Api
 
 
+def test_switch_port_phase2_failure_restores_old_applied(tmp_path, monkeypatch):
+    """Phase-2 enable failure must not leave endpoints OFF with applied_* moved."""
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "c.json"))
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api = Api()
+    api.host, api.port = "127.0.0.1", "7897"
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.scheme, api.user, api.password = "http", "", ""
+    managed = "http://127.0.0.1:7897"
+    enables = []
+
+    def set_ps(host, port, on, **kw):
+        enables.append((host, str(port), on))
+        if on and str(port) == "7890":
+            return "failed to bind"
+        return True
+
+    with patch("js_api.pm.get_ps_status", return_value=managed), \
+         patch("js_api.pm.get_sys_proxy", return_value="未设置"), \
+         patch("js_api.pm.get_git_proxy_win", return_value="未设置"), \
+         patch("js_api.pm.get_npm_proxy", return_value="未设置"), \
+         patch("js_api.pm.get_pip_proxy", return_value="未设置"), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value="未设置"), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value="未设置"), \
+         patch.object(api, "refresh_item", return_value={"on": False, "git": "未设置"}), \
+         patch("js_api.pm.set_ps_proxy", side_effect=set_ps), \
+         patch("js_api.pm.set_sys_proxy", return_value=True), \
+         patch("js_api.pm.set_git_proxy", return_value=True), \
+         patch("js_api.pm.set_wsl_proxy", return_value=True), \
+         patch("js_api.pm.set_npm_proxy", return_value=True), \
+         patch("js_api.pm.set_pip_proxy", return_value=True), \
+         patch("js_api.pm.set_npm_proxy_wsl", return_value=True), \
+         patch("js_api.pm.set_pip_proxy_wsl", return_value=True), \
+         patch("js_api.pm.get_wsl_network_mode", return_value="Mirrored"):
+        r = api.switch_port("7890", "127.0.0.1")
+
+    assert r["ok"] is False
+    assert r.get("error_key") == "errSwitchPartial"
+    assert api.applied_port == "7897"
+    assert api.port == "7897"
+    assert ( "127.0.0.1", "7897", True) in enables
+
+
 def test_switch_port_noop_when_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "c.json"))
     with patch("proxy_manager.get_net_counters", return_value=None):

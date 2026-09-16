@@ -9,7 +9,7 @@ import time
 import proxy_manager as pm
 from config_store import (
     APP_VERSION, DEFAULT_PORTS, MAX_BG_BYTES, PROBE_URLS, _cfg_lock,
-    _DPAPI_PREFIX, _dpapi_decrypt, _dpapi_encrypt,
+    _DPAPI_PREFIX, DpapiError, _dpapi_decrypt, _dpapi_encrypt,
     autostart_enabled, autostart_set, load_config, save_config, valid_host,
     config_load_warning,
 )
@@ -26,6 +26,32 @@ _BG_FILTER = "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif"
 # user:pass@ 明文凭据，落盘 config.json 前逐值 DPAPI 加密（与 password
 # 字段同机制）；读回时按 DPAPI: 前缀解密，旧版明文暂存原样兼容。
 _STASH_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+def _mark_restored(r):
+    """Success payload after restoring a stashed proxy. Frontend toasts note_key."""
+    extra = "已恢复覆盖前的代理"
+    r["note"] = (r["note"] + "；" + extra) if r.get("note") else extra
+    r["note_key"] = "restored"
+    r["restored"] = True
+    return r
+
+
+def _save_failed(result):
+    return result is False or (isinstance(result, dict) and result.get("error"))
+
+
+def _persist_cfg(cfg):
+    """Write config.json. Returns an error dict on failure, else None."""
+    try:
+        if not save_config(cfg):
+            return {"error": "配置文件写入失败（磁盘已满或权限不足）", "error_key": "saveFail"}
+        return None
+    except DpapiError:
+        return {
+            "error": "DPAPI 加密失败，密码未保存（不会以明文落盘）",
+            "error_key": "errDpapi",
+        }
 
 
 def _stash_encrypt(restore):
@@ -314,11 +340,18 @@ class Api:
                 # 中的解密态明文，直接回写会把 bf9602c 的暂存加密撤销掉。
                 # _stash_encrypt 对已带 DPAPI: 前缀的值原样保留，幂等。
                 # 加密的是函数入口处的快照（见 save_config 开头注释）。
-                cfg["restore"] = _stash_encrypt(restore_snapshot)
-                cfg["applied"] = self._applied_dict()
-                cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
-                if not save_config(cfg):
-                    return False
+                try:
+                    cfg["restore"] = _stash_encrypt(restore_snapshot)
+                    cfg["applied"] = self._applied_dict()
+                    cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
+                except DpapiError:
+                    return {
+                        "error": "DPAPI 加密失败，密码未保存（不会以明文落盘）",
+                        "error_key": "errDpapi",
+                    }
+                err = _persist_cfg(cfg)
+                if err:
+                    return err
         return True
 
     # ── status refresh: one call per slice, fired in parallel by the UI ──
@@ -486,12 +519,18 @@ class Api:
     def _persist_restore(self):
         with _cfg_lock:
             cfg = load_config()
-            # 暂存值 DPAPI 加密后落盘（含用户原代理凭据，不应明文持久化）
-            cfg["restore"] = _stash_encrypt(self._restore)
-            cfg["applied"] = self._applied_dict()
-            # WSL 侧"最后写入 URL"记录可能带 applied 凭据，同机制加密落盘
-            cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
-            save_config(cfg)
+            try:
+                # 暂存值 DPAPI 加密后落盘（含用户原代理凭据，不应明文持久化）
+                cfg["restore"] = _stash_encrypt(self._restore)
+                cfg["applied"] = self._applied_dict()
+                # WSL 侧"最后写入 URL"记录可能带 applied 凭据，同机制加密落盘
+                cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
+            except DpapiError as exc:
+                pm.log_exception("persist_restore: " + str(exc))
+                return
+            err = _persist_cfg(cfg)
+            if err:
+                pm.log_exception("persist_restore: " + err["error"])
 
     def _detected_url(self, target):
         if target == "ps":
@@ -673,10 +712,7 @@ class Api:
         if isinstance(r, dict) and r.get("ok"):
             self._restore.pop(target, None)
             self._persist_restore()
-            extra = "已恢复覆盖前的代理"
-            r["note"] = (r["note"] + "；" + extra) if r.get("note") else extra
-            r["restored"] = True
-            return r
+            return _mark_restored(r)
         return r if isinstance(r, dict) else {"error": "恢复覆盖前的代理失败"}
 
     def _quit_clear_owns(self, target):
@@ -949,8 +985,9 @@ class Api:
             self.scheme, self.user, self.password = (
                 new_kw["scheme"], new_kw["user"], new_kw["password"])
             with _cfg_lock:
-                if not save_config(self._cfg_with_port(new_port)):
-                    return {"ok": False, "error": "配置文件写入失败（磁盘已满或权限不足）"}
+                err = _persist_cfg(self._cfg_with_port(new_port))
+                if err:
+                    return {"ok": False, **err}
             return {"ok": True, "applied": []}
 
         # Match currently-applied endpoints against the LAST APPLIED address,
@@ -987,8 +1024,9 @@ class Api:
             self.applied_host, self.applied_port = new_host, new_port
             self.applied_kw = dict(new_kw)
             with _cfg_lock:
-                if not save_config(self._cfg_with_port(new_port)):
-                    return {"ok": False, "error": "配置文件写入失败（磁盘已满或权限不足）"}
+                err = _persist_cfg(self._cfg_with_port(new_port))
+                if err:
+                    return {"ok": False, **err}
             return {"ok": True, "applied": []}
 
         errs, notes = {}, []
@@ -1027,21 +1065,9 @@ class Api:
             return {"ok": False, "applied": [],
                     "error": "；".join(dis_errs.values()), "note": None}
 
-        with self._speed_lock:
-            self.host, self.port = new_host, new_port
-        self.scheme, self.user, self.password = (
-            new_kw["scheme"], new_kw["user"], new_kw["password"])
-        # The switch committed to the new address once phase 1 succeeded;
-        # a phase-2 endpoint failure leaves that endpoint OFF, not on the
-        # old address, so applied_* still moves.
-        self.applied_host, self.applied_port = new_host, new_port
-        self.applied_kw = dict(new_kw)
-        cfg_err = None
-        with _cfg_lock:
-            if not save_config(self._cfg_with_port(new_port)):
-                cfg_err = "配置文件写入失败（磁盘已满或权限不足）"
-
-        # Phase 2: re-enable each endpoint on the new address.
+        # Phase 2 must succeed before applied_* moves. A failed re-enable
+        # used to leave that endpoint OFF while applied_* already pointed at
+        # the new address.
         applied = []
         for tgt in self._SWITCH_TARGETS:
             if not enabled[tgt]:
@@ -1056,17 +1082,45 @@ class Api:
                     notes.append(extra_note)
             else:
                 errs[tgt] = err
-        # 各 WSL 端点的 NAT 提示由 _switch_enable_endpoint 按“实际是否改写”
-        # 各自产生；这里不再无条件追加一句可能失真的总提示。
+        if errs:
+            for tgt in applied:
+                self._switch_disable_endpoint(
+                    tgt, new_host, new_port, new_kw, ctx)
+            for tgt in disabled_ok:
+                self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)
+            self._persist_restore()
+            return {
+                "ok": False,
+                "applied": [],
+                "error": "；".join(errs.values()),
+                "error_key": "errSwitchPartial",
+                "note": None,
+            }
+        with self._speed_lock:
+            self.host, self.port = new_host, new_port
+        self.scheme, self.user, self.password = (
+            new_kw["scheme"], new_kw["user"], new_kw["password"])
+        self.applied_host, self.applied_port = new_host, new_port
+        self.applied_kw = dict(new_kw)
+        cfg_err = None
+        with _cfg_lock:
+            persist_err = _persist_cfg(self._cfg_with_port(new_port))
+            if persist_err:
+                cfg_err = persist_err["error"]
         if cfg_err:
-            errs["config"] = cfg_err
-        # Phase 2 的成功启用更新了 _wsl_written 记录，随 restore/applied
-        # 一起落盘，重启后 switch_port 仍能识别"这是本工具写的"。
+            self._persist_restore()
+            return {
+                "ok": False,
+                "applied": applied,
+                "error": cfg_err,
+                "error_key": "saveFail",
+                "note": "；".join(notes) if notes else None,
+            }
         self._persist_restore()
-        ok = not errs
-        return {"ok": ok, "applied": applied,
-                "error": "；".join(errs.values()) if errs else None,
-                "note": "；".join(notes) if notes else None}
+        return {"ok": True, "applied": applied,
+                "error": None,
+                "note": "；".join(notes) if notes else None,
+                "note_key": "switched" if applied else None}
 
     # ── switch_port helpers (Issues 8 & 17) ─────────────────────────────────
     _SWITCH_TARGETS = ("ps", "sys", "wsl", "gitwin", "gitwsl",
@@ -1536,8 +1590,13 @@ class Api:
                     return {"ok": False, "error": "图片超过 8MB，请选择更小的文件"}
             except OSError as e:
                 return {"ok": False, "error": str(e)}
-            if not self.save_config({"bg_path": path}):
-                return {"ok": False, "error": "配置文件写入失败（磁盘已满或权限不足）"}
+            saved = self.save_config({"bg_path": path})
+            if _save_failed(saved):
+                err = saved if isinstance(saved, dict) else {
+                    "error": "配置文件写入失败（磁盘已满或权限不足）",
+                    "error_key": "saveFail",
+                }
+                return {"ok": False, **err}
             return {"ok": True, "path": path, "name": os.path.basename(path)}
         except Exception as e:
             return {"ok": False, "error": str(e)}

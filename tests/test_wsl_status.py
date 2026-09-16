@@ -5,6 +5,19 @@ from types import SimpleNamespace
 import proxy_manager as pm
 
 
+def test_wsl_distros_keeps_names_with_spaces(monkeypatch):
+    """wsl -l -q is one name per line (UTF-16LE). split() used to smash
+    'Ubuntu 22.04' into two entries."""
+    payload = "Ubuntu 22.04\r\nDebian\r\ndocker-desktop\r\n".encode("utf-16-le")
+
+    def fake_run(*_a, **_k):
+        return SimpleNamespace(returncode=0, stdout=payload)
+
+    monkeypatch.setattr(pm.subprocess, "run", fake_run)
+    names = pm._wsl_distros()
+    assert names == ["Ubuntu 22.04", "Debian"]
+
+
 def test_wsl_write_failure_decodes_bytes_stderr(monkeypatch):
     monkeypatch.setattr(pm, "wsl_available", lambda: True)
     r = SimpleNamespace(stderr=b"Permission denied\n")

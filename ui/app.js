@@ -365,12 +365,14 @@ async function toggleEndpoint(ep, on) {
     else {
       // Flip the row immediately; a refresh corrects it. A disable that
       // restored a stashed proxy actually leaves the endpoint ON.
-      const restored = !!(r && (r.restored || (r.note && r.note.includes("已恢复覆盖前的代理"))));
+      const restored = !!(r && r.restored);
       state[ep] = on;
       if (on && !restored) lastApplied = Object.assign({}, a);
       if (restored) {
         state[ep] = true;
-        toast(r.note || t("restored"), "ok");
+        toast(r.note_key ? t(r.note_key) : t("restored"), "ok");
+      } else if (r && r.note_key) {
+        toast(t(r.note_key), "ok");
       } else if (r && r.note) {
         toast(r.note, "ok");
       } else {
@@ -723,7 +725,8 @@ function persistSoon() {
     // default (null) would otherwise overwrite the user's config.
     if (speedFullMbps != null) payload.speed_full = speedFullMbps;
     api.call("save_config", payload).then((ok) => {
-      if (ok === false) toast(t("saveFail"), "err");
+      if (ok && ok.error) toast(ok.error_key ? t(ok.error_key) : ok.error, "err");
+      else if (ok === false) toast(t("saveFail"), "err");
     }).catch(() => {});
   }, 400);
 }
@@ -758,7 +761,7 @@ async function allEndpoints(on, lane = null) {
       try {
         const r = await api.call("do_toggle", d.id, on, a.host, a.port, a.scheme, a.user, a.password);
         if (r && r.error) { toast(r.error_key ? t(r.error_key) : r.error, "err"); hadError = true; break; }
-        const restored = !!(r && (r.restored || (r.note && r.note.includes("已恢复覆盖前的代理"))));
+        const restored = !!(r && r.restored);
         state[d.id] = on;
         if (on && !restored) lastApplied = Object.assign({}, a);
         if (restored) state[d.id] = true;

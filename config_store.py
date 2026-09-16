@@ -28,6 +28,10 @@ except Exception:
 _DPAPI_PREFIX = "DPAPI:"
 
 
+class DpapiError(Exception):
+    """DPAPI 加密失败。调用方不得把明文密码写进 config.json。"""
+
+
 class _DATA_BLOB(ctypes.Structure):
     _fields_ = [("cbData", ctypes.wintypes.DWORD),
                 ("pbData", ctypes.POINTER(ctypes.c_char))]
@@ -54,7 +58,9 @@ _kernel32.LocalFree.restype = ctypes.c_void_p
 
 def _dpapi_encrypt(plaintext: str) -> str:
     """Encrypt a string with Windows DPAPI; returns base64 with DPAPI: prefix.
-    Falls back to returning the plaintext on failure (best-effort, logged)."""
+
+    失败时抛 DpapiError，绝不回退明文。调用方应拒绝保存并提示用户。
+    """
     try:
         data = plaintext.encode("utf-8")
         blob_in = _DATA_BLOB(
@@ -68,12 +74,12 @@ def _dpapi_encrypt(plaintext: str) -> str:
             encrypted = ctypes.string_at(blob_out.pbData, blob_out.cbData)
             _kernel32.LocalFree(blob_out.pbData)
             return _DPAPI_PREFIX + base64.b64encode(encrypted).decode("ascii")
-        # WinAPI returned FALSE (e.g. DPAPI unavailable): raise so the
-        # fallback below is logged too — never silently store plaintext.
         raise ctypes.WinError(ctypes.get_last_error())
-    except Exception:
-        pm.log_exception("dpapi_encrypt: DPAPI 加密失败，已回退明文存储")
-    return plaintext  # fallback: store as-is
+    except DpapiError:
+        raise
+    except Exception as exc:
+        pm.log_exception("dpapi_encrypt: DPAPI 加密失败，拒绝明文落盘")
+        raise DpapiError("DPAPI 加密失败，密码未保存") from exc
 
 
 def _dpapi_decrypt(stored: str) -> str:
@@ -395,6 +401,8 @@ def save_config(cfg):
             except OSError:
                 pass
             return True
+        except DpapiError:
+            raise
         except OSError:
             try:
                 os.unlink(tmp)

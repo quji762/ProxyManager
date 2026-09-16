@@ -49,8 +49,8 @@ def test_is_valid_scheme_and_userinfo():
     assert pm.is_valid_userinfo("a_b.1-2")
     assert not pm.is_valid_userinfo("a:b")
     assert not pm.is_valid_userinfo("a b")
-    assert not pm.is_valid_userinfo("a@b")
-    assert not pm.is_valid_userinfo("a!b")
+    assert pm.is_valid_userinfo("a@b")
+    assert pm.is_valid_userinfo("a!b")
 
 
 def test_parse_preserves_host_case():
