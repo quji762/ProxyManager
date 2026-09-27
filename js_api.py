@@ -7,6 +7,7 @@ import threading
 import time
 
 import proxy_manager as pm
+from messages import LStr, parts_of
 from config_store import (
     APP_VERSION, DEFAULT_PORTS, MAX_BG_BYTES, PROBE_URLS, _cfg_lock,
     _DPAPI_PREFIX, DpapiError, _dpapi_decrypt, _dpapi_encrypt,
@@ -27,11 +28,44 @@ _BG_FILTER = "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif"
 # 字段同机制）；读回时按 DPAPI: 前缀解密，旧版明文暂存原样兼容。
 _STASH_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
 
+# Endpoint labels for error prefixes. Every setter error arrives either as an
+# LStr/LJoin (bilingual, from messages.py / proxy_manager) or as a plain
+# string (OS error, git stderr, legacy setters) — this table prefixes the
+# endpoint name. Entries mapping to an i18n key render bilingually; ASCII
+# labels are language-neutral. The final "epLabel.sys" exists in messages.py;
+# the rest are ASCII in both languages so plain strings suffice.
+_ENDPOINT_LABELS = {
+    "ps": "PowerShell", "sys": None,  # sys label is bilingual (epLabel.sys)
+    "npm": "npm", "pip": "pip",
+    "npmwsl": "npm(WSL)", "pipwsl": "pip(WSL)",
+    "gitwin": "Git(Windows)", "gitwsl": "Git(WSL)", "wsl": "WSL",
+}
+
+
+def _endpoint_err(target, detail):
+    """Error dict for a failed endpoint write. `detail` may be an LStr/LJoin
+    (carries i18n parts) or a plain string. The dict carries `error` (zh
+    rendering, backward-compatible) plus `error_parts` so the web UI can
+    render it in the UI language."""
+    parts = parts_of(detail)
+    if parts is not None:
+        # LStr/LJoin: prefix is already baked into the parts (WSL(...) forms)
+        # or the label lives in the i18n template — pass through untouched.
+        err = str(detail)
+    else:
+        label = _ENDPOINT_LABELS.get(target)
+        label = "系统代理" if (target == "sys") else (label or "")
+        err = f"{label}: {detail}" if label else str(detail)
+    out = {"error": err}
+    if parts is not None:
+        out["error_parts"] = parts
+    elif target == "sys":
+        out["error_parts"] = [{"key": "labelSys"}]  # label-only part
+    return out
+
 
 def _mark_restored(r):
     """Success payload after restoring a stashed proxy. Frontend toasts note_key."""
-    extra = "已恢复覆盖前的代理"
-    r["note"] = (r["note"] + "；" + extra) if r.get("note") else extra
     r["note_key"] = "restored"
     r["restored"] = True
     return r
@@ -411,9 +445,10 @@ class Api:
     # getattr(pm, ...) at call time so tests can patch js_api.pm.set_* —
     # storing the function objects themselves would bind them at class
     # creation and silently bypass such patches (writing the real registry).
-    # Git and WSL endpoints are handled separately due to their unique logic.
+    # on_note is either an i18n key resolved through messages.TEMPLATES or
+    # None. Git and WSL endpoints are handled separately due to their logic.
     _ENDPOINT_INFO = {
-        "ps":     ("set_ps_proxy",      "PowerShell",  "get_ps_status",     "请新开一个终端后生效"),
+        "ps":     ("set_ps_proxy",      "PowerShell",  "get_ps_status",     "psNewTerm"),
         "sys":    ("set_sys_proxy",     "系统代理",    "get_sys_proxy",     None),
         "npm":    ("set_npm_proxy",     "npm",         "get_npm_proxy",     None),
         "pip":    ("set_pip_proxy",     "pip",         "get_pip_proxy",     None),
@@ -637,10 +672,11 @@ class Api:
                 # one is never stashed), so a missing/empty one is corrupted
                 # data — keep the stash instead of "restoring" nothing, which
                 # would silently drop the user's original values.
-                return {"error": "暂存数据不完整"}
+                return {"error": str(LStr("errStashIncomplete")),
+                        "error_key": "errStashIncomplete"}
             ret = pm.set_ps_env_vars(env)
             if ret is not True:
-                return {"error": f"PowerShell: {ret}"}
+                return _endpoint_err("ps", ret)
             return {"ok": True, "note": None}
         if target == "sys":
             pac_note = None
@@ -652,16 +688,19 @@ class Api:
                     password=parsed["password"])
                 ok, pac_note = self._sys_result(ret)
                 if not ok:
-                    return {"error": f"系统代理: {ret}"}
+                    return _endpoint_err("sys", ret)
             else:
                 # Only the bypass list was the user's: run the normal
                 # surgical disable first, then put the list back.
                 r = self.do_toggle("sys", False, _restoring=True)
                 if not isinstance(r, dict) or not r.get("ok"):
-                    return r if isinstance(r, dict) else {"error": "系统代理: 关闭失败"}
+                    if isinstance(r, dict):
+                        return r
+                    return dict(_endpoint_err("sys", "关闭失败"),
+                                error_key="errRestoreFail")
             ret = pm.set_sys_proxy_override(prev.get("override") or "")
             if ret is not True:
-                return {"error": f"系统代理: {ret}"}
+                return _endpoint_err("sys", ret)
             # 恢复路径重新启用了用户原代理；若用户机器上有 PAC，把警示带出
             # （_restore_previous_locked 会把它拼进最终 note）。
             return {"ok": True, "note": pac_note}
@@ -686,7 +725,9 @@ class Api:
                     self._restore.pop(target, None)
                     self._persist_restore()
                     # stash_dropped=True：调用方应继续执行正常关闭而不是提前返回
-                    return {"error": "暂存数据不完整且无法恢复，已从恢复列表移除", "stash_dropped": True}
+                    return {"error": str(LStr("errStashDroppedCorrupt")),
+                            "error_key": "errStashDroppedCorrupt",
+                            "stash_dropped": True}
                 prev = legacy
             else:
                 return self._finish_restore(target, r)
@@ -698,7 +739,8 @@ class Api:
             # 直接关闭该端点再手工重配。
             self._restore.pop(target, None)
             self._persist_restore()
-            return {"error": "暂存数据无法解密（DPAPI），已移除暂存；端点现在可以直接关闭",
+            return {"error": str(LStr("errStashDroppedDpapi")),
+                    "error_key": "errStashDroppedDpapi",
                     "stash_dropped": True}
         parsed = self._adopt_parsed(prev)
         if not parsed:
@@ -713,7 +755,9 @@ class Api:
             self._restore.pop(target, None)
             self._persist_restore()
             return _mark_restored(r)
-        return r if isinstance(r, dict) else {"error": "恢复覆盖前的代理失败"}
+        if isinstance(r, dict):
+            return r
+        return {"error": str(LStr("errRestoreFail")), "error_key": "errRestoreFail"}
 
     def _quit_clear_owns(self, target):
         """退出清理的归属判定：True 才对该端点执行 disable。
@@ -793,7 +837,7 @@ class Api:
             if on and not _restoring and not had_stash and target in self._restore:
                 self._restore.pop(target, None)
                 self._persist_restore()
-            err = {"error": msg}
+            err = _endpoint_err(target, msg)
             if error_key:
                 err["error_key"] = error_key
             return err
@@ -819,9 +863,9 @@ class Api:
             else:
                 ret = pm.set_wsl_proxy(h, p, False, **kw)
             if ret is not True:
-                return _fail(f"WSL: {ret}")
+                return _fail(ret)
             if on:
-                notes.append("已写入 ~/.bashrc、~/.zshrc 与 fish conf.d，请新开终端后生效")
+                notes.append(LStr("wslWrittenNote"))
         elif target in ("gitwin", "gitwsl"):
             label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
             use_wsl = target == "gitwsl"
@@ -833,7 +877,7 @@ class Api:
                         notes.append(nat_note)
                 ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **kw)
                 if ret is not True:
-                    return _fail(f"{label}: {ret}")
+                    return _fail(ret)
                 self._git_managed[target] = self._managed_url(gh, gp, **kw)
                 if use_wsl and not _restoring:
                     # 记录本次实际写入 WSL 配置的完整 URL（gh/gp 已含网关
@@ -844,7 +888,7 @@ class Api:
                 ret = pm.set_git_proxy(gh, gp, False, use_wsl=use_wsl, **gkw)
                 if ret is not True:
                     # 失败时保留 _git_managed：下次 disable 仍知道该卸哪条 URL
-                    return _fail(f"{label}: {ret}")
+                    return _fail(ret)
                 self._git_managed[target] = None
                 if use_wsl:
                     # 关闭成功后该端点不再有本工具写入的 URL：清掉记录，
@@ -868,17 +912,15 @@ class Api:
             if target == "sys":
                 ok, sys_note = self._sys_result(ret)
                 if not ok:
-                    return _fail(f"{label}: {ret}")
+                    return _fail(ret)
                 if on and sys_note:
                     notes.append(sys_note)
                 if on and pm.sys_proxy_per_machine():
-                    notes.append(
-                        "检测到 ProxySettingsPerUser=0（按机器策略管理代理）：本工具写入的用户级代理可能不生效"
-                    )
+                    notes.append(LStr("sysPerMachineNote"))
             elif ret is not True:
-                return _fail(f"{label}: {ret}")
+                return _fail(ret)
             if on and on_note:
-                notes.append(on_note)
+                notes.append(LStr(on_note))
             if on and not _restoring and target in ("npmwsl", "pipwsl"):
                 # 记录与写入同一 host/port，杜绝二次探测造成的记录漂移
                 self._wsl_written[target] = self._managed_url(wh, wp, **kw)
@@ -887,7 +929,7 @@ class Api:
                 self._wsl_written[target] = None
                 self._persist_restore()
         else:
-            return _fail(f"未知端点 {target}")
+            return _fail(LStr("errUnknownEndpoint", {"target": target}))
         if on and not _restoring:
             # Commit only after the endpoint write succeeded: a failed enable
             # must not make switch_port treat the still-old endpoints as ours,
@@ -903,7 +945,20 @@ class Api:
             self.applied_host, self.applied_port = h, p
             self.applied_kw = dict(kw)
             self._persist_restore()
-        return {"ok": True, "note": "；".join(notes) if notes else None}
+        out = {"ok": True, "note": "；".join(notes) if notes else None}
+        # Each note may be an LStr (bilingual) or a plain string (PAC note
+        # from pm.set_sys_proxy, restore-path notes): parts_of() picks out the
+        # addressable ones so the UI can render them in the UI language.
+        note_parts = []
+        for n in notes:
+            parts = parts_of(n)
+            if parts:
+                note_parts.extend(parts)
+            else:
+                note_parts.append({"text": str(n)})
+        if notes:
+            out["note_parts"] = note_parts
+        return out
 
     def _wsl_url_target(self, host, port):
         """Host/port that WSL-side endpoints should write: in NAT mode a
@@ -930,9 +985,8 @@ class Api:
         if pm.get_wsl_network_mode() == "Mirrored":
             return None
         if (str(write_host), str(write_port)) != (str(orig_host), str(orig_port)):
-            return "NAT 模式下 WSL 无法访问 127.0.0.1，已自动改用宿主网关 IP。"
-        return ("NAT 模式下无法获取宿主网关 IP，仍写入 127.0.0.1，"
-                "WSL 内代理可能不可达")
+            return LStr("natRewritten")
+        return LStr("natNoGateway")
 
     def _git_unset_target(self, target):
         """Address whose git proxy a disable should remove: this session's
@@ -963,17 +1017,17 @@ class Api:
     def _switch_port(self, new_port, host=None, scheme=None, user=None, password=None):
         new_port = str(new_port).strip()
         if not pm.is_valid_port(new_port):
-            return {"error": "端口须为 1-65535 的整数"}
+            return {"error": "端口须为 1-65535 的整数", "error_key": "badPort"}
         new_port = str(int(new_port))
         new_host = str(host).strip() if host else self.host
         if not valid_host(new_host):
-            return {"error": "代理地址不合法，请先修正"}
+            return {"error": "代理地址不合法，请先修正", "error_key": "errBadAddr"}
         new_kw = self._proxy_kw(scheme, user, password)
         if scheme is not None and not pm.is_valid_scheme(new_kw["scheme"]):
-            return {"error": "代理协议不合法"}
+            return {"error": "代理协议不合法", "error_key": "errBadScheme"}
         if (user is not None and not pm.is_valid_userinfo(new_kw["user"])) \
                 or (password is not None and not pm.is_valid_userinfo(new_kw["password"])):
-            return {"error": "用户名或密码含非法字符"}
+            return {"error": "用户名或密码含非法字符", "error_key": "errBadUserinfo"}
         old_kw = dict(self.applied_kw)
         if new_port == self.applied_port and new_host == self.applied_host \
                 and new_kw == old_kw:
@@ -1135,12 +1189,11 @@ class Api:
         if target == "sys":
             ret = pm.set_sys_proxy(old_h, old_p, False, **old_kw)
             ok, _note = self._sys_result(ret)
-            return None if ok else f"系统代理: {ret}"
+            return None if ok else _endpoint_err(target, ret)["error"]
         if target == "wsl":
             ret = pm.set_wsl_proxy(old_h, old_p, False, **old_kw)
-            return None if ret is True else f"WSL: {ret}"
+            return None if ret is True else _endpoint_err(target, ret)["error"]
         if target in ("gitwin", "gitwsl"):
-            label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
             use_wsl = target == "gitwsl"
             uh, up, ukw = ctx["gitwsl_unset"] if target == "gitwsl" \
                 else (old_h, old_p, old_kw)
@@ -1154,7 +1207,7 @@ class Api:
                 if use_wsl:
                     self._wsl_written[target] = None
                     self._persist_restore()
-            return None if ret is True else f"{label}: {ret}"
+            return None if ret is True else _endpoint_err(target, ret)["error"]
         if target == "npm":
             ret = pm.set_npm_proxy(old_h, old_p, False, **old_kw)
             return None if ret is True else f"npm: {ret}"
@@ -1162,7 +1215,6 @@ class Api:
             ret = pm.set_pip_proxy(old_h, old_p, False, **old_kw)
             return None if ret is True else f"pip: {ret}"
         if target in ("npmwsl", "pipwsl"):
-            label = "npm(WSL)" if target == "npmwsl" else "pip(WSL)"
             wh, wp, wkw = old_h, old_p, old_kw
             getter = pm.get_npm_proxy_wsl if target == "npmwsl" \
                 else pm.get_pip_proxy_wsl
@@ -1178,7 +1230,7 @@ class Api:
                 # 同 gitwsl：disable 成功即清"最后写入 URL"记录（_do_toggle 口径）
                 self._wsl_written[target] = None
                 self._persist_restore()
-            return None if ret is True else f"{label}: {ret}"
+            return None if ret is True else _endpoint_err(target, ret)["error"]
         return None
 
     def _switch_enable_endpoint(self, target, new_host, new_port, new_kw):
@@ -1190,14 +1242,14 @@ class Api:
             wh, wp = self._wsl_url_target(new_host, new_port)
             ret = pm.set_wsl_proxy(wh, wp, True, **new_kw)
             note = self._wsl_nat_note(new_host, new_port, wh, wp) if ret is True else None
-            return (None if ret is True else f"WSL: {ret}", None, note)
+            return (None if ret is True else _endpoint_err(target, ret)["error"], None, note)
         if target == "ps":
             ret = pm.set_ps_proxy(new_host, new_port, True, **new_kw)
             return (None if ret is True else f"PowerShell: {ret}", None, None)
         if target == "sys":
             ret = pm.set_sys_proxy(new_host, new_port, True, **new_kw)
             ok, pac_note = self._sys_result(ret)
-            return (None if ok else f"系统代理: {ret}", None, pac_note)
+            return (None if ok else _endpoint_err(target, ret)["error"], None, pac_note)
         if target in ("gitwin", "gitwsl"):
             label = "Git(Windows)" if target == "gitwin" else "Git(WSL)"
             use_wsl = target == "gitwsl"
@@ -1227,7 +1279,7 @@ class Api:
                 self._wsl_written[target] = self._managed_url(wh, wp, **new_kw)
                 note = self._wsl_nat_note(new_host, new_port, wh, wp)
                 return (None, None, note)
-            return (f"{label}: {ret}", None, None)
+            return (_endpoint_err(target, ret)["error"], None, None)
         return (None, None, None)
 
     def _cfg_with_port(self, new_port):
@@ -1257,9 +1309,13 @@ class Api:
                     if cur is not None and self._speed_prev is not None:
                         up = (cur[0] - self._speed_prev[0]) / dt
                         dn = (cur[1] - self._speed_prev[1]) / dt
-                        if 0 <= up <= 100 * 1024 * 1024:
+                        # The cap rejects counter glitches/resets, not real
+                        # traffic: 1 GiB/s is above anything a 10 GbE NIC
+                        # produces in one second (~125 MB/s), and the speed
+                        # bar tops out at the user's speed_full setting.
+                        if 0 <= up <= 1024 * 1024 * 1024:
                             up_str = pm.format_speed(up)
-                        if 0 <= dn <= 100 * 1024 * 1024:
+                        if 0 <= dn <= 1024 * 1024 * 1024:
                             dn_str = pm.format_speed(dn)
                             dn_num = float(dn)
                     self._speed_prev = cur if cur is not None else self._speed_prev
@@ -1363,6 +1419,61 @@ class Api:
             return False
         return str(detected).strip() == str(recorded).strip()
 
+    # ── update check (one GitHub API call per UI session, on demand) ──
+    _GITHUB_LATEST = "https://api.github.com/repos/quji762/ProxyManager/releases/latest"
+    _UPDATE_CACHE = None  # class-level: (monotonic_time, payload)
+
+    def check_update(self):
+        """Compare APP_VERSION against the latest GitHub release tag.
+
+        Returns {status: "latest"|"update"|"error", ...}. No config flag:
+        the check only happens when the UI calls this (boot, once per
+        session), it never phones home in the background, and failures are
+        silent (offline machines see nothing)."""
+        import urllib.request as _urlreq
+        import json as _json
+
+        cls = type(self)
+        now = time.monotonic()
+        cached = cls._UPDATE_CACHE
+        if cached and now - cached[0] < 600:
+            return dict(cached[1])
+
+        def _result(status, **kw):
+            payload = {"status": status, **kw}
+            cls._UPDATE_CACHE = (now, payload)
+            return dict(payload)
+
+        try:
+            req = _urlreq.Request(
+                self._GITHUB_LATEST,
+                headers={"Accept": "application/vnd.github+json",
+                         "User-Agent": "ProxyManager-UpdateCheck"})
+            with _urlreq.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            tag = str(data.get("tag_name") or "").strip()
+            if not tag:
+                return _result("error", error="empty tag")
+            latest = tag.lstrip("vV")
+            current = str(APP_VERSION).lstrip("vV")
+
+            def _parts(v):
+                out = []
+                for piece in v.split("."):
+                    try:
+                        out.append(int(piece))
+                    except ValueError:
+                        break
+                return tuple(out) or (0,)
+
+            if _parts(latest) > _parts(current):
+                return _result("update", latest=latest,
+                               url=str(data.get("html_url") or
+                                       "https://github.com/quji762/ProxyManager/releases"))
+            return _result("latest")
+        except Exception as e:
+            return _result("error", error=str(e)[:120])
+
     def copy(self, text):
         """Clipboard fallback for pages where navigator.clipboard is
         unavailable. clip.exe takes the console codepage; every copyable value
@@ -1409,9 +1520,12 @@ class Api:
             url = vars_.get("HTTP_PROXY") or vars_.get("HTTPS_PROXY") or vars_.get("ALL_PROXY")
             parsed = self._adopt_parsed(url)
             if not parsed:
-                return {"ok": False, "error": "未设置代理，无法测试"}
+                return {"ok": False, "error": "未设置代理，无法测试",
+                        "error_key": "errNoProxyToTest"}
             if not valid_host(parsed["host"]):
-                return {"ok": False, "error": f"代理地址无效：{url}"}
+                return {"ok": False, "error": f"代理地址无效：{url}",
+                        "error_key": "errBadProxyUrl",
+                        "error_params": {"url": str(url)}}
             return self._proxy_probe(str(url).strip(), parsed, _t, _urlreq)
         # WSL side: the proxy URL lives inside the distro; probe THROUGH it
         # from within WSL so the path matches what npm/pip/git will use.
@@ -1428,14 +1542,19 @@ class Api:
         }
         wfn = wsl_sources.get(which)
         if not wfn:
-            return {"ok": False, "error": f"未知渠道 {which}"}
+            return {"ok": False, "error": f"未知渠道 {which}",
+                    "error_key": "errUnknownChannel",
+                    "error_params": {"which": str(which)}}
         result = wfn() or {}
         url = result.get("HTTP_PROXY") or result.get("HTTPS_PROXY") or result.get("ALL_PROXY")
         parsed = self._adopt_parsed(url)
         if not parsed:
-            return {"ok": False, "error": "未设置代理，无法测试"}
+            return {"ok": False, "error": "未设置代理，无法测试",
+                    "error_key": "errNoProxyToTest"}
         if not valid_host(parsed["host"]):
-            return {"ok": False, "error": f"代理地址无效：{url}"}
+            return {"ok": False, "error": f"代理地址无效：{url}",
+                    "error_key": "errBadProxyUrl",
+                    "error_params": {"url": str(url)}}
         return self._wsl_proxy_probe(str(url).strip(), parsed)
 
     def _proxy_probe(self, proxy_url, parsed, _t, urlreq):
@@ -1446,11 +1565,12 @@ class Api:
         if curl:
             return self._curl_probe(curl, proxy_url)
         if parsed["scheme"].startswith("socks"):
-            return {"ok": False, "error": "SOCKS 测试需要系统 curl"}
+            return {"ok": False, "error": "SOCKS 测试需要系统 curl",
+                    "error_key": "errSocksNeedsCurl"}
         proxy = urlreq.ProxyHandler({
             "http": proxy_url, "https": proxy_url})
         opener = urlreq.build_opener(proxy)
-        last_err = "连接失败"
+        last_err = LStr("errConnFail")
         t0 = _t.perf_counter()
         for dest in PROBE_URLS:
             try:
@@ -1463,11 +1583,12 @@ class Api:
                     return {"ok": True, "ms": ms}
                 last_err = f"HTTP {resp.status}"
             except Exception as e:
-                last_err = str(e)[:160] or "连接失败"
-        return {"ok": False, "error": last_err}
+                last_err = str(e)[:160] or LStr("errConnFail")
+        return {"ok": False, "error": str(last_err),
+                "error_key": last_err.key if isinstance(last_err, LStr) else None}
 
     def _curl_probe(self, curl, proxy_url):
-        last_err = "连接失败"
+        last_err = LStr("errConnFail")
         for dest in PROBE_URLS:
             try:
                 r = subprocess.run(
@@ -1481,8 +1602,9 @@ class Api:
                     return {"ok": True, "ms": int(float(parts[1]) * 1000)}
                 last_err = self._http_probe_err(parts[0] if parts else "")
             except Exception as e:
-                last_err = str(e)[:160] or "连接失败"
-        return {"ok": False, "error": last_err}
+                last_err = str(e)[:160] or LStr("errConnFail")
+        return {"ok": False, "error": str(last_err),
+                "error_key": last_err.key if isinstance(last_err, LStr) else None}
 
     @staticmethod
     def _http_probe_err(token):
@@ -1490,13 +1612,15 @@ class Api:
 
         The WSL script echoes FAIL when every URL misses; curl prints 000
         when it cannot talk to the proxy. Neither is an HTTP status.
+        Returns an LStr so the chip error renders in the UI language; the
+        zh text is unchanged for existing callers/tests.
         """
         code = str(token or "").strip()
         if not code or code in ("FAIL", "000", "0"):
-            return "连接失败"
+            return LStr("errConnFail")
         if code.isdigit():
             return f"HTTP {code}"
-        return "连接失败"
+        return LStr("errConnFail")
 
     def _wsl_proxy_probe(self, proxy_url, parsed):
         """Same probe executed inside WSL via curl (through the proxy)."""
@@ -1521,8 +1645,13 @@ class Api:
             if len(out) >= 2 and out[0] in ("204", "200"):
                 return {"ok": True, "ms": int(float(out[1]) * 1000)}
             if not pm.wsl_available():
-                return {"ok": False, "error": "WSL 不可用"}
-            return {"ok": False, "error": self._http_probe_err(out[0] if out else "")}
+                return {"ok": False, "error": str(LStr("errWslUnavailable")),
+                        "error_key": "errWslUnavailable"}
+            err = self._http_probe_err(out[0] if out else "")
+            out_ = {"ok": False, "error": str(err)}
+            if isinstance(err, LStr):
+                out_["error_key"] = err.key
+            return out_
         except Exception as e:
             return {"ok": False, "error": str(e)[:120] or "连接失败"}
 
@@ -1558,7 +1687,10 @@ class Api:
     def pick_background(self):
         """Native file picker via PowerShell (process-isolated, so no COM
         apartment headaches inside the pywebview process). stdout is forced
-        to UTF-8 so Chinese paths survive the console round-trip."""
+        to UTF-8 so Chinese paths survive the console round-trip. The dialog
+        title/filter follow the UI language (bgPickDialog* keys)."""
+        dlg_title = LStr("bgPickDialogTitle")
+        dlg_filter = LStr("bgPickDialogFilter")
         # A topmost window would cover the dialog (it is another process).
         was_pin = self._pinned
         if was_pin:
@@ -1566,8 +1698,8 @@ class Api:
         ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
               "Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
               "$f = New-Object System.Windows.Forms.OpenFileDialog; "
-              "$f.Filter = '图片|" + _BG_FILTER + "'; "
-              "$f.Title = '选择背景图片'; "
+              "$f.Filter = '" + str(dlg_filter) + "|" + _BG_FILTER + "'; "
+              "$f.Title = '" + str(dlg_title) + "'; "
               "if ($f.ShowDialog() -eq 'OK') { Write-Output $f.FileName }")
         import tempfile
         ps_path = None
@@ -1587,7 +1719,8 @@ class Api:
                 return {"ok": False}  # user cancelled
             try:
                 if os.path.getsize(path) > MAX_BG_BYTES:
-                    return {"ok": False, "error": "图片超过 8MB，请选择更小的文件"}
+                    return {"ok": False, "error": str(LStr("errBgTooBig")),
+                            "error_key": "errBgTooBig"}
             except OSError as e:
                 return {"ok": False, "error": str(e)}
             saved = self.save_config({"bg_path": path})
@@ -1627,7 +1760,7 @@ class Api:
         except OSError:
             return None
         if stat.st_size > MAX_BG_BYTES:
-            return {"error": "图片超过 8MB，请选择更小的文件"}
+            return {"error": str(LStr("errBgTooBig")), "error_key": "errBgTooBig"}
         if self._bg_cache and self._bg_cache[0] == key:
             return {"data": self._bg_cache[1]}
         ext = os.path.splitext(path)[1].lower().lstrip(".")

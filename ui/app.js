@@ -112,13 +112,30 @@ const $ = (id) => document.getElementById(id);
 const UNSET = new Set(["未设置", "未检测到", "—", "", "Not set", "Not detected"]);
 
 function toast(msg, kind = "") {
-  const t = $("toast");
-  t.textContent = msg;
-  t.className = "toast show " + kind;
-  clearTimeout(t._h);
+  const t2 = $("toast");
+  t2.textContent = msg;
+  t2.className = "toast show " + kind;
+  clearTimeout(t2._h);
   // Errors get 8s (multi-endpoint failures concatenate into long text);
   // clicking anywhere on a toast dismisses it immediately.
-  t._h = setTimeout(() => t.classList.remove("show"), kind === "err" ? 8000 : 2600);
+  t2._h = setTimeout(() => t2.classList.remove("show"), kind === "err" ? 8000 : 2600);
+}
+
+/* Render a backend message in the UI language. Three payload shapes exist:
+   - {error_parts|note_parts: [{key, params}|{text}...]} — bilingual parts
+     (proxy_manager's LStr/LJoin + js_api note assembly)
+   - {error_key, error_params} — single key + interpolation params
+   - plain string — backend legacy/OS text, shown as-is. */
+function msgText(m) {
+  if (m == null) return "";
+  if (typeof m === "string") return m;
+  const parts = m.note_parts || m.error_parts;
+  if (Array.isArray(parts) && parts.length) {
+    return parts.map((p) => p && p.key ? t(p.key, p.params || {}) : (p && p.text) || "").join("；");
+  }
+  const key = m.note_key && !m.error ? m.note_key : m.error_key;
+  if (key) return t(key, m.error_params || {});
+  return m.error || m.note || "";
 }
 
 /* Tooltip engine. Hover keeps the CSS 350ms delay; keyboard focus shows the
@@ -355,13 +372,13 @@ async function toggleEndpoint(ep, on) {
     if (pre && pre.confirm) {
       if (!(await confirmDlg(confirmMessage(pre)))) return;
     } else if (pre && pre.error) {
-      toast(pre.error_key ? t(pre.error_key) : pre.error, "err"); return;
+      toast(msgText(pre), "err"); return;
     }
   }
   setBusy(ep, true);
   try {
     const r = await api.call("do_toggle", ep, on, a.host, a.port, a.scheme, a.user, a.password);
-    if (r && r.error) toast(r.error_key ? t(r.error_key) : r.error, "err");
+    if (r && r.error) toast(msgText(r), "err");
     else {
       // Flip the row immediately; a refresh corrects it. A disable that
       // restored a stashed proxy actually leaves the endpoint ON.
@@ -370,11 +387,9 @@ async function toggleEndpoint(ep, on) {
       if (on && !restored) lastApplied = Object.assign({}, a);
       if (restored) {
         state[ep] = true;
-        toast(r.note_key ? t(r.note_key) : t("restored"), "ok");
-      } else if (r && r.note_key) {
-        toast(t(r.note_key), "ok");
+        toast(t("restored"), "ok");
       } else if (r && r.note) {
-        toast(r.note, "ok");
+        toast(msgText(r), "ok");
       } else {
         let msg = on ? t("enabledMsg", { name: epName(ep) }) : t("disabledMsg", { name: epName(ep) });
         if (on && (ep === "ps" || ep === "wsl")) msg += t("needNewTerm");
@@ -534,7 +549,7 @@ async function applyAddress(next, prev) {
     const r = await api.call("switch_port", next.port, next.host, next.scheme, next.user, next.password);
     if (r && r.error) {
       const n = (r.applied || []).length;
-      toast(n ? t("switchedPartial", { addr: shown, n, err: r.error }) : r.error, "err");
+      toast(n ? t("switchedPartial", { addr: shown, n, err: msgText(r) }) : msgText(r), "err");
       if (!(r.applied && r.applied.length)) {
         if (prev) {
           $("inHost").value = prev.host;
@@ -725,7 +740,7 @@ function persistSoon() {
     // default (null) would otherwise overwrite the user's config.
     if (speedFullMbps != null) payload.speed_full = speedFullMbps;
     api.call("save_config", payload).then((ok) => {
-      if (ok && ok.error) toast(ok.error_key ? t(ok.error_key) : ok.error, "err");
+      if (ok && ok.error) toast(msgText(ok), "err");
       else if (ok === false) toast(t("saveFail"), "err");
     }).catch(() => {});
   }, 400);
@@ -754,13 +769,13 @@ async function allEndpoints(on, lane = null) {
             (allEndpoints.confirmed ??= new Set()).add(pre.confirm);
           }
         } else if (pre && pre.error) {
-          toast(pre.error_key ? t(pre.error_key) : pre.error, "err"); hadError = true; break;
+          toast(msgText(pre), "err"); hadError = true; break;
         }
       }
       setBusy(d.id, true);
       try {
         const r = await api.call("do_toggle", d.id, on, a.host, a.port, a.scheme, a.user, a.password);
-        if (r && r.error) { toast(r.error_key ? t(r.error_key) : r.error, "err"); hadError = true; break; }
+        if (r && r.error) { toast(msgText(r), "err"); hadError = true; break; }
         const restored = !!(r && r.restored);
         state[d.id] = on;
         if (on && !restored) lastApplied = Object.assign({}, a);
@@ -937,7 +952,7 @@ async function openSettings() {
   setTgl($("tglWslAll"), c.wsl_all_distros !== false);
   if (c.bg_path) {
     const bg = await api.call("get_background");
-    if (bg && bg.error) toast(bg.error, "err");
+    if (bg && bg.error) toast(msgText(bg), "err");
     applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
   } else applyBg("", null, cfg.bg_dim);
   $("settingsOv").classList.add("show");
@@ -1016,7 +1031,7 @@ $("btnWslRestart").onclick = async () => {
   try {
     /* Rewrite uses applied_* on the Python side, not the in-progress form. */
     const r = await api.call("restart_wsl");
-    if (r && r.error) toast(t("restartFail", { err: r.error }), "err");
+    if (r && r.error) toast(t("restartFail", { err: msgText(r) }), "err");
     else { toast(t("restartOk"), "ok"); refreshAll(); }
   } catch (e) {
     toast(t("restartFail", { err: e }), "err");
@@ -1118,11 +1133,11 @@ document.addEventListener("click", (e) => {
 /* Settings wiring */
 $("bgPick").onclick = async () => {
   const r = await api.call("pick_background");
-  if (r && r.error) { toast(t("pickFail", { err: r.error }), "err"); return; }
+  if (r && r.error) { toast(t("pickFail", { err: msgText(r) }), "err"); return; }
   if (r && r.ok) {
     cfg.bg_path = r.path || cfg.bg_path; // Python persisted the new path; mirror it
     const bg = await api.call("get_background");
-    if (bg && bg.error) toast(bg.error, "err");
+    if (bg && bg.error) toast(msgText(bg), "err");
     applyBg(cfg.bg_path, bg && bg.data, cfg.bg_dim);
     saveSettings();
   }
@@ -1214,7 +1229,7 @@ async function boot() {
   cfg.bg_dim = c.bg_dim ?? 0.45;
   if (c.bg_path) {
     const bg = await api.call("get_background");
-    if (bg && bg.error) toast(bg.error, "err");
+    if (bg && bg.error) toast(msgText(bg), "err");
     applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
   } else applyBg("", null, cfg.bg_dim);  // initializes the dim-slider state
   /* Sync the maximize affordance with reality (a renderer reload resets it
@@ -1239,6 +1254,20 @@ async function boot() {
   // but the dash (`–/4`) is only a brief placeholder.
   probeWslCounts();
   tickSpeed();
+  checkUpdateOnce();
+}
+
+/* One update check per UI session, fired after boot. The backend call has a
+   5s timeout and the result is cached there for 10 min; offline users see
+   nothing (the "error" status is silent by design). */
+let updateChecked = false;
+function checkUpdateOnce() {
+  if (updateChecked) return;
+  updateChecked = true;
+  api.call("check_update").then((r) => {
+    if (r && r.status === "update" && r.latest)
+      toast(t("updateAvail", { latest: r.latest }), "");
+  }).catch(() => {});
 }
 
 function probeWslCounts() {

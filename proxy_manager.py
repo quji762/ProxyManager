@@ -20,6 +20,8 @@ import winreg
 from typing import Optional
 from urllib.parse import quote, unquote, urlparse
 
+from messages import LStr, LJoin
+
 # ── Optional dependencies ─────────────────────────────────────────────────────
 try:
     import psutil
@@ -955,9 +957,7 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
         if enable:
             pac = _read_autoconfig_url()
             if pac:
-                return (True,
-                        f"检测到 PAC 自动配置脚本（{pac}），浏览器可能仍按 PAC 规则分流，"
-                        "静态系统代理未必生效")
+                return (True, LStr("sysPacNote", {"url": pac}))
         return True
     except OSError as e:
         return str(e)
@@ -1096,16 +1096,17 @@ def _wsl_targets():
 def _wsl_write_failure(r, distro):
     """Classify a failed `wsl -e bash` run without echoing wsl's own console
     text (redirected output may be UTF-16 and decodes as mojibake)."""
+    where = f"WSL({distro}): " if distro else ""
     if not wsl_available():
-        return "未检测到可用的 WSL 发行版"
+        return LStr("errNoWslWhere", {"where": where})
     stderr = r.stderr or b""
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
     detail = stderr.strip().splitlines()
     detail = detail[0].strip() if detail else ""
     if detail and detail.isascii():
-        return f"写入 WSL 代理配置失败：{detail}"
-    return "写入 WSL 代理配置失败（权限不足或磁盘已满？）"
+        return LStr("errWslWriteDetail", {"where": where, "detail": detail})
+    return LStr("errWslWriteHint", {"where": where})
 
 
 def set_wsl_proxy(host, port, enable=True, scheme="http", user="", password=""):
@@ -1198,7 +1199,6 @@ unset _pm_np _pm_e
         # infra distros. Enable fails loudly; disable is best-effort.
         errs = []
         for d in (_wsl_targets()):
-            label = f"WSL({d})" if d else "WSL"
             try:
                 cmd = ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", script]
                 r = subprocess.run(
@@ -1208,12 +1208,13 @@ unset _pm_np _pm_e
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
                 if enable and r.returncode != 0:
-                    errs.append(f"{label}: {_wsl_write_failure(r, d)}")
+                    # _wsl_write_failure already carries the WSL(distro) label
+                    errs.append(_wsl_write_failure(r, d))
             except Exception as e:
                 if enable:
-                    errs.append(f"{label}: {e}")
+                    errs.append(f"WSL({d or ''}): {e}")
         if enable and errs:
-            return "; ".join(errs)
+            return LJoin(errs)
         return True
     except Exception as e:
         # Disabling is best-effort cleanup: a missing/broken WSL has nothing
@@ -1306,7 +1307,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
         if use_wsl:
             errs = []
             for d in (_wsl_targets()):
-                label = f"WSL({d})" if d else "WSL"
+                where = f"WSL({d}): " if d else ""
                 try:
                     if enable:
                         sq = _bash_sq(url)
@@ -1338,16 +1339,17 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                         # Avoid echoing wsl's own messages: redirected console
                         # output may be UTF-16 and would decode as mojibake.
                         if not wsl_available():
-                            errs.append(f"{label}: 未检测到可用的 WSL 发行版")
+                            errs.append(LStr("errNoWslWhere", {"where": where}))
                         elif r.returncode == 127:
-                            errs.append(f"{label}: 未找到 git")
+                            errs.append(LStr("errNoGitWslWhere", {"where": where}))
                         else:
-                            errs.append(f"{label}: git 配置失败（exit {r.returncode}）")
+                            errs.append(LStr("errGitFailWslWhere",
+                                             {"where": where, "code": r.returncode}))
                 except Exception as e:
                     if enable:
-                        errs.append(f"{label}: {e}")
+                        errs.append(f"{where}{e}")
             if enable and errs:
-                return "; ".join(errs)
+                return LJoin(errs)
         else:
             if enable:
                 # Snapshot first so a failed https.proxy write can put http.proxy
@@ -1385,7 +1387,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
         # Windows: git not on PATH. WSL: wsl.exe missing entirely.
         if not enable:
             return True
-        return "WSL 内未找到 git" if use_wsl else "未找到 git，请确认已安装 Git"
+        return LStr("errNoGitInWsl") if use_wsl else LStr("errNoGit")
     except Exception as e:
         if not enable:
             return True
@@ -1677,7 +1679,9 @@ def _wsl_pull_file(distro, path):
     if r.returncode == 3:
         return None
     if r.returncode != 0:
-        raise OSError(f"读取 {shown} 失败（exit {r.returncode}）")
+        raise OSError(LStr("errWslReadFail", {
+            "where": f"WSL({distro}): " if distro else "",
+            "path": shown, "code": r.returncode}))
     return r.stdout
 
 
@@ -1709,7 +1713,9 @@ def _wsl_push_file(distro, path, data: bytes):
         input=data, capture_output=True, timeout=15,
         creationflags=subprocess.CREATE_NO_WINDOW)
     if r.returncode != 0:
-        raise OSError(f"写入 {shown} 失败（exit {r.returncode}）")
+        raise OSError(LStr("errWslWriteFileFail", {
+            "where": f"WSL({distro}): " if distro else "",
+            "path": shown, "code": r.returncode}))
 
 
 def _wsl_edit_ini(distro, path, keys, url, equals, section=None):
@@ -1802,15 +1808,14 @@ def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
     try:
         errs = []
         for d in (_wsl_targets()):
-            label = f"WSL({d})" if d else "WSL"
             try:
                 _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
                               url if enable else None, equals=url)
             except OSError as e:
                 if enable:
-                    errs.append(f"{label}: {e}")
+                    errs.append(e)
         if enable and errs:
-            return "; ".join(errs)
+            return LJoin(errs)
         return True
     except Exception:
         log_exception("set_npm_proxy_wsl")
@@ -1828,7 +1833,6 @@ def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
     try:
         errs = []
         for d in (_wsl_targets()):
-            label = f"WSL({d})" if d else "WSL"
             try:
                 _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
                               url if enable else None, equals=url,
@@ -1839,9 +1843,9 @@ def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
                                   None, equals=url)
             except OSError as e:
                 if enable:
-                    errs.append(f"{label}: {e}")
+                    errs.append(e)
         if enable and errs:
-            return "; ".join(errs)
+            return LJoin(errs)
         return True
     except Exception:
         log_exception("set_pip_proxy_wsl")
@@ -1866,6 +1870,6 @@ def restart_wsl():
                 last_err = f"exit {r.returncode}"
             except subprocess.TimeoutExpired:
                 last_err = "探活超时"
-        return f"未检测到可用的 WSL 发行版（{last_err}）"
+        return LStr("errRestartNoWsl", {"err": last_err or "?"})
     except Exception as e:
         return str(e)
