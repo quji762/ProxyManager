@@ -35,7 +35,8 @@ Terminal-side endpoints write environment variables, shell rc files, `git config
 ## Features
 
 - **HTTP and SOCKS5** — scheme is `http`, `socks5`, or `socks5h`; optional username/password is percent-encoded into the URL. Connectivity tests use `curl -x` (SOCKS included); urllib is the HTTP fallback when curl is missing.
-- **Chinese / English UI** — language is a Settings option (persisted as `lang`); the native window title stays `代理管理器` so the single-instance wake path keeps working.
+- **Chinese / English UI** — language is a Settings option (persisted as `lang`); backend messages (operation results, error reasons) follow the UI language too. The native window title stays `代理管理器` so the single-instance wake path keeps working.
+- **Update check** — after startup the app queries GitHub Releases once for a newer version (5 s timeout, silent failure — invisible offline, no background polling); available updates are announced once.
 - **Env-var connectivity test** — every variable in the environment-variables card (HTTP_PROXY, ALL_PROXY, system proxy, Git, npm, pip; separate per page) carries a **Test** button that fires a real request THROUGH that proxy source. Several captive-portal URLs are tried in order so a blocked gstatic does not look like a dead proxy; latency is green, the failure reason is red (full text on hover).
 - **Nine independent switches on Win/WSL pages** — the status-bar tabs switch the whole page between the Windows and WSL views (endpoints, network info, and env variables all follow); two vertical rails beside the endpoint list (**Enable all / Disable all**) batch-toggle the current page, and each endpoint can still be toggled separately. Disabling removes exactly what the tool wrote, or restores the value it overwrote.
 - **Switches reflect reality** — every toggle is re-synced from the actually detected proxy state, so a failed operation reverts the switch automatically.
@@ -150,14 +151,16 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 - Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **quit-clears-proxy** is on). Switches are on only for this tool's URL (including the WSL NAT gateway rewrite); a proxy the user configured for another endpoint shows off, so clicking it stashes and overwrites instead of deleting.
 - The WSL npm/pip endpoints read back and modify config files over `wsl.exe`; every read/write round-trip costs a wsl.exe call, so the WSL switches refresh a bit slower than the Windows ones.
 - **Restart WSL** terminates all processes running inside WSL.
+- The packaged EXE is not code-signed: SmartScreen may warn on first run — choose *Run anyway*. Verify the download against the SHA256 checksum attached to the Release (when provided).
 
 ## Project Structure
 
 ```text
 ProxyManager/
-├── app.py                     # Entry: pywebview window, singleton, wiring
+├── app.py                     # Entry: pywebview window, singleton, WebView2 check, wiring
 ├── js_api.py                  # JS bridge (Api class)
-├── config_store.py            # config.json load/save, autostart, version
+├── messages.py                # Backend message catalog (zh text + i18n keys)
+├── config_store.py            # config.json load/save, autostart, version (single source)
 ├── window_win32.py            # Frameless resize, caption drag, HWND helpers
 ├── tray_icon.py               # Tray icon + Win11 promotion
 ├── proxy_manager.py           # Registry / WSL / git / npm / pip / telemetry
@@ -172,7 +175,7 @@ ProxyManager/
 │   └── tray.png
 ├── build.bat                  # PyInstaller (installs requirements-build.txt)
 ├── start.bat
-├── pyproject.toml             # Version, runtime deps, ruff/pytest config
+├── pyproject.toml             # Version (dynamic, reads config_store.APP_VERSION), deps, tooling
 ├── requirements.txt           # Runtime dependencies (same pins as pyproject)
 ├── requirements-build.txt     # Runtime + PyInstaller
 └── .github/workflows/         # ci.yml (ruff + pytest) and release.yml

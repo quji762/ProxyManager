@@ -17,7 +17,11 @@ import threading
 
 import proxy_manager as pm
 
-# ── APP_VERSION: single source of truth from package metadata ────────────────
+# ── APP_VERSION: single source of truth ──────────────────────────────────────
+# pyproject.toml reads this via [tool.setuptools.dynamic] version = attr, so
+# bump the version HERE ONLY. importlib.metadata provides it at runtime when
+# the package is pip-installed; the literal below is the fallback for source
+# runs and PyInstaller builds (no dist-info in either).
 try:
     from importlib.metadata import version as _pkg_version
     APP_VERSION = _pkg_version("proxy-manager")

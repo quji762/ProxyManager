@@ -34,6 +34,45 @@ import window_win32 as win32
 FRAMELESS = True
 _START_HIDDEN = any(a in ("--tray", "--hidden") for a in sys.argv[1:])
 
+# WebView2 Runtime detection: read the version from the well-known registry
+# locations (same keys Microsoft's detection doc specifies). Win11 ships the
+# runtime; stripped Win10 installs do not — without this check webview.start()
+# would throw and the process would exit leaving only an entry in crash.log,
+# which reads as "double-clicked and nothing happened".
+_WEBVIEW2_KEYS = (
+    r"Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    r"Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+)
+
+
+def _webview2_runtime_available():
+    import winreg
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for path in _WEBVIEW2_KEYS:
+            try:
+                with winreg.OpenKey(hive, path) as k:
+                    v, _ = winreg.QueryValueEx(k, "pv")
+                    if v and v not in ("0.0.0.0",):
+                        return True
+            except OSError:
+                continue
+    return False
+
+
+def _warn_missing_webview2():
+    """Native MessageBox (a pywebview window cannot exist without the
+    runtime). zh + en in one dialog: at this point no config language is
+    loaded and the UI has never rendered."""
+    msg = ("未检测到 Microsoft WebView2 运行时，界面无法启动。\n\n"
+           "请安装后重试（Windows 11 自带，Windows 10 需手动安装）：\n"
+           "https://developer.microsoft.com/microsoft-edge/webview2/\n\n"
+           "Microsoft WebView2 Runtime was not found.\n"
+           "Install it from the link above and run ProxyManager again.")
+    try:
+        ctypes.windll.user32.MessageBoxW(None, msg, "ProxyManager", 0x10)
+    except Exception:
+        pass
+
 
 def _wake_or_exit():
     """Single-instance guard: a second launch wakes the first (signal file +
@@ -91,6 +130,17 @@ def main():
 
     mutex = _wake_or_exit()
     if mutex is None:
+        return
+
+    if not _webview2_runtime_available():
+        pm.log_exception("webview2_missing")
+        _warn_missing_webview2()
+        if mutex:
+            import ctypes as _ct
+            _k32 = _ct.WinDLL("kernel32", use_last_error=True)
+            _k32.CloseHandle.argtypes = [_ct.c_void_p]
+            _k32.CloseHandle.restype = _ct.c_int
+            _k32.CloseHandle(_ct.c_void_p(mutex))
         return
 
     import webview  # GUI stack — not imported at module level so unit tests stay light

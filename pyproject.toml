@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxy-manager"
-version = "1.4.0"
+# Single source of truth: setuptools reads the version from config_store.py's
+# APP_VERSION (attr directive below), so bump the version in exactly one place.
+dynamic = ["version"]
 description = "One-click proxy management for PowerShell, Windows system proxy, WSL, Git, npm, and pip on Windows"
 license = "MIT"
 authors = [{ name = "MasqueradeQ" }]
@@ -16,6 +18,17 @@ dependencies = [
     "pystray>=0.19,<1.0",
     "Pillow>=10.0,<12.0",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "config_store.APP_VERSION" }
+
+# The project ships as a PyInstaller EXE (build.bat), never as a wheel;
+# this only exists so the dynamic version resolves. ui/ and assets/ are
+# data dirs, not packages — tell setuptools to ignore the flat layout.
+[tool.setuptools]
+py-modules = ["app", "config_store", "js_api", "messages", "proxy_manager",
+              "tray_icon", "window_win32"]
+include-package-data = false
 
 [project.optional-dependencies]
 dev = [

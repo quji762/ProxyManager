@@ -35,7 +35,8 @@ ProxyManager 是一个面向终端场景的 Windows 桌面代理管理工具，�
 ## 功能特性
 
 - **HTTP / SOCKS5** — 协议可选 `http`、`socks5`、`socks5h`，用户名密码写入 URL（百分号编码）。连通性测试走 `curl -x`（含 SOCKS）；没有 curl 时 HTTP 回退到 urllib。
-- **中英界面** — 设置里切换语言（写入 `lang`）；原生窗口标题仍是「代理管理器」，以免单实例唤醒找不到窗口。
+- **中英界面** — 设置里切换语言（写入 `lang`），后端提示（操作结果、错误原因）同样按界面语言显示；原生窗口标题仍是「代理管理器」，以免单实例唤醒找不到窗口。
+- **更新检查** — 启动后向 GitHub Releases 查询一次新版本（5 秒超时、静默失败，离线无感知，不做后台轮询）；有新版本时提示一次。
 - **环境变量测试** — 「环境变量」卡片中每个变量（HTTP_PROXY、ALL_PROXY、系统代理、Git、npm、pip，Windows / WSL 两页各自独立）带「测试」按钮，点击后经对应代理源发起真实连通性请求。会按顺序尝试多个探测地址，避免 gstatic 被墙时误报红；绿色显示延迟，红色显示失败原因（完整原文在悬停提示里）。
 - **九端点 Win/WSL 分页** — 底部状态栏页签在 Windows / WSL 两个页面间切换整页内容（端点、网络信息、环境变量随之联动）；端点列表右侧两条纵向开关（全部开启 / 全部关闭）批量操作当前页，各端点亦可单独启停。关闭时只移除本工具写入的配置，或恢复覆盖前的值。
 - **状态即真相** — 每次操作后开关都会按实际检测到的代理状态重新同步，操作失败时开关自动弹回。
@@ -150,14 +151,16 @@ py -3.13 app.py
 - 启用时如果该端点已有别的代理，会先暂存再覆盖；关闭（或勾选「退出时关闭代理」后从托盘退出）会把暂存值写回去。开关仅在检测到本工具写入的 URL 时为开（含 WSL NAT 网关改写）；用户自己配的其它代理显示为关，点击是「暂存并覆盖」而不是直接删除。
 - WSL 侧 npm/pip 端点经 `wsl.exe` 读写配置文件，每次读取/写入都是一次 wsl.exe 往返，因此 WSL 开关的状态刷新比 Windows 侧慢。
 - 「重启 WSL」会终止 WSL 内正在运行的所有进程。
+- 打包 EXE 未做代码签名：首次运行可能触发 SmartScreen 提示，点「仍要运行」即可。构建产物以 Release 附带的 SHA256 校验和为准（如缺失，可自行核对）。
 
 ## 项目结构
 
 ```text
 ProxyManager/
-├── app.py                     # 入口：pywebview 窗口、单实例、装配
+├── app.py                     # 入口：pywebview 窗口、单实例、WebView2 检测、装配
 ├── js_api.py                  # JS 桥（Api）
-├── config_store.py            # config.json、开机自启、版本号
+├── messages.py                # 后端提示双语目录（zh 文案 + i18n key）
+├── config_store.py            # config.json、开机自启、版本号（唯一来源）
 ├── window_win32.py            # 无边框缩放、标题栏拖动、HWND
 ├── tray_icon.py               # 托盘与 Win11 提升
 ├── proxy_manager.py           # 注册表 / WSL / git / npm / pip / 遥测
@@ -166,7 +169,7 @@ ProxyManager/
 ├── assets/
 ├── build.bat                  # 安装 requirements-build.txt 后打包
 ├── start.bat
-├── pyproject.toml             # 版本号、运行时依赖、ruff/pytest 配置
+├── pyproject.toml             # 版本号（动态读取 config_store.APP_VERSION）、依赖、ruff/pytest 配置
 ├── requirements.txt           # 运行时依赖（与 pyproject 同一组 pin）
 ├── requirements-build.txt     # 运行时 + PyInstaller
 └── .github/workflows/         # ci.yml 与 release.yml
