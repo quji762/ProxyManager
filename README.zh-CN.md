@@ -151,7 +151,7 @@ py -3.13 app.py
 - 启用时如果该端点已有别的代理，会先暂存再覆盖；关闭（或勾选「退出时关闭代理」后从托盘退出）会把暂存值写回去。开关仅在检测到本工具写入的 URL 时为开（含 WSL NAT 网关改写）；用户自己配的其它代理显示为关，点击是「暂存并覆盖」而不是直接删除。
 - WSL 侧 npm/pip 端点经 `wsl.exe` 读写配置文件，每次读取/写入都是一次 wsl.exe 往返，因此 WSL 开关的状态刷新比 Windows 侧慢。
 - 「重启 WSL」会终止 WSL 内正在运行的所有进程。
-- 打包 EXE 未做代码签名：首次运行可能触发 SmartScreen 提示，点「仍要运行」即可。构建产物以 Release 附带的 SHA256 校验和为准（如缺失，可自行核对）。
+- 打包 EXE 未做代码签名：首次运行可能触发 SmartScreen 提示，点「仍要运行」即可。每个正式 Release 都附带 `SHA256SUMS.txt`，下载后请以其校验和为准。
 
 ## 项目结构
 
@@ -200,7 +200,7 @@ build.bat
 
 产物为 `dist\ProxyManager.exe`。脚本通过 `--hidden-import` 带上延迟导入的托盘相关模块，并把 `ui/` 与 `assets/` 一并打入可执行文件。
 
-CI 执行相同的构建：推送 `v*` tag 会触发 `.github/workflows/release.yml`，在 Windows 上使用 Python 3.13 构建 EXE，上传 artifact 并发布到 GitHub Release。
+CI 执行相同的构建：推送 `v*` tag 会触发 `.github/workflows/release.yml`，先校验 tag 与 `config_store.APP_VERSION` 一致，再在 Windows 上使用 Python 3.13 构建 EXE，连同 `SHA256SUMS.txt` 校验和直接发布到 GitHub Release。
 
 ## 参与贡献
 

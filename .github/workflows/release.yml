@@ -5,18 +5,63 @@ on:
     tags:
       - "v*"
 
+# Single job builds AND publishes in one step: the EXE goes straight from
+# dist/ to the GitHub Release, so no intermediate Actions Artifact is needed
+# and the write permission cannot be narrowed without re-adding one.
 permissions:
   contents: write
+
+# Serialize releases per ref; never cancel an in-flight official release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+
+      # APP_VERSION is the single source of truth (pyproject reads it via
+      # [tool.setuptools.dynamic] attr). The literal is parsed statically
+      # instead of importing config_store: an import would execute the
+      # module-level WinDLL loads and could resolve a stale installed
+      # proxy-manager dist-info rather than this checkout's source — the
+      # AST read always reflects the tagged tree. Catches tag/APP_VERSION
+      # drift (e.g. tag v1.5.0 over code still at 1.4.0) before a wrong
+      # EXE ships.
+      - name: Validate tag matches APP_VERSION
+        shell: python
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          import ast, os, sys
+
+          version = None
+          tree = ast.parse(open("config_store.py", encoding="utf-8").read())
+          for node in ast.walk(tree):
+              targets = node.targets if isinstance(node, ast.Assign) else (
+                  [node.target] if isinstance(node, ast.AnnAssign) and node.value else [])
+              for t in targets:
+                  if (isinstance(t, ast.Name) and t.id == "APP_VERSION"
+                          and isinstance(node.value, ast.Constant)
+                          and isinstance(node.value.value, str)):
+                      version = node.value.value
+          if not version:
+              print("::error::APP_VERSION string literal not found in config_store.py")
+              sys.exit(1)
+          tag = os.environ["TAG"]
+          tagged = tag[1:] if tag.startswith("v") else tag
+          print(f"APP_VERSION={version} tag={tag}")
+          if version != tagged:
+              print(f"::error::Tag {tag} does not match config_store.APP_VERSION {version} "
+                    "(bump APP_VERSION before tagging)")
+              sys.exit(1)
 
       # Single source of packaging truth: same script as the local build,
       # so the PyInstaller arguments cannot drift between the two.
@@ -24,15 +69,31 @@ jobs:
         run: build.bat
         shell: cmd
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ProxyManager
-          path: dist/ProxyManager.exe
-          retention-days: 7
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (!(Test-Path dist/ProxyManager.exe)) {
+            Write-Host "::error::dist/ProxyManager.exe not found"
+            exit 1
+          }
+          $size = (Get-Item dist/ProxyManager.exe).Length
+          if ($size -le 0) {
+            Write-Host "::error::dist/ProxyManager.exe is empty"
+            exit 1
+          }
+          Write-Host "ProxyManager.exe size: $size bytes"
+
+      - name: Generate SHA256SUMS
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/ProxyManager.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  ProxyManager.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          files: dist/ProxyManager.exe
+          files: |
+            dist/ProxyManager.exe
+            dist/SHA256SUMS.txt
           generate_release_notes: true

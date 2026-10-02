@@ -151,7 +151,7 @@ A legacy `git` boolean key from older versions is migrated into `git_win` / `git
 - Enabling an endpoint that already had a different proxy stashes that value and restores it on disable (or on quit, when **quit-clears-proxy** is on). Switches are on only for this tool's URL (including the WSL NAT gateway rewrite); a proxy the user configured for another endpoint shows off, so clicking it stashes and overwrites instead of deleting.
 - The WSL npm/pip endpoints read back and modify config files over `wsl.exe`; every read/write round-trip costs a wsl.exe call, so the WSL switches refresh a bit slower than the Windows ones.
 - **Restart WSL** terminates all processes running inside WSL.
-- The packaged EXE is not code-signed: SmartScreen may warn on first run — choose *Run anyway*. Verify the download against the SHA256 checksum attached to the Release (when provided).
+- The packaged EXE is not code-signed: SmartScreen may warn on first run — choose *Run anyway*. Every release attaches a `SHA256SUMS.txt`; verify your download against it.
 
 ## Project Structure
 
@@ -206,7 +206,7 @@ build.bat
 
 The output is `dist\ProxyManager.exe`. The script passes `--hidden-import` for the lazily imported tray modules and bundles `ui/` and `assets/` into the executable.
 
-The same build runs in CI: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the EXE on Windows with Python 3.13, uploads it as an artifact, and publishes it in a GitHub Release.
+The same build runs in CI: pushing a `v*` tag triggers `.github/workflows/release.yml`, which first checks that the tag matches `config_store.APP_VERSION`, then builds the EXE on Windows with Python 3.13 and publishes it — together with a `SHA256SUMS.txt` checksum — directly to the GitHub Release.
 
 ## Contributing
 

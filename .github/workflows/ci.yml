@@ -1,20 +1,50 @@
 name: CI
 
+# docs-only pushes/PRs skip CI — no test or script reads README*/docs
+# (verified: tests/ never touch markdown). workflow_dispatch always runs.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+      # Deliberately NOT `pip install -e .[dev]`: the dynamic version
+      # (attr = config_store.APP_VERSION) makes setuptools import config_store
+      # at metadata time, executing the module-level WinDLL loads — and could
+      # resolve a stale installed dist-info. tests/ import from the source
+      # tree (conftest.py puts the root on sys.path), so a plain requirements
+      # install is all that's needed. pytest/ruff pins mirror the [dev] extra.
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest ruff -q
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install "pytest>=8.0" "ruff>=0.6.0"
       - name: Lint (ruff)
         run: ruff check .
       - name: Smoke tests
