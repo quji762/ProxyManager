@@ -29,6 +29,7 @@ jobs:
         with:
           name: ProxyManager
           path: dist/ProxyManager.exe
+          retention-days: 7
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
