@@ -179,6 +179,17 @@ function msgText(m) {
   });
 })();
 
+/* ═══════════════ Drop guard ═══════════════ */
+/* WebView2 navigates when a FILE is dropped onto the window, and pywebview
+   injects its JS bridge into the document that ends up loaded — so a dropped
+   .html file would run with full Api access (registry env writes, WSL rc
+   files, autostart). Only file drags are canceled; dragging plain text into
+   the host/port inputs keeps its native drop behavior. */
+const _isFileDrag = (e) => !!e.dataTransfer &&
+  Array.prototype.includes.call(e.dataTransfer.types || [], "Files");
+window.addEventListener("dragover", (e) => { if (_isFileDrag(e)) e.preventDefault(); });
+window.addEventListener("drop", (e) => { if (_isFileDrag(e)) e.preventDefault(); });
+
 /* Confirm dialog (Promise-based, replaces native messagebox). Requests are
    queued: overlapping confirmations would otherwise swallow the first. */
 const _dlgQueue = [];

@@ -21,9 +21,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
 
@@ -90,10 +90,20 @@ jobs:
           "$hash  ProxyManager.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
+      # Dependency attestation: record the exact package set the EXE was built
+      # from (requirements are range-pinned, so each build resolves fresh).
+      # Publishing the freeze next to the binary makes every release's
+      # dependency closure auditable; hash-pinned lock is the next hardening
+      # step if supply-chain requirements grow.
+      - name: Record resolved dependencies
+        shell: pwsh
+        run: python -m pip freeze --exclude-editable | Out-File -Encoding ascii dist/requirements-freeze.txt
+
       - name: Create Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             dist/ProxyManager.exe
             dist/SHA256SUMS.txt
+            dist/requirements-freeze.txt
           generate_release_notes: true
