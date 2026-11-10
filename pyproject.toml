@@ -10,13 +10,15 @@ dynamic = ["version"]
 description = "One-click proxy management for PowerShell, Windows system proxy, WSL, Git, npm, and pip on Windows"
 license = "MIT"
 authors = [{ name = "MasqueradeQ" }]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "pywebview>=5.0,<7.0",
     "pythonnet>=3.0,<4.0",
     "psutil>=5.9,<7.0",
     "pystray>=0.19,<1.0",
-    "Pillow>=10.0,<12.0",
+    # 13.0.0 is the first release patching the image-parser CVE line
+    # Dependabot reported; it needs Python >= 3.11 (requires-python above).
+    "Pillow>=13.0,<14.0",
 ]
 
 [tool.setuptools.dynamic]
@@ -41,7 +43,7 @@ build = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
