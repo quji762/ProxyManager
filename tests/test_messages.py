@@ -102,7 +102,10 @@ def test_endpoint_err_plain_string_gets_label():
 def test_endpoint_err_sys_label_bilingual():
     out = _endpoint_err("sys", "access denied")
     assert out["error"] == "系统代理: access denied"
-    assert out["error_parts"] == [{"key": "labelSys"}]
+    # 纯字符串详情也要作为 text 部件下发：只发 label 会让前端 msgText 因
+    # parts 非空提前返回，真正的失败原因被吞（契约C1）。
+    assert out["error_parts"] == [
+        {"key": "labelSys"}, {"text": "access denied"}]
 
 
 def test_endpoint_err_lstr_passes_parts_through():

@@ -282,10 +282,13 @@ def test_corrupt_ps_stash_kept_and_reported(tmp_path, monkeypatch, bad):
     assert set_env == []                            # nothing was written
 
 
-def test_failed_enable_drops_new_stash_and_keeps_form_address(
+def test_failed_enable_keeps_stash_and_keeps_form_address(
         tmp_path, monkeypatch):
-    """A failed enable must not keep a stash of the user's URL (disable would
-    then think we overwrote it) and must not retarget applied_*/host."""
+    """A failed enable must keep the stash of the user's URL: a mid-write
+    failure may already have overwritten some values (proxy_manager rolls
+    those back to the originals), so dropping the stash would leave the
+    user's original config unrecoverable. It must not retarget
+    applied_*/host either."""
     api = _make_api(tmp_path, monkeypatch)
     api.host, api.port = "127.0.0.1", "7897"
     api.applied_host, api.applied_port = "127.0.0.1", "7897"
@@ -294,6 +297,6 @@ def test_failed_enable_drops_new_stash_and_keeps_form_address(
          patch("js_api.pm.set_npm_proxy", return_value="disk full"):
         r = api.do_toggle("npm", True, "127.0.0.1", "1080")
     assert r.get("ok") is not True
-    assert api._restore.get("npm") is None
+    assert api._restore.get("npm") == "http://corp:8080"
     assert api.applied_port == "7897"
     assert api.port == "7897"

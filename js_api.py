@@ -26,7 +26,10 @@ _BG_FILTER = "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif"
 # 恢复暂存中的凭据保护：ps 的 env 值与其余端点的完整 URL 可能携带
 # user:pass@ 明文凭据，落盘 config.json 前逐值 DPAPI 加密（与 password
 # 字段同机制）；读回时按 DPAPI: 前缀解密，旧版明文暂存原样兼容。
-_STASH_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+# 含小写键（契约A4）：proxy_manager 同时写大小写两套环境变量，暂存加密
+# 白名单必须放行小写键，否则恢复暂存时小写代理值被静默丢弃、无法落盘。
+_STASH_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                   "http_proxy", "https_proxy", "all_proxy", "no_proxy")
 
 # Endpoint labels for error prefixes. Every setter error arrives either as an
 # LStr/LJoin (bilingual, from messages.py / proxy_manager) or as a plain
@@ -60,7 +63,9 @@ def _endpoint_err(target, detail):
     if parts is not None:
         out["error_parts"] = parts
     elif target == "sys":
-        out["error_parts"] = [{"key": "labelSys"}]  # label-only part
+        # 纯字符串详情（拒绝访问等 OS 错误）也作为 text 部件下发：只发 label
+        # 会让前端 msgText 因 parts 非空而提前返回，真正原因被吞（契约C1）。
+        out["error_parts"] = [{"key": "labelSys"}, {"text": str(detail)}]
     return out
 
 
@@ -73,6 +78,20 @@ def _mark_restored(r):
 
 def _save_failed(result):
     return result is False or (isinstance(result, dict) and result.get("error"))
+
+
+def _mask_userinfo(url):
+    """Redact user:pass@ credentials from a proxy URL for error display.
+    test_channel echoes the detected proxy URL back to the user, and that URL
+    may carry user:pass@ — mask the whole userinfo as `***` before showing."""
+    s = str(url)
+    scheme, sep, rest = s.partition("://")
+    body = rest if sep else s
+    _cred, at, host = body.rpartition("@")
+    if not at:
+        return s
+    prefix = f"{scheme}://" if sep else ""
+    return f"{prefix}***@{host}"
 
 
 def _persist_cfg(cfg):
@@ -161,6 +180,12 @@ class Api:
     """JS bridge. Every method returns JSON-serializable data and runs on its
     own thread (pywebview dispatches js_api calls off the UI thread), so the
     slow WSL subprocess calls never block rendering."""
+
+    # 退出清理去重（契约B1）：托盘退出路径与应用 _on_closing 都可能触发一次
+    # clear_all_endpoints，二者通过这个类属性协调，确保全端点清理只跑一次。
+    # 兄弟代理在 tray_icon.py 退出路径设同一属性、在 app.py _on_closing 读它
+    # 跳过第二次清理。属性名必须严格是 _quit_cleared。
+    _quit_cleared = False
 
     def __init__(self):
         cfg = load_config()
@@ -256,6 +281,11 @@ class Api:
         }
 
     def save_config(self, data):
+        # 入参健壮性：非 dict 载荷直接拒绝。字符串可迭代，`"host" in data` 会
+        # 静默误判，list/None 更会在后续取值处抛异常——前端恒发 dict，这里只
+        # 是挡 buggy/恶意调用方。
+        if not isinstance(data, dict):
+            return {"error": "配置文件数据不合法"}
         # Hold mutation for the whole save (lock order mutation → cfg, same
         # as do_toggle → _persist_restore). Snapshot restore under that lock
         # so encrypt walks a private copy (a live dict mutating mid-iterate
@@ -305,7 +335,7 @@ class Api:
                           "npmwsl", "pipwsl", "pin"):
                     if k in data:
                         cfg[k] = bool(data[k])
-                if "mode" in data:
+                if "mode" in data and str(data["mode"]) in ("light", "dark"):
                     cfg["mode"] = str(data["mode"])
                 if "ports" in data and isinstance(data["ports"], list):
                     seen = []
@@ -824,19 +854,31 @@ class Api:
         else:
             h, p = addr if addr else (self.host, self.port)
         kw = self._proxy_kw(scheme, user, password)
+        # 启用路径补校验 scheme/user/password（此前只校验了 host/port；这三个
+        # 值会进入 wsl bash -c 与 git 命令，非法字符可致注入或写入失败）。与
+        # switch_port 同口径，仅在调用方显式传入时校验；恢复路径沿用已解析的
+        # 暂存值，不重复校验以免阻断对用户原代理的恢复。
+        if on and not _restoring:
+            if scheme is not None and not pm.is_valid_scheme(kw["scheme"]):
+                return {"error": "代理协议不合法", "error_key": "errBadScheme"}
+            if (user is not None and not pm.is_valid_userinfo(kw["user"])) \
+                    or (password is not None
+                        and not pm.is_valid_userinfo(kw["password"])):
+                return {"error": "用户名或密码含非法字符",
+                        "error_key": "errBadUserinfo"}
         notes = []
         # Stash the pre-enable value first (after a successful write the file
-        # already holds OUR url, so it would be too late). If the write then
-        # fails, drop a stash we just created so a later disable does not
-        # "restore" something we never actually overwrote.
-        had_stash = target in self._restore
+        # already holds OUR url, so it would be too late).
         if on and not _restoring:
             self._stash_previous(target, self._managed_url(h, p, **kw))
 
         def _fail(msg, error_key=None):
-            if on and not _restoring and not had_stash and target in self._restore:
-                self._restore.pop(target, None)
-                self._persist_restore()
+            # 写入失败时保留 _stash_previous 刚存的暂存：端点写入可能已落了一
+            # 部分字节（WSL 子进程超时、注册表写了一半），用户的原配置需要这份
+            # 暂存才能在之后恢复；只有在能确认"一个字节都没覆盖"时才该丢暂存，
+            # 而失败路径上无法确认，故一律保留（契约A1）。损坏/无法解密的暂存
+            # 由 _restore_previous_locked 处理并置 stash_dropped，恢复语义见
+            # _restore_stashed。
             err = _endpoint_err(target, msg)
             if error_key:
                 err["error_key"] = error_key
@@ -1071,12 +1113,14 @@ class Api:
             "pipwsl": self._is_managed_wsl_url(pm.get_pip_proxy_wsl(), "pipwsl"),
         }
         if not any(enabled.values()):
+            # 没有任何端点开启：只把表单地址同步为 host/port 并落盘，绝不移动
+            # applied_*——此分支没有一个端点被写入，把表单地址提升为"已应用"
+            # 会让 _ours_proxy_urls 把用户手工配置的同 URL 代理误判为本工具
+            # 所有，退出清理时静默删除（契约A2 / AGENTS.md 核心不变量）。
             with self._speed_lock:
                 self.host, self.port = new_host, new_port
             self.scheme, self.user, self.password = (
                 new_kw["scheme"], new_kw["user"], new_kw["password"])
-            self.applied_host, self.applied_port = new_host, new_port
-            self.applied_kw = dict(new_kw)
             with _cfg_lock:
                 err = _persist_cfg(self._cfg_with_port(new_port))
                 if err:
@@ -1523,9 +1567,10 @@ class Api:
                 return {"ok": False, "error": "未设置代理，无法测试",
                         "error_key": "errNoProxyToTest"}
             if not valid_host(parsed["host"]):
-                return {"ok": False, "error": f"代理地址无效：{url}",
+                masked = _mask_userinfo(url)
+                return {"ok": False, "error": f"代理地址无效：{masked}",
                         "error_key": "errBadProxyUrl",
-                        "error_params": {"url": str(url)}}
+                        "error_params": {"url": masked}}
             return self._proxy_probe(str(url).strip(), parsed, _t, _urlreq)
         # WSL side: the proxy URL lives inside the distro; probe THROUGH it
         # from within WSL so the path matches what npm/pip/git will use.
@@ -1552,9 +1597,10 @@ class Api:
             return {"ok": False, "error": "未设置代理，无法测试",
                     "error_key": "errNoProxyToTest"}
         if not valid_host(parsed["host"]):
-            return {"ok": False, "error": f"代理地址无效：{url}",
+            masked = _mask_userinfo(url)
+            return {"ok": False, "error": f"代理地址无效：{masked}",
                     "error_key": "errBadProxyUrl",
-                    "error_params": {"url": str(url)}}
+                    "error_params": {"url": masked}}
         return self._wsl_proxy_probe(str(url).strip(), parsed)
 
     def _proxy_probe(self, proxy_url, parsed, _t, urlreq):
@@ -1695,11 +1741,14 @@ class Api:
         was_pin = self._pinned
         if was_pin:
             self._apply_topmost(False)
+        # PowerShell 单引号字符串内的 ' 需翻倍转义：i18n 标题/过滤器当前虽
+        # 不含单引号，仍按契约转义，避免某语言文案里的 ' 破坏脚本结构。
         ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
               "Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
               "$f = New-Object System.Windows.Forms.OpenFileDialog; "
-              "$f.Filter = '" + str(dlg_filter) + "|" + _BG_FILTER + "'; "
-              "$f.Title = '" + str(dlg_title) + "'; "
+              "$f.Filter = '" + str(dlg_filter).replace("'", "''")
+              + "|" + _BG_FILTER + "'; "
+              "$f.Title = '" + str(dlg_title).replace("'", "''") + "'; "
               "if ($f.ShowDialog() -eq 'OK') { Write-Output $f.FileName }")
         import tempfile
         ps_path = None
@@ -1845,6 +1894,9 @@ class Api:
                     self._save_geometry()
                     if load_config().get("quit_clear"):
                         self.clear_all_endpoints()
+                        # 标记本次退出已清理，供 app.py _on_closing 读它跳过
+                        # 第二次清理（契约B1）。
+                        self._quit_cleared = True
                 except Exception:
                     pass
                 w.destroy()

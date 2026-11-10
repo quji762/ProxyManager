@@ -10,6 +10,7 @@ import base64
 import ctypes
 import ctypes.wintypes
 import json
+import msvcrt
 import os
 import shutil
 import sys
@@ -136,6 +137,60 @@ PROBE_URLS = (
 
 _cfg_lock = threading.RLock()
 
+
+class _cross_process_lock:
+    """Cross-process advisory lock around the config read-merge-write.
+
+    _cfg_lock is process-local: with PM_NO_SINGLETON (or a failed mutex) two
+    instances can both read config.json, merge their own view over it and
+    os.replace it — the loser silently drops every key the other wrote,
+    including the restore stash. msvcrt.locking serializes the whole
+    critical section across processes. Failing to take the lock degrades to
+    the in-process lock only: an unusable lock file must never make saving
+    impossible.
+    """
+
+    def __init__(self):
+        self._fd = None
+
+    def __enter__(self):
+        try:
+            os.makedirs(APP_DIR, exist_ok=True)
+            # Path resolved from APP_DIR at call time (not a module constant)
+            # so tests can redirect it with the rest of the config paths.
+            self._fd = os.open(os.path.join(APP_DIR, "config.json.lock"),
+                               os.O_RDWR | os.O_CREAT, 0o600)
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            msvcrt.locking(self._fd, msvcrt.LK_LOCK, 1)
+        except Exception:
+            pm.log_exception("config_lock: 跨进程锁不可用，降级为进程内锁")
+            self._close()
+        return self
+
+    def __exit__(self, *exc):
+        self._unlock()
+        self._close()
+        return False
+
+    def _unlock(self):
+        if self._fd is None:
+            return
+        try:
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
+    def _close(self):
+        if self._fd is None:
+            return
+        fd, self._fd = self._fd, None
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 # Set on the first bak/corrupt recovery this process sees; sticky so the UI
 # can toast after Api.__init__ already consumed load_config().
 _load_warning = None  # None | "bak" | "corrupt"
@@ -204,6 +259,26 @@ def _load_json_object(path):
     return data
 
 
+def _quarantine_config():
+    """Move the unreadable primary aside so the next write starts clean.
+
+    os.replace first (atomic); copy2 only as a fallback when the rename
+    itself fails (locked file, cross-volume). Both are best-effort: the
+    caller must keep working even if nothing could be quarantined.
+    """
+    try:
+        if os.path.isfile(CONFIG_FILE):
+            os.replace(CONFIG_FILE, CONFIG_FILE + ".corrupt")
+            return
+    except OSError:
+        pass
+    try:
+        if os.path.isfile(CONFIG_FILE):
+            shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".corrupt")
+    except OSError:
+        pass
+
+
 def _recover_from_bak():
     """Quarantine the unreadable primary file, then try config.json.bak.
 
@@ -211,16 +286,8 @@ def _recover_from_bak():
     meant disable/quit-clear could no longer put the user's previous proxy
     back. A successful save (and the first successful load) keep a bak.
     """
-    corrupt = CONFIG_FILE + ".corrupt"
+    _quarantine_config()
     bak = CONFIG_FILE + ".bak"
-    try:
-        if os.path.isfile(CONFIG_FILE):
-            os.replace(CONFIG_FILE, corrupt)
-    except OSError:
-        try:
-            shutil.copy2(CONFIG_FILE, corrupt)
-        except OSError:
-            pass
     try:
         data = _load_json_object(bak)
     except FileNotFoundError:
@@ -363,10 +430,59 @@ def load_config():
     return out
 
 
+def _read_current_config():
+    """Current on-disk config for the save-time merge.
+
+    A primary that cannot be parsed as a JSON object is quarantined as
+    .corrupt (same isolation _recover_from_bak uses) instead of being
+    swallowed as `{}`: merging into an empty dict used to write back a file
+    holding only this save's keys, silently destroying every other key on
+    disk — including the restore stash.
+    """
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cur = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        pm.log_exception("save_config: 主配置无法读取，隔离为 .corrupt 后重建")
+        _quarantine_config()
+        return {}
+    if not isinstance(cur, dict):
+        pm.log_exception("save_config: 主配置不是 JSON 对象，隔离为 .corrupt 后重建")
+        _quarantine_config()
+        return {}
+    return cur
+
+
+def _write_bak():
+    """Refresh config.json.bak atomically.
+
+    copy2 straight onto the .bak left a half-written file behind if the
+    process died mid-copy, and _recover_from_bak can only fall back to
+    defaults for a truncated bak. The tmp name carries the pid so two
+    instances never share it. A failed bak refresh is not fatal — the
+    primary save has already landed.
+    """
+    bak_tmp = f"{CONFIG_FILE}.{os.getpid()}.bak.tmp"
+    try:
+        shutil.copy2(CONFIG_FILE, bak_tmp)
+        os.replace(bak_tmp, CONFIG_FILE + ".bak")
+    except OSError:
+        try:
+            os.unlink(bak_tmp)
+        except OSError:
+            pass
+
+
 def save_config(cfg):
     """Write the full superset; unknown keys from future versions survive.
     Returns True on success, False if the write failed."""
-    with _cfg_lock:
+    # The cross-process lock spans the whole read-merge-write below, so two
+    # instances cannot each merge their own view of the file and clobber the
+    # other's keys. It stays INNERMOST: js_api.Api.save_config already holds
+    # _cfg_lock when it calls in here.
+    with _cfg_lock, _cross_process_lock():
         # Write to a temp file and os.replace it: open("w") would truncate
         # config.json first, so a crash mid-dump (disk full, power loss)
         # destroyed the file including the restore stash. os.replace is
@@ -376,14 +492,7 @@ def save_config(cfg):
         tmp = f"{CONFIG_FILE}.{os.getpid()}.tmp"
         try:
             os.makedirs(APP_DIR, exist_ok=True)
-            cur = {}
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    cur = json.load(f)
-                if not isinstance(cur, dict):
-                    cur = {}
-            except Exception:
-                pass
+            cur = _read_current_config()
             save_data = {k: cfg[k] for k in _SAVE_KEYS if k in cfg}
             # Encrypt password with DPAPI before persisting
             if "password" in save_data and save_data["password"]:
@@ -400,14 +509,15 @@ def save_config(cfg):
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, CONFIG_FILE)
-            try:
-                shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
-            except OSError:
-                pass
+            _write_bak()
             return True
         except DpapiError:
             raise
-        except OSError:
+        except (OSError, TypeError, ValueError):
+            # json.dump raises TypeError on an unserializable value and
+            # ValueError on a circular reference; both used to escape to
+            # pywebview with the tmp file left behind. Every write failure
+            # leaves the previous config.json intact.
             try:
                 os.unlink(tmp)
             except OSError:

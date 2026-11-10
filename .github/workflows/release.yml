@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  # Manual rerun after a failed tag validation / build (the tag event does not
+  # repeat on its own). Pass the existing tag so the version check below and
+  # the checkout both target the tagged tree, not the current branch.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v1.4.0 (must match config_store.APP_VERSION)"
+        required: true
+        type: string
 
 # Single job builds AND publishes in one step: the EXE goes straight from
 # dist/ to the GitHub Release, so no intermediate Actions Artifact is needed
@@ -22,6 +31,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # github.ref_name is the tag on a push event and the branch on a
+          # manual run; the explicit input wins when one is given.
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
@@ -38,7 +51,7 @@ jobs:
       - name: Validate tag matches APP_VERSION
         shell: python
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           import ast, os, sys
 

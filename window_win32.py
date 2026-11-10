@@ -153,9 +153,16 @@ _GWL_WNDPROC = -4
 WM_NCHITTEST = 0x0084
 WM_NCLBUTTONDOWN = 0x0201
 WM_GETMINMAXINFO = 0x0024
+WM_QUERYENDSESSION = 0x0011
 _HT_EDGE = 8  # physical px margin, scaled by DPI at hit-test time
 
-_resize_wndproc_ref = None   # trampoline keepalive
+# Every trampoline ever installed must stay referenced for the whole process
+# lifetime. ctypes frees a WINFUNCTYPE thunk as soon as the last reference to
+# it dies, and the OLD window's WndProc slot still points at that memory —
+# WinForms recreates handles, so a second install used to drop the only strong
+# reference and the previous window crashed on its next message (use-after-free
+# that only showed up intermittently). Append here, never reassign.
+_resize_wndproc_refs = []    # trampoline keepalives
 _resize_old_proc = None
 _resize_form_hwnd = 0
 _resize_installed_hwnd = 0   # hwnd the hook currently lives on
@@ -167,6 +174,8 @@ _clear_maximized_cb = None # set by main(): clears the fake-max state after
                            # a native caption drag/snap restored the window
                            # behind our back (instance flag + global + icon)
 _page_window_ref = None    # set by main(): pywebview window (UI-thread use only)
+_quit_clear_cb = None      # set by main(): session-end (shutdown/logoff) clear
+_session_clear_started = False
 
 
 def _sync_maximized_icon():
@@ -206,6 +215,29 @@ def _clear_fake_maximized():
         except Exception:
             pass
     _sync_maximized_icon()
+
+
+def _run_session_clear():
+    """WM_QUERYENDSESSION side effect: run the quit-clear once, off the UI
+    thread, and never wait for it (see the handler). One-shot so a second
+    query (or a second window) cannot start a parallel clear."""
+    global _session_clear_started
+    with _resize_hook_lock:
+        if _session_clear_started:
+            return
+        _session_clear_started = True
+        cb = _quit_clear_cb
+
+    def _work():
+        try:
+            if cb is not None:
+                cb()
+        except Exception:
+            pm.log_exception("session_end_quit_clear")
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
 _MIN_W, _MIN_H = 920, 620    # logical px, same as pywebview min_size
 _BORDER_PX = 9               # form-owned ring around the webview (logical px)
 
@@ -226,6 +258,10 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
 
     (Subclassing the WebView2 child windows instead is NOT viable: doing that
     from Python tore the children down and exited the process.)"""
+    # Snapshot the previous WndProc for THIS dispatch: a concurrent re-install
+    # (WinForms handle recreation) must never leave an in-flight message
+    # calling a pointer that was just cleared.
+    old_proc = _resize_old_proc
     if msg == WM_NCHITTEST:
         try:
             with _resize_hook_lock:
@@ -328,15 +364,45 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
         # loop just MOVES it (it doesn't know the window is "maximized"), so
         # no WM_SIZE/SC_RESTORE fires and the state would go stale. When the
         # loop ends and the bounds no longer match the work area, the user
-        # really dragged it off — collapse the fake-max state. (A plain
-        # caption click also enters/exits the loop, but bounds still match.)
+        # really dragged it off — route it through the SAME restore as
+        # SC_RESTORE so the window returns to its pre-maximize bounds.
+        # Only clearing the flag (what this branch used to do) left the window
+        # sitting at work-area size: the next maximize captured that size as
+        # _prev_bounds and the original bounds were lost for good.
+        # (A plain caption click also enters/exits the loop, but bounds still
+        # match the work area, so nothing happens.)
         if _is_maximized() and _restore_callback is not None:
             r = _RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(r))
             wa = _work_area_for_hwnd(hwnd)
             if (r.left, r.top, r.right, r.bottom) != \
                     (wa.left, wa.top, wa.right, wa.bottom):
+                try:
+                    # _toggle_maximize() repositions the window itself; it
+                    # cannot push the icon sync (it also runs on js_api
+                    # worker threads), which is why SC_RESTORE syncs here.
+                    _restore_callback()
+                except Exception:
+                    pass  # the flag is still cleared below
+                # Reconcile all three views (module flag, Api flag, JS icon)
+                # unconditionally: if the prev bounds happen to equal the work
+                # area the restore is a no-op, no WM_SIZE arrives to clear the
+                # flag, and the icon would claim "maximized" over a window
+                # that is not. Also the fallback when _restore_callback raised.
                 _clear_fake_maximized()
+    elif msg == WM_QUERYENDSESSION:
+        # Shutdown / logoff. 退出时关闭代理 must run here too, but the UI
+        # thread is inside the session-end query and clear_all_endpoints
+        # touches the registry and wsl.exe subprocesses (seconds per WSL
+        # endpoint) — calling it inline, or letting it marshal back to this
+        # very message pump via form.Invoke, deadlocks the shutdown. Run it on
+        # a daemon thread and answer TRUE immediately: Windows tears the
+        # process down after WM_ENDSESSION anyway, so a partial clear is
+        # strictly better than a hung session end. A Python thread cannot be
+        # preempted, hence no hard timeout — the bound that matters is "the UI
+        # thread never waits", which this guarantees.
+        _run_session_clear()
+        return 1
     elif msg == WM_GETMINMAXINFO:
         # Enforce the minimum window size for the native resize loop.
         try:
@@ -352,16 +418,43 @@ def _resize_hook_proc(hwnd, msg, wparam, lparam):
             return 0
         except Exception:
             pass
-    return user32.CallWindowProcW(_resize_old_proc, hwnd, msg, wparam, lparam)
+    return user32.CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
+
+
+def _uninstall_resize_hook_locked():
+    """Put the previous WndProc back on the hwnd the hook currently lives on.
+    Caller must hold _resize_hook_lock.
+
+    Installing on a NEW hwnd without this left the old window subclassed by a
+    thunk whose only strong reference had just been replaced. The ownership
+    check first: a recycled hwnd that now belongs to someone else's window
+    must never be touched."""
+    global _resize_old_proc, _resize_installed_hwnd
+    old_hwnd = _resize_installed_hwnd
+    old_proc = _resize_old_proc
+    if not old_hwnd or not old_proc:
+        _resize_old_proc = None
+        _resize_installed_hwnd = 0
+        return
+    if _hook_is_ours(old_hwnd):
+        try:
+            # Restore BEFORE clearing the globals: once the slot points at the
+            # original proc again no further message can reach our thunk, so
+            # the reset below cannot race a dispatch in flight.
+            user32.SetWindowLongPtrW(old_hwnd, _GWL_WNDPROC, old_proc)
+        except Exception:
+            pass  # handle already destroyed: nothing left to restore
+    _resize_old_proc = None
+    _resize_installed_hwnd = 0
 
 
 def install_resize_hook(hwnd):
     """Subclass the form's WndProc. Re-entry guarded (loaded fires on its own
     thread and the ctypes calls release the GIL). The guard also checks WHICH
     hwnd the hook lives on: WinForms can recreate the handle, and a stale hook
-    on the old hwnd must be re-installed on the new one."""
-    global _resize_wndproc_ref, _resize_old_proc, _resize_form_hwnd, \
-        _resize_installed_hwnd
+    on the old hwnd must be re-installed on the new one (the old window is
+    unsubclassed first — see _uninstall_resize_hook_locked)."""
+    global _resize_old_proc, _resize_form_hwnd, _resize_installed_hwnd
     with _resize_hook_lock:
         if _resize_old_proc and _resize_installed_hwnd == hwnd:
             return
@@ -379,11 +472,14 @@ def install_resize_hook(hwnd):
                 user32.SetWindowLongPtrW(hwnd, _GWL_STYLE, style | WS_MINIMIZEBOX)
                 # SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED
                 user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
+            _uninstall_resize_hook_locked()
             _resize_old_proc = user32.GetWindowLongPtrW(hwnd, _GWL_WNDPROC)
-            _resize_wndproc_ref = _WNDPROC(_resize_hook_proc)
+            trampoline = _WNDPROC(_resize_hook_proc)
+            # Keepalive for the process lifetime — never reassigned.
+            _resize_wndproc_refs.append(trampoline)
             if user32.SetWindowLongPtrW(
                     hwnd, _GWL_WNDPROC,
-                    ctypes.cast(_resize_wndproc_ref, ctypes.c_void_p).value):
+                    ctypes.cast(trampoline, ctypes.c_void_p).value):
                 _resize_installed_hwnd = hwnd
             else:
                 _resize_old_proc = None  # allow the watchdog to retry
@@ -392,10 +488,17 @@ def install_resize_hook(hwnd):
 
 
 def _hook_is_ours(hwnd):
-    if not hwnd or not _resize_wndproc_ref:
+    """Whether hwnd's WndProc is one of OUR trampolines (any generation: a
+    stale-but-still-installed hook still counts as ours, so the watchdog does
+    not subclass an already-subclassed window)."""
+    with _resize_hook_lock:
+        refs = list(_resize_wndproc_refs)
+    if not hwnd or not refs:
         return False
     cur = user32.GetWindowLongPtrW(hwnd, _GWL_WNDPROC)
-    return cur == ctypes.cast(_resize_wndproc_ref, ctypes.c_void_p).value
+    if not cur:
+        return False
+    return cur in {ctypes.cast(t, ctypes.c_void_p).value for t in refs}
 
 
 def ensure_resize_hook(window=None):
@@ -418,10 +521,26 @@ def ensure_resize_hook(window=None):
     return ok
 
 
+def resize_hook_healthy():
+    """Cheap liveness probe for the resize watchdog: no EnumWindows, no
+    cross-thread Invoke. True when the hook still lives on the hwnd it was
+    installed on AND that hwnd still carries the padded ring — i.e. when
+    ensure_resize_hook() would be a no-op anyway. A stale/recreated handle
+    fails the check, so the self-heal path still runs."""
+    hwnd = _resize_installed_hwnd
+    return bool(hwnd) and _hook_is_ours(hwnd) and _padded_hwnd == hwnd
+
+
 def _apply_window_padding(window, px):
     """Set Form.Padding on pywebview's WinForms view, marshaled to the UI
     thread via Control.Invoke (pythonnet) — the same pattern pywebview itself
-    uses for minimize/maximize. The form instance is window.native."""
+    uses for minimize/maximize. The form instance is window.native.
+
+    Padding is in DEVICE pixels while the WndProc hit-test margin is logical
+    px scaled by the window DPI (_HT_EDGE * dpi / 96), so the ring is scaled
+    the same way here. Without that, a 150% display hit-tests a 12px edge
+    inside a 9px ring: the browser covers part of the resize margin and the
+    top strip swallows caption drags."""
     try:
         form = getattr(window, "native", None)
         if form is None:
@@ -430,7 +549,11 @@ def _apply_window_padding(window, px):
         from System.Windows.Forms import Padding  # noqa: E402
 
         def _set():
-            form.Padding = Padding(px)
+            try:
+                dpi = user32.GetDpiForWindow(form.Handle) or 96
+            except Exception:
+                dpi = 96  # pre-1607 Windows: no per-window DPI
+            form.Padding = Padding(int(px * dpi // 96))
 
         if form.InvokeRequired:
             form.Invoke(Func[Type](_set))

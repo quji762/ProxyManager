@@ -141,6 +141,16 @@ ENV_REG_PATH    = r"Environment"
 NO_PROXY_VALUE  = "localhost,127.0.0.1,::1"
 LOOPBACK_HOSTS  = {"127.0.0.1", "localhost", "::1", "::"}
 
+# Windows' own UI (System Properties / Environment Variables) only shows the
+# UPPERCASE proxy variables, while curl and most *nix tooling read the
+# lowercase spellings. Every enable writes BOTH cases for each name so
+# neither family is left pointing at a stale proxy, and every read prefers
+# the lowercase spelling with the uppercase one as fallback.
+PS_ENV_URL_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "http_proxy", "https_proxy", "all_proxy")
+PS_ENV_NO_PROXY_NAMES = ("NO_PROXY", "no_proxy")
+PS_ENV_NAMES = PS_ENV_URL_NAMES + PS_ENV_NO_PROXY_NAMES
+
 # Sentinel strings the UI maps through i18n. Keep stable; do not translate here.
 UNSET = "未设置"
 UNDETECTED = "未检测到"
@@ -504,13 +514,52 @@ def format_speed(bytes_per_sec: float) -> str:
 
 
 # ─── Proxy Logic ──────────────────────────────────────────────────────────────
-def get_ps_status():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
+# Rollback snapshots store (value, reg_type) per name; a name that did not
+# exist before we wrote it is snapshotted as this sentinel so restoring it
+# deletes the value instead of writing None back.
+_REG_MISSING = object()
+
+
+def _restore_reg_value(key, name, snap) -> None:
+    """Put one registry value back to its snapshot: write the original
+    (value, type) pair, or delete the value when it did not exist before.
+    The type is kept verbatim — ProxyEnable must come back as REG_DWORD,
+    not as the REG_SZ a plain str() write would leave behind."""
+    if snap is _REG_MISSING:
         try:
-            v, _ = winreg.QueryValueEx(key, "HTTP_PROXY")
-            return v
+            winreg.DeleteValue(key, name)
         except FileNotFoundError:
+            pass
+        return
+    value, reg_type = snap
+    winreg.SetValueEx(key, name, 0, reg_type, value)
+
+
+def _reg_snapshot(key, names):
+    """{name: (value, type) or _REG_MISSING} for `names` under an open key."""
+    snap = {}
+    for n in names:
+        try:
+            snap[n] = winreg.QueryValueEx(key, n)
+        except FileNotFoundError:
+            snap[n] = _REG_MISSING
+    return snap
+
+
+def _ps_env_first(names):
+    """First HKCU\\Environment value among `names`, or None when none is set.
+    Lowercase spellings come first: curl and most *nix tooling read those,
+    while Windows' own UI writes the uppercase ones."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
+                             winreg.KEY_READ)
+        try:
+            for n in names:
+                try:
+                    v, _ = winreg.QueryValueEx(key, n)
+                    return v
+                except FileNotFoundError:
+                    continue
             return None
         finally:
             winreg.CloseKey(key)
@@ -518,37 +567,26 @@ def get_ps_status():
         return None
 
 
+def get_ps_status():
+    """User-env HTTP proxy URL — either spelling counts as 'enabled', so a
+    machine where only http_proxy is set no longer reads as '未设置'."""
+    return _ps_env_first(("http_proxy", "HTTP_PROXY"))
+
+
 def get_ps_no_proxy():
-    """Raw user NO_PROXY env value ('' when unset)."""
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
-        try:
-            v, _ = winreg.QueryValueEx(key, "NO_PROXY")
-            return str(v)
-        except FileNotFoundError:
-            return ""
-        finally:
-            winreg.CloseKey(key)
-    except OSError:
-        return ""
+    """Raw user NO_PROXY env value ('' when unset); either spelling."""
+    return str(_ps_env_first(("no_proxy", "NO_PROXY")) or "")
 
 
 def get_ps_proxy_vars():
-    """Read HTTP_PROXY, HTTPS_PROXY and ALL_PROXY from Windows user env."""
+    """Read HTTP_PROXY, HTTPS_PROXY and ALL_PROXY from Windows user env.
+    Each protocol variable prefers the lowercase spelling (curl's) and
+    falls back to the uppercase one (Windows UI's)."""
     result = {"HTTP_PROXY": UNSET, "HTTPS_PROXY": UNSET, "ALL_PROXY": UNSET}
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0, winreg.KEY_READ)
-        try:
-            for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
-                try:
-                    v, _ = winreg.QueryValueEx(key, name)
-                    result[name] = v
-                except FileNotFoundError:
-                    pass
-        finally:
-            winreg.CloseKey(key)
-    except OSError:
-        pass
+    for name in result:
+        v = _ps_env_first((name.lower(), name))
+        if v is not None:
+            result[name] = v
     return result
 
 
@@ -623,7 +661,10 @@ def get_wsl_status(block: Optional[str] = None):
 
 
 def _no_proxy_entries(value: str):
-    return [e.strip() for e in (value or "").split(",") if e.strip()]
+    """NO_PROXY accepts both ',' and ';' as separators (curl uses ',',
+    some corporate setups ';'); split on either so a mixed list still
+    round-trips through the merge/strip paths."""
+    return [e.strip() for e in re.split(r"[,;]", value or "") if e.strip()]
 
 
 def _merged_no_proxy(existing: str) -> str:
@@ -661,32 +702,38 @@ def _broadcast_env_change():
 
 def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
     url = build_proxy_url(host, port, scheme, user, password)
-    env_names = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+    # NO_PROXY is merged (never overwritten with the URL), so the URL loop
+    # only covers the protocol variables — in both spellings.
+    url_names = PS_ENV_URL_NAMES
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
                              winreg.KEY_SET_VALUE | winreg.KEY_READ)
         try:
             if enable:
-                # Roll back on mid-loop failure so HTTP_PROXY is not left set
-                # while HTTPS_PROXY/ALL_PROXY were never written.
+                # Snapshot every original value first so a mid-loop failure
+                # puts each key back exactly as it was (deleting the ones
+                # that did not exist) — a blind delete would drop a proxy
+                # the user had configured by hand.
+                original = _reg_snapshot(key, PS_ENV_NAMES)
                 written = []
                 try:
-                    for n in env_names:
+                    for n in url_names:
                         winreg.SetValueEx(key, n, 0, winreg.REG_SZ, url)
                         written.append(n)
                     # Keep loopback traffic direct without clobbering a user-set
                     # NO_PROXY: merge ours in on enable, strip only ours on disable.
-                    try:
-                        prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
-                    except FileNotFoundError:
-                        prev = ""
-                    winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ,
-                                      _merged_no_proxy(prev))
+                    no_proxy = str(_ps_env_first(("no_proxy", "NO_PROXY")) or "")
+                    merged = _merged_no_proxy(no_proxy)
+                    for n in PS_ENV_NO_PROXY_NAMES:
+                        winreg.SetValueEx(key, n, 0, winreg.REG_SZ, merged)
+                        written.append(n)
                 except OSError:
                     for n in written:
                         try:
-                            winreg.DeleteValue(key, n)
-                        except FileNotFoundError:
+                            _restore_reg_value(key, n, original[n])
+                        except OSError:
+                            # One key failing to roll back must not stop the
+                            # others; the outer handler reports the failure.
                             pass
                     raise
             else:
@@ -696,7 +743,7 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
                 # removed so user-configured proxies for other endpoints are
                 # never clobbered by a disable.
                 removed = False
-                for n in env_names:
+                for n in url_names:
                     try:
                         cur, _ = winreg.QueryValueEx(key, n)
                     except FileNotFoundError:
@@ -708,17 +755,17 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
                         except FileNotFoundError:
                             pass
                 if removed:
-                    try:
-                        prev, _ = winreg.QueryValueEx(key, "NO_PROXY")
-                    except FileNotFoundError:
-                        prev = None
-                    if prev is not None:
+                    for n in PS_ENV_NO_PROXY_NAMES:
+                        try:
+                            prev, _ = winreg.QueryValueEx(key, n)
+                        except FileNotFoundError:
+                            continue
                         kept = _stripped_no_proxy(prev)
                         if kept:
-                            winreg.SetValueEx(key, "NO_PROXY", 0, winreg.REG_SZ, kept)
+                            winreg.SetValueEx(key, n, 0, winreg.REG_SZ, kept)
                         else:
                             try:
-                                winreg.DeleteValue(key, "NO_PROXY")
+                                winreg.DeleteValue(key, n)
                             except FileNotFoundError:
                                 pass
         finally:
@@ -731,25 +778,32 @@ def set_ps_proxy(host, port, enable=True, scheme="http", user="", password=""):
 
 
 def set_ps_env_vars(values):
-    """Write user env vars from {name: value}, deleting keys whose value is
-    empty/None. Used to put back the exact pre-enable HTTP_PROXY /
-    HTTPS_PROXY / ALL_PROXY / NO_PROXY state, which a single URL cannot
-    express when the user's variables differed.  Only the four proxy
-    variables are accepted — this function is reachable from the webview
-    bridge, so an unrestricted key name would let it write arbitrary
-    HKCU\\Environment values."""
-    allowed = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+    """Put back the exact pre-enable state of the proxy env vars from
+    {name: value}, deleting keys whose value is empty/None. Used because a
+    single URL cannot express a state where HTTP_PROXY / HTTPS_PROXY /
+    ALL_PROXY / NO_PROXY differed. Both spellings of the four proxy
+    variables are accepted — an enable writes all eight — and any canonical
+    name the caller does NOT mention is deleted too: an enable may have
+    written a key the stash never captured (a stash taken by an older
+    version only knew the four uppercase names), and leaving it behind
+    would keep a proxy URL alive after the "restore". Any other key name is
+    rejected: this function is reachable from the webview bridge, so an
+    unrestricted key name would let it write arbitrary HKCU\\Environment
+    values."""
+    allowed = set(PS_ENV_NAMES)
     values = {k: v for k, v in values.items() if k in allowed}
-    if not values:
-        return True
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
                              winreg.KEY_SET_VALUE)
         try:
-            for n, v in values.items():
+            for n in PS_ENV_NAMES:
+                v = values.get(n)
                 if v:
                     winreg.SetValueEx(key, n, 0, winreg.REG_SZ, str(v))
                 else:
+                    # Not in the stash (or stashed as empty): the key did not
+                    # exist before the enable, so it must not exist after the
+                    # restore either.
                     try:
                         winreg.DeleteValue(key, n)
                     except FileNotFoundError:
@@ -764,6 +818,29 @@ def set_ps_env_vars(values):
 
 INET_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 _PROXY_OVERRIDE_OURS = {"localhost", "127.0.0.1", "<local>"}
+# The order enable appends them in. Disable must strip exactly the tail
+# this append produced, so a '<local>' the user already had (a Windows
+# default!) is never mistaken for one of ours.
+_PROXY_OVERRIDE_OURS_ORDER = ("localhost", "127.0.0.1", "<local>")
+
+
+def _strip_our_proxy_override(value):
+    """Undo exactly what enable appended to ProxyOverride, or None when the
+    current value does not end with such a tail.
+
+    Subtraction (dropping every entry named like ours) would also delete
+    entries the user configured themselves — '<local>' ships as a Windows
+    default. Instead the longest suffix whose removal round-trips through
+    the enable append is stripped; a value the user edited afterwards (or
+    one that keeps their own copies of our names) is returned as None so
+    the caller leaves it untouched."""
+    entries = [e.strip() for e in str(value or "").split(";") if e.strip()]
+    for k in range(len(entries), 0, -1):
+        kept = entries[:len(entries) - k]
+        if kept + [e for e in _PROXY_OVERRIDE_OURS_ORDER if e not in kept] \
+                == entries:
+            return kept
+    return None
 
 
 def _wininet_notify():
@@ -790,7 +867,7 @@ def _sys_proxy_server_to_url(server: str):
             pl = part.lower()
             if pl.startswith("socks=") or pl.startswith("socks5="):
                 socks_picked = part.split("=", 1)[1]
-            elif pl.startswith("http=") and not pl.startswith("https="):
+            elif pl.startswith("http="):
                 picked = part.split("=", 1)[1]
                 break
             elif pl.startswith("https=") and picked is None:
@@ -845,7 +922,14 @@ def get_sys_proxy():
                 server = ""
         finally:
             winreg.CloseKey(key)
-        if not enable:
+        # Some tools write ProxyEnable as REG_SZ ("0"/"1") — a non-empty
+        # string is truthy in Python, so "0" used to read as enabled.
+        # Same coercion as sys_proxy_per_machine.
+        try:
+            enabled = int(enable) != 0
+        except (TypeError, ValueError):
+            enabled = False
+        if not enabled:
             return UNSET
         return _sys_proxy_server_to_url(str(server)) or UNSET
     except OSError:
@@ -909,19 +993,32 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
             if enable:
                 # Server first, then the enable flag: a failed ProxyServer
                 # write must not leave ProxyEnable=1 pointing at a stale/empty
-                # value (which breaks every browser on the machine).
-                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
-                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                # value (which breaks every browser on the machine). Every
+                # value is snapshotted up front so a failure at ANY step
+                # restores the pre-enable state instead of leaving a
+                # half-configured proxy behind.
+                original = _reg_snapshot(
+                    key, ("ProxyServer", "ProxyEnable", "ProxyOverride"))
                 try:
-                    prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
-                except FileNotFoundError:
-                    prev = ""
-                entries = [e.strip() for e in str(prev).split(";") if e.strip()]
-                for e in ("localhost", "127.0.0.1", "<local>"):
-                    if e not in entries:
-                        entries.append(e)
-                winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
-                                  ";".join(entries))
+                    winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, server)
+                    winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                    try:
+                        prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
+                    except FileNotFoundError:
+                        prev = ""
+                    entries = [e.strip() for e in str(prev).split(";") if e.strip()]
+                    for e in _PROXY_OVERRIDE_OURS_ORDER:
+                        if e not in entries:
+                            entries.append(e)
+                    winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ,
+                                      ";".join(entries))
+                except OSError:
+                    for n, snap in original.items():
+                        try:
+                            _restore_reg_value(key, n, snap)
+                        except OSError:
+                            pass
+                    raise
             else:
                 try:
                     cur, _ = winreg.QueryValueEx(key, "ProxyServer")
@@ -934,16 +1031,18 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
                         winreg.DeleteValue(key, "ProxyServer")
                     except FileNotFoundError:
                         pass
-                    # Clean up ProxyOverride entries we appended on enable,
-                    # preserving any the user added themselves.
+                    # Clean up the ProxyOverride tail we appended on enable,
+                    # preserving any entries the user added themselves — a
+                    # value that no longer ends with our tail is left alone.
                     try:
                         prev, _ = winreg.QueryValueEx(key, "ProxyOverride")
                     except FileNotFoundError:
                         prev = None
                     if prev is not None:
-                        kept = [e.strip() for e in str(prev).split(";")
-                                if e.strip() and e.strip() not in _PROXY_OVERRIDE_OURS]
-                        if kept:
+                        kept = _strip_our_proxy_override(prev)
+                        if kept is None:
+                            pass          # not our tail: untouched
+                        elif kept:
                             winreg.SetValueEx(key, "ProxyOverride", 0,
                                               winreg.REG_SZ, ";".join(kept))
                         else:
@@ -1109,6 +1208,43 @@ def _wsl_write_failure(r, distro):
     return LStr("errWslWriteHint", {"where": where})
 
 
+def _wsl_posix_script(enable: bool) -> str:
+    """Bash function that strips the managed block from one shell rc file and
+    (on enable) appends a fresh copy of it.
+
+    The strip is an awk pass that removes only COMPLETE marker pairs: an end
+    marker closes the most recent still-open begin marker (innermost first),
+    and an unterminated block is buffered and re-emitted verbatim at EOF. So
+    a stray begin marker can never delete the rest of the file (the old
+    ``sed '/begin/,/end/d'`` deleted from begin to EOF whenever the end
+    marker was missing) and no line is ever lost. The append is the last
+    step of the ``&&`` chain — a failed backup/strip used to short-circuit
+    straight past it and append a SECOND managed block on top of the old
+    one. Any failure returns non-zero so the caller can roll the distro
+    back instead of believing a half-written file."""
+    create = '[ -f "$f" ] || : > "$f"; ' if enable else '[ -f "$f" ] || return 0; '
+    then_body = 'cat "$block" >> "$f"; rc=$?; ' if enable else 'rc=0; '
+    awk_prog = (
+        '{ line = $0; sub(/\\r$/, "", line) } '
+        'line == b { depth++; pend[depth] = $0 "\\n"; next } '
+        'line == e && depth > 0 { delete pend[depth]; depth--; next } '
+        'depth > 0 { pend[depth] = pend[depth] $0 "\\n"; next } '
+        '{ print } '
+        'END { for (i = 1; i <= depth; i++) printf "%s", pend[i] }'
+    )
+    return (
+        'apply_posix() { f="$1"; ' + create
+        + '[ -n "$(tail -c1 "$f" 2>/dev/null)" ] && printf \'\\n\' >> "$f"; '
+        + 'tmp=$(mktemp) && bak=$(mktemp) && cp -a "$f" "$bak" 2>/dev/null '
+        + '|| { rm -f "$tmp" "$bak"; return 1; }; '
+        + "if awk -v b='" + WSL_PROXY_BEGIN + "' -v e='" + WSL_PROXY_END + "' '"
+        + awk_prog + "' \"$f\" > \"$tmp\" "
+        + '&& { cat "$tmp" > "$f" || cat "$bak" > "$f"; }; then '
+        + then_body
+        + 'else rc=1; fi; rm -f "$tmp" "$bak"; return $rc; }; '
+    )
+
+
 def set_wsl_proxy(host, port, enable=True, scheme="http", user="", password=""):
     # NAT rewrite is the caller's job (js_api resolves via _wsl_url_target
     # ONCE, then writes and records the same host). Doing nat_host here would
@@ -1141,24 +1277,14 @@ unset _pm_np _pm_e
         # zshrc (same POSIX exports), then (on enable) append a fresh copy.
         # Writes THROUGH the file (not sed -i) so stow/chezmoi symlinks stay
         # links. The POSIX block arrives on stdin (no shell interpolation).
-        # fish gets its own conf.d file (different syntax).
-        begin, end = re.escape(WSL_PROXY_BEGIN), re.escape(WSL_PROXY_END)
-        create = '[ -f "$f" ] || : > "$f"; ' if enable else '[ -f "$f" ] || return; '
-        append = 'cat "$block" >> "$f"; ' if enable else ''
-        # sed 备份 + cat 回写（保留 stow/chezmoi 符号链接）：ENOSPC 时
-        # cat > "$f" 会截断 .bashrc，先 cp 一份，失败再灌回去。
-        script = (
-            ('block=$(mktemp); cat > "$block"; ' if enable else '')
-            + 'apply_posix() { f="$1"; ' + create
-            + '[ -n "$(tail -c1 "$f" 2>/dev/null)" ] && printf \'\\n\' >> "$f"; '
-            + 'tmp=$(mktemp) && bak=$(mktemp) && cp -a "$f" "$bak" 2>/dev/null '
-            + f'&& sed \'/{begin}/,/{end}/d\' "$f" > "$tmp" '
-            + '&& { cat "$tmp" > "$f" || cat "$bak" > "$f"; } '
-            + '; rm -f "$tmp" "$bak"; '
-            + append
-            + '}; '
-            + 'apply_posix "$HOME/.bashrc"; apply_posix "$HOME/.zshrc"; '
-        )
+        # fish gets its own conf.d file (different syntax). Per-file failures
+        # set `fail`, so a half-written distro is reported instead of
+        # silently "succeeding" (and is then rolled back, see below).
+        # The block itself arrives on stdin (enable only); the strip function
+        # is shared, so `rollback` is simply the disable program replayed on
+        # the distros that already took the write.
+        prefix = 'block=$(mktemp); cat > "$block"; ' if enable else ''
+        fish_off = 'rm -f "$HOME/.config/fish/conf.d/proxy-manager.fish"'
         if enable:
             import base64 as _b64
             fish_text = (
@@ -1186,18 +1312,33 @@ unset _pm_np _pm_e
                 f"{WSL_PROXY_END}\n"
             )
             b64 = _b64.b64encode(fish_text.encode("utf-8")).decode("ascii")
-            script += (
-                'mkdir -p "$HOME/.config/fish/conf.d"; '
-                f"printf '%s\\n' '{b64}' | (base64 -d 2>/dev/null || base64 --decode) "
-                '> "$HOME/.config/fish/conf.d/proxy-manager.fish"; '
-                'rm -f "$block"'
+            fish_on = (
+                'mkdir -p "$HOME/.config/fish/conf.d" '
+                f"&& printf '%s\\n' '{b64}' | (base64 -d 2>/dev/null || base64 --decode) "
+                '> "$HOME/.config/fish/conf.d/proxy-manager.fish" '
+                '&& rm -f "$block"'
             )
         else:
-            script += 'rm -f "$HOME/.config/fish/conf.d/proxy-manager.fish"'
+            fish_on = fish_off
+        script = (
+            'fail=0; ' + prefix + _wsl_posix_script(enable)
+            + 'apply_posix "$HOME/.bashrc" || fail=1; '
+            + 'apply_posix "$HOME/.zshrc" || fail=1; '
+            + fish_on + ' || fail=1; '
+            + 'exit "$fail"'
+        )
+        rollback = (
+            'fail=0; ' + _wsl_posix_script(False)
+            + 'apply_posix "$HOME/.bashrc" || fail=1; '
+            + 'apply_posix "$HOME/.zshrc" || fail=1; '
+            + fish_off + ' || fail=1; '
+            + 'exit "$fail"'
+        )
 
         # Apply to every user distro (multi-distro setups), skipping Docker's
         # infra distros. Enable fails loudly; disable is best-effort.
         errs = []
+        done = []
         for d in (_wsl_targets()):
             try:
                 cmd = ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", script]
@@ -1207,13 +1348,29 @@ unset _pm_np _pm_e
                     capture_output=True, timeout=15,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                if enable and r.returncode != 0:
-                    # _wsl_write_failure already carries the WSL(distro) label
-                    errs.append(_wsl_write_failure(r, d))
+                if r.returncode != 0:
+                    if enable:
+                        # _wsl_write_failure already carries the WSL(distro) label
+                        errs.append(_wsl_write_failure(r, d))
+                elif enable:
+                    done.append(d)
             except Exception as e:
                 if enable:
                     errs.append(f"WSL({d or ''}): {e}")
         if enable and errs:
+            # 任一日标失败就对已成功写入的发行版执行反向清理：js_api 只在
+            # 全部成功时记录 _wsl_written，漏回滚会让退出清理找不到这些
+            # 发行版，代理块残留到下一次启用。
+            for d in done:
+                try:
+                    subprocess.run(
+                        ["wsl"] + (["-d", d] if d else [])
+                        + ["-e", "bash", "-c", rollback],
+                        capture_output=True, timeout=15,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                except Exception:
+                    log_exception_once("wsl_rollback", "set_wsl_proxy rollback")
             return LJoin(errs)
         return True
     except Exception as e:
@@ -1256,7 +1413,9 @@ def _git_win_restore_key(key: str, prev) -> None:
 
 def _git_win_unset(url: str) -> None:
     """Remove one exact git proxy URL on Windows. --fixed-value needs Git
-    2.33+; fall back to a regex unset so older Git still disables."""
+    2.33+; fall back to a regex unset so older Git still disables. The
+    regex is anchored (^...$) — an unanchored pattern would also match
+    values that merely start with the URL (789 → 7890)."""
     for key in ("http.proxy", "https.proxy"):
         r = subprocess.run(
             ["git", "config", "--global", "--fixed-value", "--unset-all", key, url],
@@ -1265,7 +1424,8 @@ def _git_win_unset(url: str) -> None:
         if r.returncode in (0, 5):
             continue
         subprocess.run(
-            ["git", "config", "--global", "--unset-all", key, re.escape(url)],
+            ["git", "config", "--global", "--unset-all", key,
+             "^" + re.escape(url) + "$"],
             capture_output=True, timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW)
 
@@ -1282,8 +1442,9 @@ def _git_wsl_unset_cmd(url: str) -> str:
     The regex fallback embeds ``re.escape(url)`` in single quotes — re.escape
     does NOT escape single quotes (``re.escape("a'b") == "a'b"``), so a URL
     containing ``'`` could break out of the quoting.  Shell-escape the
-    regex-escaped string with ``_bash_sq`` to close that hole."""
-    esc = _bash_sq(re.escape(url))
+    regex-escaped string with ``_bash_sq`` to close that hole. The pattern
+    is anchored (^...$) so unsetting ``:789`` cannot also remove ``:7890``."""
+    esc = _bash_sq("^" + re.escape(url) + "$")
     sq = _bash_sq(url)
     return (
         f"(git config --global --fixed-value --unset-all http.proxy '{sq}' "
@@ -1306,6 +1467,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
     try:
         if use_wsl:
             errs = []
+            done = []
             for d in (_wsl_targets()):
                 where = f"WSL({d}): " if d else ""
                 try:
@@ -1345,10 +1507,23 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                         else:
                             errs.append(LStr("errGitFailWslWhere",
                                              {"where": where, "code": r.returncode}))
+                    elif enable:
+                        done.append(d)
                 except Exception as e:
                     if enable:
                         errs.append(f"{where}{e}")
             if enable and errs:
+                # 任一日标失败就对已写入的发行版卸掉刚写进去的 URL：js_api 只在
+                # 全部成功时记录 _wsl_written，漏回滚会让退出清理漏掉这些发行版。
+                for d in done:
+                    try:
+                        subprocess.run(
+                            ["wsl"] + (["-d", d] if d else [])
+                            + ["-e", "bash", "-c", _git_wsl_unset_cmd(url)],
+                            capture_output=True, timeout=15,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+                    except Exception:
+                        log_exception_once("gitwsl_rollback", "set_git_proxy rollback")
                 return LJoin(errs)
         else:
             if enable:
@@ -1443,6 +1618,30 @@ def _read_ini(path):
     return _decode_ini_bytes(raw)
 
 
+_INI_COMMENT_RE = re.compile(r"(\s|^)[#;]")
+
+
+def _ini_value_comment(raw: str):
+    """Split an INI value into (value, trailing comment).
+
+    npm's .npmrc and pip's pip.ini both treat `#` / `;` as comment markers,
+    so `proxy = http://host:port  # corp` must compare (and rewrite) as the
+    URL alone. The marker only counts at the start of the value or after
+    whitespace, so a value that legitimately contains '#' is not truncated.
+    The comment is returned WITHOUT its leading whitespace."""
+    m = _INI_COMMENT_RE.search(raw)
+    if not m:
+        return raw, ""
+    at = m.start() + len(m.group(1))
+    return raw[:at], raw[at:]
+
+
+def _ini_strip_value(raw: str):
+    """Value of an INI value-part: inline comment removed, quotes stripped."""
+    value, _comment = _ini_value_comment(raw)
+    return value.strip().strip('"').strip("'") or None
+
+
 def _ini_get(text, key, section=None):
     """Value of `key` in INI text, or None when absent. Quotes stripped.
     Without `section` the whole file is searched (npmrc is flat); with one,
@@ -1453,7 +1652,7 @@ def _ini_get(text, key, section=None):
                       text)
         if not m:
             return None
-        return m.group(1).strip().strip('"').strip("'") or None
+        return _ini_strip_value(m.group(1))
     cur = None
     for line in text.splitlines():
         m = re.match(r"^[ \t]*\[([^\]]*)\][ \t]*$", line)
@@ -1465,7 +1664,7 @@ def _ini_get(text, key, section=None):
         m = re.match(rf"[ \t]*{re.escape(key)}[ \t]*[:=][ \t]*(.*?)[ \t]*$",
                      line, re.IGNORECASE)
         if m:
-            return m.group(1).strip().strip('"').strip("'") or None
+            return _ini_strip_value(m.group(1))
     return None
 
 
@@ -1477,8 +1676,9 @@ def _ini_edit(text, keys, url, equals, section=None, eol="\n"):
     [global]; an [install] proxy belongs to another tool and must survive
     verbatim). Keys absent from the section are appended right after its
     header (created when missing), else at the end (npm's .npmrc is flat).
-    Every other line, key style (`:` vs `=`), quoting and line ending
-    is preserved; appended lines use `eol` (the file's own dominant ending).
+    Every other line, key style (`:` vs `=`), quoting, trailing comment and
+    line ending is preserved; appended lines use `eol` (the file's own
+    dominant ending). A replaced line keeps its inline comment.
     Returns the new text."""
     line_re = re.compile(
         r"^([ \t]*)(" + "|".join(re.escape(k) for k in keys)
@@ -1505,15 +1705,18 @@ def _ini_edit(text, keys, url, equals, section=None, eol="\n"):
             out.append(line)
             continue
         seen.add(m.group(2).lower())
-        cur = m.group(4).strip().strip('"').strip("'")
+        value_part, comment = _ini_value_comment(m.group(4))
+        cur = value_part.strip().strip('"').strip("'")
         if url is None:
             if cur and cur != equals:
                 out.append(line)  # user's own value: untouched
                 continue
             continue              # our line: dropped entirely
-        q = m.group(4)[:1] if m.group(4)[:1] in "\"'" else ""
-        out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{q}{url}{q}"
-                   f"{line[len(body):]}")
+        q = value_part[:1] if value_part[:1] in "\"'" else ""
+        # 行尾注释原样保留：启用替换只换值，不吞掉用户写在这一行上的注释
+        tail = f" {comment}{line[len(body):]}" if comment \
+            else line[len(body):]
+        out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}{q}{url}{q}{tail}")
     missing = [k for k in keys if k not in seen]
     if url is not None and missing:
         add = "".join(f"{k} = {url}{eol}" for k in missing)
@@ -1537,11 +1740,17 @@ def _eol_of(text):
 
 
 def _decode_ini_bytes(data: bytes):
-    """Decode INI file bytes as (text, encoding). Tries UTF-8 (BOM optional)
-    then the ANSI codepage — a .npmrc / pip.conf hand-saved with GBK comments
-    must not make the WSL reads/writes raise UnicodeDecodeError (which is not
-    an OSError, so it slipped past every endpoint's error handling). The
-    returned encoding is reused on write so the file round-trips."""
+    """Decode INI file bytes as (text, encoding). Tries UTF-8 (BOM optional),
+    then UTF-16 (BOM-detected) then the ANSI codepage — a .npmrc / pip.conf
+    hand-saved with GBK comments must not make the WSL reads/writes raise
+    UnicodeDecodeError (which is not an OSError, so it slipped past every
+    endpoint's error handling). The returned encoding is reused on write so
+    the file round-trips ('utf-16' re-emits the BOM on encode)."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return data.decode("utf-16"), "utf-16"
+        except UnicodeDecodeError:
+            pass
     try:
         enc = "utf-8-sig" if data[:3] == b"\xef\xbb\xbf" else "utf-8"
         return data.decode("utf-8-sig"), enc
@@ -1807,13 +2016,25 @@ def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
     url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
+        done = []
         for d in (_wsl_targets()):
             try:
                 _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
                               url if enable else None, equals=url)
+                if enable:
+                    done.append(d)
             except OSError as e:
                 if enable:
                     errs.append(e)
+        if errs:
+            # 任一日标失败就对已成功写入的发行版卸掉刚写进去的代理：js_api
+            # 只在全部成功时记录 _wsl_written，漏回滚会让退出清理漏掉它们。
+            for d in done:
+                try:
+                    _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
+                                  None, equals=url)
+                except OSError:
+                    log_exception_once("npmwsl_rollback", "set_npm_proxy_wsl rollback")
         if enable and errs:
             return LJoin(errs)
         return True
@@ -1832,6 +2053,7 @@ def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
     url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
+        done = []
         for d in (_wsl_targets()):
             try:
                 _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
@@ -1841,9 +2063,20 @@ def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
                     # Legacy path: surgical clean only, never written.
                     _wsl_edit_ini(d, _PIP_CONF_LEGACY_WSL, ("proxy",),
                                   None, equals=url)
+                if enable:
+                    done.append(d)
             except OSError as e:
                 if enable:
                     errs.append(e)
+        if errs:
+            # 任一日标失败就对已成功写入的发行版卸掉刚写进去的代理（只回滚
+            # 启用真正写过的 XDG 路径，legacy 路径启用时从未写过）。
+            for d in done:
+                try:
+                    _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
+                                  None, equals=url, section="global")
+                except OSError:
+                    log_exception_once("pipwsl_rollback", "set_pip_proxy_wsl rollback")
         if enable and errs:
             return LJoin(errs)
         return True

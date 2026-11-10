@@ -22,8 +22,9 @@ from config_store import (  # noqa: F401  (APP_VERSION re-exported for tests)
 )
 from js_api import Api
 from tray_icon import (
-    _make_tray, _promote_tray_icon, _promote_tray_icon_async,
+    _make_tray, _promote_tray_icon_async,
     _refresh_tray_icon, _restore_window_geometry, _show_main_window,
+    _sync_tray_lang,
 )
 from window_win32 import (
     WM_NCHITTEST, _ENUMCHILD, _MIN_H, _MIN_W, _RECT, _SW_RESTORE, _our_hwnds,
@@ -33,6 +34,14 @@ import window_win32 as win32
 
 FRAMELESS = True
 _START_HIDDEN = any(a in ("--tray", "--hidden") for a in sys.argv[1:])
+# Resize watchdog cadence: the cheap liveness probe (two GetWindowLongPtrW
+# reads, no EnumWindows, no blocking form.Invoke) runs every 2s; the expensive
+# re-install runs only when the hook is really gone — and never more often
+# than _WATCHDOG_FULL_INTERVAL, so a window that cannot be hooked cannot spin
+# the UI thread. _WATCHDOG_PERIODIC re-asserts the non-client drag setting.
+_WATCHDOG_FULL_INTERVAL = 2.0
+_WATCHDOG_PERIODIC = 30            # ≈ every 60s at the 2s probe interval
+_LANG_SYNC_INTERVAL = 5.0          # tray language refresh (one config read)
 
 # WebView2 Runtime detection: read the version from the well-known registry
 # locations (same keys Microsoft's detection doc specifies). Win11 ships the
@@ -106,11 +115,16 @@ def _wake_or_exit():
             pass
         hwnd = user32.FindWindowW(None, pm.APP_TITLE)
         if hwnd:
+            # SW_RESTORE alone does not clear the "hidden to tray" state
+            # (window.hide() drops WS_VISIBLE), so a second launch looked like
+            # nothing happened. Show first, then un-minimize if iconic.
+            user32.ShowWindow(hwnd, 5)  # SW_SHOW
             user32.ShowWindow(hwnd, _SW_RESTORE)
             user32.AllowSetForegroundWindow(0xFFFFFFFF)
             user32.SetForegroundWindow(hwnd)
         else:
             for h in _our_hwnds(other_pid=True):
+                user32.ShowWindow(h, 5)  # SW_SHOW
                 user32.ShowWindow(h, _SW_RESTORE)
                 user32.SetForegroundWindow(h)
         if mutex:
@@ -149,7 +163,17 @@ def main():
     api = Api()
     bg = "#1B1B21" if cfg.get("mode") == "dark" else "#F7F6FB"
 
-    _promote_tray_icon(retries=1)
+    # Shutdown / logoff: the WndProc answers WM_QUERYENDSESSION immediately
+    # and runs this off the UI thread (a direct call, or an Invoke back into
+    # the pump we are inside, would deadlock the session end). The
+    # _quit_cleared guard keeps it a no-op when the tray quit already ran.
+    def _session_end_clear():
+        if getattr(api, "_quit_cleared", False):
+            return
+        api.clear_all_endpoints()
+        api._quit_cleared = True
+
+    win32._quit_clear_cb = _session_end_clear
 
     dpi = user32.GetDpiForSystem() or 96
     wa = _RECT()
@@ -217,7 +241,11 @@ def main():
         # window_control("close") 同口径处理 quit_clear，否则代理会残留。
         try:
             api._save_geometry()
-            if load_config().get("quit_clear"):
+            if load_config().get("quit_clear") and \
+                    not getattr(api, "_quit_cleared", False):
+                # 契约 B1：托盘 quit_app（和 window_control("close")）已经
+                # 清过一遍 —— destroy() 会再次触发 closing，再跑一次
+                # clear_all_endpoints 会让退出时长翻倍（WSL 端点串行清理）。
                 api.clear_all_endpoints()
         except Exception:
             pm.log_exception("closing_quit_clear")
@@ -229,10 +257,24 @@ def main():
         pm.log_exception("bind_closing")
 
     def _resize_watchdog():
+        passes = 0
+        last_full = 0.0
         while True:
             try:
-                ensure_resize_hook(window)
-                ensure_nonclient_drag(window)
+                now = time.monotonic()
+                passes += 1
+                # Cheap liveness probe first (two GetWindowLongPtrW reads: no
+                # system-wide EnumWindows, no blocking form.Invoke). The
+                # expensive re-install runs only when the hook is really gone,
+                # or once a minute to re-assert the non-client drag setting —
+                # and at most every _WATCHDOG_FULL_INTERVAL either way, so a
+                # window that can never be hooked cannot spin the UI thread.
+                if (passes % _WATCHDOG_PERIODIC == 0
+                        or not win32.resize_hook_healthy()) and \
+                        now - last_full >= _WATCHDOG_FULL_INTERVAL:
+                    ensure_resize_hook(window)
+                    ensure_nonclient_drag(window)
+                    last_full = now
             except Exception:
                 pm.log_exception_once("resize_watchdog", "resize_watchdog")
             time.sleep(2.0)
@@ -240,24 +282,45 @@ def main():
     threading.Thread(target=_resize_watchdog, daemon=True).start()
 
     def _watch_wake():
+        fails = 0
+        claimed = False   # signal file consumed, show not confirmed yet
+        last_lang_check = 0.0
         while True:
-            # Atomically attempt removal instead of exists()+remove() to
-            # avoid TOCTOU race with the second-instance writer.
+            delay = 1.5
             try:
+                # Atomic single-shot claim (exists()+remove() raced with the
+                # second-instance writer). A file we could not remove stays
+                # for the next pass.
                 os.remove(pm.SIGNAL_FILE)
-            except FileNotFoundError:
-                time.sleep(1.5)
-                continue
+                claimed = True
             except OSError:
-                time.sleep(1.5)
-                continue
+                pass  # FileNotFoundError: no request; other OSError: retry
+            if claimed:
+                try:
+                    _wake_requested.set()
+                    _refresh_tray_icon(api)
+                    if not _show_main_window(api):
+                        raise RuntimeError("no window to show")
+                    claimed = False
+                    fails = 0
+                except Exception:
+                    # Showing failed: KEEP the request pending and retry
+                    # instead of dropping it — the file used to be removed up
+                    # front, so a window that was not ready yet lost the wake
+                    # for good. Back off so a permanently broken window (or a
+                    # process on its way out) cannot spin the loop.
+                    pm.log_exception("wake_show")
+                    fails += 1
+                    delay = min(1.5 * fails, 15.0)
+            # Keep the tray menu/tooltip in the language the UI is currently
+            # in (throttled: each check is a config read).
             try:
-                _wake_requested.set()
-                _refresh_tray_icon(api)
-                _show_main_window(api)
+                if time.monotonic() - last_lang_check >= _LANG_SYNC_INTERVAL:
+                    last_lang_check = time.monotonic()
+                    _sync_tray_lang(api)
             except Exception:
-                pm.log_exception("wake_show")
-            time.sleep(1.5)
+                pm.log_exception_once("sync_tray_lang", "sync_tray_lang")
+            time.sleep(delay)
 
     threading.Thread(target=_watch_wake, daemon=True).start()
 

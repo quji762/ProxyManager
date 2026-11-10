@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Regression: atomic file writes, registry rollback, native-close quit_clear."""
 
+import json
+import threading
 from unittest.mock import MagicMock, patch
 
 import config_store
@@ -123,13 +125,55 @@ class TestSysProxyWriteOrder:
 
 
 class TestConfigTmpUnique:
-    def test_tmp_path_includes_pid(self):
-        # Pure string check: save_config builds tmp as CONFIG_FILE.<pid>.tmp
-        # Read the source to confirm the pattern is present
-        import inspect
-        src = inspect.getsource(config_store.save_config)
-        assert 'os.getpid()' in src
-        assert '.tmp' in src
+    def test_repeated_saves_leave_no_tmp_residue(self, tmp_path, monkeypatch):
+        """Behavior check for the per-pid tmp name: saves (including a failed
+        one in the middle) must never leave a .tmp behind, and the last write
+        must win. A shared tmp name let one save read/rename the other's
+        half-written file."""
+        cfg_file = tmp_path / "config.json"
+        monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+        monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
+        cfg = config_store.load_config()
+        cfg["port"] = "7890"
+        assert config_store.save_config(cfg) is True
+
+        with patch.object(config_store.os, "replace",
+                          side_effect=OSError("simulated replace failure")):
+            assert config_store.save_config(dict(cfg, port="7892")) is False
+        assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
+
+        cfg["port"] = "7897"
+        assert config_store.save_config(cfg) is True
+        assert config_store.load_config()["port"] == "7897"
+        assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
+
+    def test_concurrent_saves_do_not_collide(self, tmp_path, monkeypatch):
+        """Racing saves must each use their own tmp file and serialize on the
+        config lock; the result is one valid file, never a mix of two."""
+        cfg_file = tmp_path / "config.json"
+        monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+        monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
+        cfg = config_store.load_config()
+        ports = ["7890", "7892", "7897"]
+        barrier = threading.Barrier(len(ports))
+        errors = []
+
+        def saver(port):
+            try:
+                barrier.wait(10)
+                config_store.save_config(dict(cfg, port=port))
+            except Exception as e:  # pragma: no cover - surfaced by the assert
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=saver, args=(p,)) for p in ports]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+        assert errors == []
+        raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert raw["port"] in ports
+        assert not any(p.name.endswith(".tmp") for p in tmp_path.iterdir())
 
 
 class TestNativeCloseQuitClear:

@@ -124,7 +124,9 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
         import js_api
         import proxy_manager as pm
 
-        tmp = tempfile.mkdtemp(prefix="pm_test_")
+        tmp_obj = tempfile.TemporaryDirectory(prefix="pm_test_")
+        self.addCleanup(tmp_obj.cleanup)
+        tmp = tmp_obj.name
         cfg_file = os.path.join(tmp, "c.json")
         # 真实 DPAPI：保证"磁盘上是密文"的断言有实际区分度。
         encrypt, decrypt = config_store._dpapi_encrypt, config_store._dpapi_decrypt
@@ -172,7 +174,9 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
         import js_api
         import proxy_manager as pm
 
-        tmp = tempfile.mkdtemp(prefix="pm_test_")
+        tmp_obj = tempfile.TemporaryDirectory(prefix="pm_test_")
+        self.addCleanup(tmp_obj.cleanup)
+        tmp = tmp_obj.name
         cfg_file = os.path.join(tmp, "c.json")
         encrypt, decrypt = config_store._dpapi_encrypt, config_store._dpapi_decrypt
 
@@ -220,7 +224,9 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
         import js_api
         import proxy_manager as pm
 
-        tmp = tempfile.mkdtemp(prefix="pm_test_")
+        tmp_obj = tempfile.TemporaryDirectory(prefix="pm_test_")
+        self.addCleanup(tmp_obj.cleanup)
+        tmp = tmp_obj.name
         cfg_file = os.path.join(tmp, "c.json")
         encrypt, decrypt = config_store._dpapi_encrypt, config_store._dpapi_decrypt
         started = threading.Event()
@@ -267,7 +273,9 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
         import js_api
         import proxy_manager as pm
 
-        tmp = tempfile.mkdtemp(prefix="pm_test_")
+        tmp_obj = tempfile.TemporaryDirectory(prefix="pm_test_")
+        self.addCleanup(tmp_obj.cleanup)
+        tmp = tmp_obj.name
         cfg_file = os.path.join(tmp, "c.json")
         encrypt, decrypt = config_store._dpapi_encrypt, config_store._dpapi_decrypt
 

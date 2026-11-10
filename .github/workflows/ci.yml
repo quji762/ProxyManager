@@ -40,11 +40,13 @@ jobs:
       # at metadata time, executing the module-level WinDLL loads — and could
       # resolve a stale installed dist-info. tests/ import from the source
       # tree (conftest.py puts the root on sys.path), so a plain requirements
-      # install is all that's needed. pytest/ruff pins mirror the [dev] extra.
+      # install is all that's needed. pytest/ruff are pinned to exact versions
+      # (stricter than the [dev] extra's ranges) so a new pytest or ruff
+      # release cannot turn a green build red without a commit bumping it.
       - name: Install dependencies
         run: |
           python -m pip install -r requirements.txt
-          python -m pip install "pytest>=8.0" "ruff>=0.6.0"
+          python -m pip install "pytest==9.2.0" "ruff==0.17.4"
       - name: Lint (ruff)
         run: ruff check .
       - name: Smoke tests

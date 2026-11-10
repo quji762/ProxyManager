@@ -5,8 +5,13 @@ build/
 __pycache__/
 *.pyc
 
-# Config (contains user preferences, not secrets)
+# Config (user preferences plus a DPAPI-encrypted restore stash — treat as
+# sensitive, like the .bak; never commit)
 config.json
+config.json.bak
+config.json.corrupt
+config.json.*.tmp
+config.json.lock
 
 # Crash / trace logs written by the app at runtime
 *.log

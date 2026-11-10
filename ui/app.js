@@ -131,7 +131,10 @@ function msgText(m) {
   if (typeof m === "string") return m;
   const parts = m.note_parts || m.error_parts;
   if (Array.isArray(parts) && parts.length) {
-    return parts.map((p) => p && p.key ? t(p.key, p.params || {}) : (p && p.text) || "").join("；");
+    const s = parts.map((p) => p && p.key ? t(p.key, p.params || {}) : (p && p.text) || "").join("；");
+    // 双保险：parts 全部无 text 时（如历史 label-only 部件）回退 m.error，
+    // 避免用户只看到空串或孤立标签、真正原因被丢（契约C1）。
+    if (s) return s;
   }
   const key = m.note_key && !m.error ? m.note_key : m.error_key;
   if (key) return t(key, m.error_params || {});
@@ -573,8 +576,10 @@ async function applyAddress(next, prev) {
         lastApplied = Object.assign({}, next);
       }
     } else {
-      lastApplied = Object.assign({}, next);
       const n = (r && r.applied || []).length;
+      // applied 为空＝没有任何端点被写入（契约A2）：不把表单地址提升为
+      // lastApplied，否则 appliedAddr() 会把用户手工代理误判为已应用。
+      if (n) lastApplied = Object.assign({}, next);
       toast(n ? t("switched", { addr: shown, n }) : t("addrSet", { addr: shown }), "ok");
     }
   } catch (e) {
@@ -635,7 +640,14 @@ async function refreshAll() {
       } else if (needAgain) refreshAll();
     }
   };
-  const track = (p) => { pending++; p.finally(settle); };
+  const track = (p) => {
+    pending++;
+    // p 正常恒为 Promise（api.call 与 .then/.catch 链）。此处兜底：万一不是
+    // thenable 或 .finally 同步抛错，也要 settle，否则 refreshing 永久锁死、
+    // 之后所有 refreshAll 都被 refreshQueued 短路（契约low6）。
+    try { Promise.resolve(p).finally(settle); }
+    catch (_) { settle(); }
+  };
   const set = (id, v) => {
     const el = $(id); if (!el) return;
     el.textContent = displayStatus(v);
@@ -827,6 +839,14 @@ function fmtMB(num) {
    while null so a pre-boot debounce never overwrites the config. */
 let speedFullMbps = null;
 const MbpsToBps = (m) => m * 1000 * 1000 / 8;
+let speedLoopStarted = false;
+function startSpeedLoop() {
+  // tickSpeed self-reschedules via setTimeout, so re-booting (pywebviewready
+  // superseding a mock boot) must not start a second loop (契约B3).
+  if (speedLoopStarted) return;
+  speedLoopStarted = true;
+  tickSpeed();
+}
 async function tickSpeed() {
   try {
     const s = await api.call("get_speed");
@@ -1203,9 +1223,11 @@ function esc_(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<"
 
 /* ═══════════════ Boot ═══════════════ */
 let booted = false;
+let bootedMock = false;  // true when the current boot ran against the browser mock
 async function boot() {
   if (booted) return; // pywebviewready and the browser fallback can both fire
   booted = true;
+  bootedMock = !HAS_BRIDGE();
   const c = await api.call("get_config");
   const vEl = document.getElementById("appVersion");
   if (vEl && c.version) vEl.textContent = "v" + c.version;
@@ -1264,7 +1286,7 @@ async function boot() {
   // forcing the user onto the WSL tab). A cold WSL start still costs time,
   // but the dash (`–/4`) is only a brief placeholder.
   probeWslCounts();
-  tickSpeed();
+  startSpeedLoop();
   checkUpdateOnce();
 }
 
@@ -1317,6 +1339,14 @@ function probeWslCounts() {
 }
 
 if (HAS_BRIDGE()) boot();
-else window.addEventListener("pywebviewready", boot);
+else window.addEventListener("pywebviewready", () => {
+  // pywebview injects the bridge and fires this after page load. If the 350ms
+  // mock fallback booted first, the real bridge must take over: reset the gate
+  // and re-boot against the real api, or the UI stays on fake mock data with
+  // every action silently no-opping and zero system writes (契约B3). Only a
+  // prior MOCK boot is superseded — a real boot is never re-run.
+  if (bootedMock) { booted = false; bootedMock = false; }
+  boot();
+});
 /* Browser fallback: if no bridge ever arrives, boot with mock after a beat. */
 setTimeout(() => { if (!HAS_BRIDGE() && !booted) boot(); }, 350);

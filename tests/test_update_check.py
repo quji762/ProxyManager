@@ -31,10 +31,13 @@ def _api():
 
 def test_update_available_when_latest_is_newer():
     api = _api()
+    # check_update does `import urllib.request as _urlreq` inside the function
+    # body, so urllib.request.urlopen IS the real entry point — the mock is
+    # asserted on below so this cannot rot back into a dead patch.
     with patch.object(Api, "_GITHUB_LATEST", "http://x"), \
-         patch("js_api.urllib_request_urlopen", create=True), \
-         patch("urllib.request.urlopen", return_value=_payload("v1.5.0")):
+         patch("urllib.request.urlopen", return_value=_payload("v1.5.0")) as m:
         r = api.check_update()
+    assert m.call_count == 1
     assert r["status"] == "update"
     assert r["latest"] == "1.5.0"
 

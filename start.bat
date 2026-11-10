@@ -68,6 +68,9 @@ exit /b 1
 rem Probe the runtime deps once with a console interpreter (pyw hides stderr).
 rem PY_CHECK holds a `py [-V]` form when the launcher is on PATH; without it the
 rem dependency probe is skipped (the Store alias has no console sibling).
+rem pystray/PIL are probed too: without them the tray silently never appears,
+rem _tray_ok stays False and closing the window quits the app -- exactly the
+rem "double-clicked and nothing happened" experience this probe exists for.
 set "PY_CHECK="
 if defined PY_VER (
   where py >nul 2>nul && set "PY_CHECK=py%PY_VER%"
@@ -76,17 +79,36 @@ if not defined PY_CHECK (
   where py >nul 2>nul && set "PY_CHECK=py"
 )
 if defined PY_CHECK (
-  %PY_CHECK% -c "import webview, psutil" >nul 2>nul
-  if errorlevel 1 (
+  rem Delayed expansion is scoped to this block only: MISSING is accumulated
+  rem inside a for loop, and no user path (%LOCALAPPDATA% may contain "!") is
+  rem expanded while it is on. Leaving the block via goto (not `exit /b` from
+  rem inside it) keeps the failure exit code: cmd drops an exit code issued
+  rem from inside a block that opened its own setlocal.
+  setlocal EnableDelayedExpansion
+  set "MISSING="
+  for %%M in (webview psutil pystray PIL) do (
+    %PY_CHECK% -c "import %%M" >nul 2>nul
+    if errorlevel 1 set "MISSING=!MISSING! %%M"
+  )
+  if defined MISSING (
     echo.
-    echo Runtime dependencies are missing. Run:
+    echo Missing runtime dependencies:!MISSING!
+    echo Run:
     echo   %PY_CHECK:~0,2% %PY_CHECK:~2% -m pip install -r requirements.txt
     echo then start ProxyManager again.
     echo.
-    pause
-    exit /b 1
+    endlocal
+    goto :deps_missing
   )
+  endlocal
 )
+
+start "" %PY_CMD%%PY_VER% "app.py"
+exit /b 0
+
+:deps_missing
+pause
+exit /b 1
 
 start "" %PY_CMD%%PY_VER% "app.py"
 exit /b 0

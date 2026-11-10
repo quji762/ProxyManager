@@ -135,6 +135,25 @@ def _promote_tray_icon_async(icon=None):
 
 
 _geometry_restored = False   # bounds are reapplied only on the first loaded
+_tray_failed = False         # _make_tray never registered an icon: never trust it
+_tray_lang = None            # UI language the tray strings were last built for
+
+
+def _lang():
+    """Current UI language, defensively (a corrupt config must not break the
+    tray menu build)."""
+    try:
+        return load_config().get("lang", "zh")
+    except Exception:
+        return "zh"
+
+
+def _tray_labels(lang):
+    """Tray strings per UI language (zh default, en opt-in)."""
+    if lang == "en":
+        return {"show": "Show window", "quit": "Quit",
+                "tip": "Proxy Manager"}
+    return {"show": "显示主窗口", "quit": "退出", "tip": pm.APP_TITLE}
 
 
 def _saved_rect_ok(r):
@@ -181,20 +200,25 @@ def _show_main_window(api):
     """Show, restore from minimized, and raise to the foreground. show() alone
     unhides the window BEHIND whatever is active, which reads as 'the tray
     icon does nothing'. SetForegroundWindow is permitted here because the
-    tray click was delivered to this process."""
+    tray click was delivered to this process.
+
+    Returns False when there is no window or no hwnd to show, so a caller can
+    keep a wake request pending and retry instead of dropping it."""
     w = api._window
     if w is None:
-        return
+        return False
     w.show()
     hwnd = api._hwnd()
     if not hwnd:
-        return
+        return False
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
     user32.SetForegroundWindow(hwnd)
+    return True
 
 
 def _make_tray(api, window):
+    global _tray_lang, _tray_failed
     import pystray
     from PIL import Image
 
@@ -233,6 +257,11 @@ def _make_tray(api, window):
                 except Exception:
                     pm.log_exception("tray_notify")
                 api.clear_all_endpoints()
+                # 契约 B1：标记本进程已执行过退出清理。托盘 quit_app 结尾的
+                # window.destroy() 仍会触发 closing，app.py 的 _on_closing
+                # 无托盘分支据此跳过第二次 clear_all_endpoints —— WSL 端点
+                # 串行清理各要数秒，跑两遍退出时长直接翻倍。
+                api._quit_cleared = True
         except Exception:
             pm.log_exception("tray_quit_clear")
         try:
@@ -245,23 +274,32 @@ def _make_tray(api, window):
             api._quitting = False
             window.destroy()
 
-    lang = load_config().get("lang", "zh")
-    show_lbl = "Show window" if lang == "en" else "显示主窗口"
-    quit_lbl = "Quit" if lang == "en" else "退出"
-    tray_tip = "Proxy Manager" if lang == "en" else pm.APP_TITLE
+    lang = _lang()
+    labels = _tray_labels(lang)
+    # pystray wraps MenuItem text in a callable and re-reads it every time the
+    # menu is (re)built, so passing a function keeps the labels following the
+    # UI language. A plain string froze them at startup until the next launch.
+    def show_lbl(_item=None):
+        return _tray_labels(_lang())["show"]
+
+    def quit_lbl(_item=None):
+        return _tray_labels(_lang())["quit"]
+
     menu = pystray.Menu(
         pystray.MenuItem(show_lbl, show, default=True),
         pystray.MenuItem(quit_lbl, quit_app),
     )
     icon = pystray.Icon("proxy_manager", Image.open(
         TRAY_ICON).convert("RGBA"),
-        tray_tip, menu)
+        labels["tip"], menu)
     ready = threading.Event()
 
     def setup(active_icon):
         active_icon.visible = True
         ready.set()
 
+    _tray_lang = lang
+    _tray_failed = False
     api._icon = icon  # exposed for wake recovery and PM_DEBUG diagnostics
     threading.Thread(target=icon.run, kwargs={"setup": setup},
                      daemon=True).start()
@@ -270,8 +308,24 @@ def _make_tray(api, window):
             icon.stop()
         except Exception:
             pm.log_exception("tray_icon_stop")
+        # api._icon is already set (wake recovery reads it), so a later
+        # _refresh_tray_icon must not conclude the tray works: pystray never
+        # got past registration here.
+        _tray_failed = True
         raise RuntimeError("tray icon did not register within 5 seconds")
     return icon
+
+
+def _tray_is_live(icon):
+    """Whether pystray's message loop is really running.
+
+    Icon._running is set by _mark_ready() (after the loop window exists) and
+    cleared by stop(); it is the only state that says the icon was actually
+    registered. The icon OBJECT existing proves nothing — api._icon is
+    assigned before the loop thread starts."""
+    if _tray_failed:
+        return False
+    return bool(getattr(icon, "_running", False))
 
 
 def _refresh_tray_icon(api):
@@ -284,6 +338,12 @@ def _refresh_tray_icon(api):
     icon = getattr(api, "_icon", None)
     if icon is None:
         return False
+    if not _tray_is_live(icon):
+        # Claiming a healthy tray for an icon that never registered made the
+        # X button take the "hide to tray" branch with no tray and no window
+        # — an invisible process the user could not reach or close.
+        api._tray_ok = False
+        return False
     try:
         icon.visible = False
         time.sleep(0.05)
@@ -295,4 +355,30 @@ def _refresh_tray_icon(api):
         api._tray_ok = False
         pm.log_crash(*sys.exc_info())
         return False
+
+
+def _sync_tray_lang(api):
+    """Refresh the tray tooltip and menu after a UI language change.
+
+    pystray rebuilds the menu only from update_menu(), so the callable item
+    labels alone would stay in the old language until the user happened to
+    click something. Returns True when the tray is usable (refreshed or
+    already current)."""
+    icon = getattr(api, "_icon", None)
+    if icon is None or _tray_failed or not _tray_is_live(icon):
+        return False
+    lang = _lang()
+    global _tray_lang
+    if lang == _tray_lang:
+        return True
+    _tray_lang = lang
+    try:
+        # The title setter is a no-op while the icon is hidden (the new tip is
+        # then used by the next _show()).
+        icon.title = _tray_labels(lang)["tip"]
+        icon.update_menu()  # re-reads the label callables
+    except Exception:
+        pm.log_exception("sync_tray_lang")
+        return False
+    return True
 
