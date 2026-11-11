@@ -200,14 +200,23 @@ class Api:
         # address must not make switch_port treat the old endpoints as
         # foreign ones (it compares against applied_*). Persisted separately
         # so a restart cannot re-poison this cache from the form fields.
-        applied = cfg.get("applied") or {}
-        self.applied_host = applied.get("host") or cfg["host"]
-        self.applied_port = applied.get("port") or cfg["port"]
-        self.applied_kw = {
-            "scheme": applied.get("scheme") or self.scheme,
-            "user": applied.get("user") or "",
-            "password": applied.get("password") or "",
-        }
+        # No record (legacy config, or a non-dict value) means this tool has
+        # never written an endpoint: applied_* stay EMPTY instead of falling
+        # back to the form address, which would claim the user's own proxy
+        # as ours (contract A2 / AGENTS.md core invariant).
+        applied = cfg.get("applied")
+        if isinstance(applied, dict) and applied:
+            self.applied_host = applied.get("host") or cfg["host"]
+            self.applied_port = applied.get("port") or cfg["port"]
+            self.applied_kw = {
+                "scheme": applied.get("scheme") or self.scheme,
+                "user": applied.get("user") or "",
+                "password": applied.get("password") or "",
+            }
+        else:
+            self.applied_host = ""
+            self.applied_port = ""
+            self.applied_kw = {"scheme": "http", "user": "", "password": ""}
         self._speed_lock = threading.Lock()
         # Serializes endpoint mutations (toggles, port switch, tray-quit
         # clear on the pystray thread): _restore / applied_* / _git_managed /
@@ -248,6 +257,10 @@ class Api:
         self._tray_ok = False  # close falls back to quit when no tray exists
         self._restore = _stash_decrypt(cfg.get("restore") or {})
         pm.set_wsl_apply_all(cfg.get("wsl_all_distros", True))
+        # 「上一次 scope」的真值：persistSoon 每次 debounce 都带
+        # wsl_all_distros（ui/app.js 的保存载荷），所以这里不依赖 data 里有
+        # 没有这个键——真正的判据是它相对上一次保存是否发生了变化。
+        self._wsl_apply_all = bool(cfg.get("wsl_all_distros", True))
         threading.Thread(target=self._speed_loop, daemon=True).start()
 
     # ── config ──
@@ -293,6 +306,20 @@ class Api:
         # before cfg_lock used to let a concurrent toggle persist a stash
         # that this write then overwrote with the stale snapshot.
         with self._endpoint_mutation_lock:
+            # Scope 过渡检测（all user distros → default distro only）：刚刚
+            # 离开 scope 的发行版里，本工具写过的代理块/git/npm/pip 不会被
+            # 之后的读写路径看到，必须在这里立刻清掉。放在 cfg 锁之前：清理
+            # 只动 WSL 端点和内存记录，不碰 config.json。
+            wsl_cleanup = None
+            if "wsl_all_distros" in data:
+                new_all = bool(data["wsl_all_distros"])
+                # 默认发行版未知（WSL 不可用）时 wsl_out_of_scope_distros()
+                # 返回 []：什么都不清，也绝不猜一个默认发行版。
+                if self._wsl_apply_all and not new_all:
+                    leaving = pm.wsl_out_of_scope_distros()
+                    wsl_cleanup = self._clear_wsl_out_of_scope(leaving) \
+                        if leaving else None
+                self._wsl_apply_all = new_all
             restore_snapshot = dict(self._restore)
             with _cfg_lock:
                 cfg = load_config()
@@ -406,7 +433,13 @@ class Api:
                 # 加密的是函数入口处的快照（见 save_config 开头注释）。
                 try:
                     cfg["restore"] = _stash_encrypt(restore_snapshot)
-                    cfg["applied"] = self._applied_dict()
+                    # Only a real applied record is persisted: a plain save
+                    # must not promote the (possibly typed-but-never-applied)
+                    # form address into "applied", or _ours_proxy_urls would
+                    # claim the user's own same-address proxy as ours.
+                    ap = self._applied_dict()
+                    if ap is not None:
+                        cfg["applied"] = ap
                     cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
                 except DpapiError:
                     return {
@@ -416,6 +449,11 @@ class Api:
                 err = _persist_cfg(cfg)
                 if err:
                     return err
+        # 收窄 scope 且真的清过东西时，把清理结果报给前端（left 非空＝还有
+        # 发行版带着托管块，UI 需要提示重试或手动清理）。没有清理时返回值
+        # 逐字仍是 True：既有调用方/测试都断言 save_config(...) is True。
+        if wsl_cleanup is not None:
+            return {"ok": True, "wsl_cleanup": wsl_cleanup}
         return True
 
     # ── status refresh: one call per slice, fired in parallel by the UI ──
@@ -551,7 +589,13 @@ class Api:
         return {"ok": True}
 
     def _applied_dict(self):
-        """Form of applied_* written to config.json (password encrypted later)."""
+        """Form of applied_* written to config.json (password encrypted later).
+
+        None when no address has ever been applied (applied_host empty):
+        persisting a form address here would fabricate an "applied" record
+        for endpoints this tool never wrote."""
+        if not self.applied_host:
+            return None
         return {
             "host": self.applied_host,
             "port": str(self.applied_port),
@@ -567,9 +611,13 @@ class Api:
         form is what get_sys_proxy reads back, so it counts as ours too
         (same contract as _switch_port's wininet_url comparison). Otherwise a
         credentials-configured user quitting with quit_clear would leave the
-        system proxy stuck ON, pointing at a dead port."""
+        system proxy stuck ON, pointing at a dead port.
+        With no applied record at all there is nothing to claim: an empty set
+        makes every detected value count as user state."""
         h = self.applied_host
         p = str(self.applied_port)
+        if not h or not p:
+            return set()
         kw = dict(self.applied_kw)
         urls = {pm.build_proxy_url(h, p, **kw)}
         if target == "sys":
@@ -587,15 +635,28 @@ class Api:
             try:
                 # 暂存值 DPAPI 加密后落盘（含用户原代理凭据，不应明文持久化）
                 cfg["restore"] = _stash_encrypt(self._restore)
-                cfg["applied"] = self._applied_dict()
+                # 无 applied 记录时不写键：_persist_restore 由 disable/回滚
+                # 路径调用，那时也不该把表单地址升格成"已应用"。
+                ap = self._applied_dict()
+                if ap is not None:
+                    cfg["applied"] = ap
                 # WSL 侧"最后写入 URL"记录可能带 applied 凭据，同机制加密落盘
                 cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
             except DpapiError as exc:
                 pm.log_exception("persist_restore: " + str(exc))
-                return
+                # 暂存加密失败绝不能静默 return：调用方（_stash_previous）
+                # 在"先保存再覆盖"的前一步，看不到错误就会照样覆盖端点，
+                # 而进程一退出这份覆盖前的用户原值就永久丢失。与 save_config
+                # 的 DpapiError 分支同口径返回 errDpapi（前端可直接渲染）。
+                return {
+                    "error": "DPAPI 加密失败，暂存未保存（不会以明文落盘）",
+                    "error_key": "errDpapi",
+                }
             err = _persist_cfg(cfg)
             if err:
                 pm.log_exception("persist_restore: " + err["error"])
+                return {"error": err["error"],
+                        "error_key": err.get("error_key", "saveFail")}
 
     def _detected_url(self, target):
         if target == "ps":
@@ -626,26 +687,53 @@ class Api:
         if target == "ps":
             # PowerShell enable overwrites HTTP/HTTPS/ALL_PROXY and merges
             # NO_PROXY — a single URL cannot round-trip a state where those
-            # differed, so stash every original value (None = was unset).
+            # differed, so stash every original value per name (None = was
+            # unset). The snapshot is taken per name, for all eight
+            # PS_ENV_NAMES spellings the enable writes: a stash that only
+            # knew the three canonical keys left the lowercase names out,
+            # and the restore then deleted those names and let the uppercase
+            # ones be overwritten by the lowercase value (proxy_manager's
+            # set_ps_env_vars deletes every managed name the caller does not
+            # mention).
             # Values equal to the URL this tool last applied are leftovers
             # from a previous enable (enable → edit port → enable again),
             # not user state: record None so the restore deletes them instead
             # of re-arming a proxy the user is turning off.
-            ours = pm.build_proxy_url(self.applied_host, self.applied_port,
-                                      **self.applied_kw)
-            vars_ = pm.get_ps_proxy_vars()
-            env = {n: (None if v in (pm.UNSET, "") or str(v) == ours else str(v))
-                   for n, v in vars_.items()}
-            no_proxy = pm.get_ps_no_proxy()
-            if any(str(v) == ours for v in vars_.values()):
-                # Our last enable also merged our entries into NO_PROXY —
-                # stash only the user's own entries (none left → was unset).
-                no_proxy = pm._stripped_no_proxy(no_proxy)
-            env["NO_PROXY"] = no_proxy or None
+            ours = (pm.build_proxy_url(self.applied_host, self.applied_port,
+                                       **self.applied_kw)
+                    if self.applied_host else None)
+            snap = pm.get_ps_env_snapshot()
+            # Did OUR last enable merge our entries into NO_PROXY? Only then
+            # is the current value partly ours — and then only for the
+            # spelling(s) that enable actually wrote.
+            wrote_url = ours is not None and any(
+                str(snap.get(n)) == ours for n in pm.PS_ENV_URL_NAMES)
+            env = {}
+            for n in pm.PS_ENV_URL_NAMES:
+                v = snap.get(n)
+                env[n] = None if (not v or str(v) == ours) else str(v)
+            for n in pm.PS_ENV_NO_PROXY_NAMES:
+                v = snap.get(n)
+                if not v:
+                    # Never set under this spelling: record None so the
+                    # restore deletes the name rather than inventing one the
+                    # user never had (the old code always wrote NO_PROXY).
+                    env[n] = None
+                elif wrote_url:
+                    # Our last enable merged our entries into this name too —
+                    # stash only the user's own entries (none left → unset).
+                    env[n] = pm._stripped_no_proxy(str(v)) or None
+                else:
+                    env[n] = str(v)
             if not any(env.values()):
                 return  # user had nothing here; the surgical disable suffices
             self._restore[target] = {"env": env}
-            self._persist_restore()
+            # 暂存落不下来必须中止：否则 enable 会覆盖端点，而覆盖前的用户
+            # 原值随进程退出永久丢失（内存里的 self._restore 保留不删，之后
+            # 别的端点成功 enable 触发的 _persist_restore 仍会把它冲落盘）。
+            perr = self._persist_restore()
+            if perr is not None:
+                return perr
             return
         if target == "sys":
             # System enable merges our bypass entries into ProxyOverride —
@@ -666,10 +754,29 @@ class Api:
                     e.strip() for e in override.split(";")
                     if e.strip() and e.strip() not in pm._PROXY_OVERRIDE_OURS)
             url = cur if (cur and cur != new_url) else None
-            if not override and not url:
+            # ProxyEnable=0 with a ProxyServer left behind: Windows keeps the
+            # last server string when the user turns the proxy off in the UI,
+            # and the disable path deletes it — stash it so the restore can
+            # put the exact value back without re-arming the proxy. A server
+            # equal to what this tool last wrote is our own leftover (the
+            # user turned OUR proxy off by hand): writing it back on disable
+            # would flip the proxy on again, so it is never stashed. With no
+            # applied record (first enable) ownership cannot be decided, so
+            # the value is treated as user state per the usual contract.
+            server = None
+            if not cur:
+                residual = pm.get_sys_proxy_server_raw()
+                if residual and residual != pm.wininet_server(
+                        self.applied_host, self.applied_port,
+                        self.applied_kw["scheme"]):
+                    server = residual
+            if not override and not url and not server:
                 return
-            self._restore[target] = {"url": url, "override": override or None}
-            self._persist_restore()
+            self._restore[target] = {"url": url, "override": override or None,
+                                     "server": server}
+            perr = self._persist_restore()
+            if perr is not None:
+                return perr
             return
         cur = self._detected_url(target)
         if not cur or cur == new_url:
@@ -689,7 +796,9 @@ class Api:
                 and self._is_managed_wsl_url(cur, target):
             return
         self._restore[target] = cur
-        self._persist_restore()
+        perr = self._persist_restore()
+        if perr is not None:
+            return perr
 
     def _restore_stashed(self, target, prev):
         """Restore a dict-shaped stash (ps env vars / sys bypass list): write
@@ -728,6 +837,20 @@ class Api:
                         return r
                     return dict(_endpoint_err("sys", "关闭失败"),
                                 error_key="errRestoreFail")
+                # The user's pre-enable state may have been "off, but the
+                # server address still in the registry" (Windows leaves it
+                # after an off in the UI). Our enable overwrote that address
+                # with ours, and the surgical disable above then deleted OUR
+                # value (it only deletes ProxyServer when it matches the
+                # disable target, proxy_manager.py:1099), so by here nothing
+                # of the user's is left: write it back verbatim. ProxyEnable
+                # is left alone — restoring the address must not re-arm a
+                # proxy the user had turned off.
+                server = prev.get("server")
+                if server:
+                    ret = pm.set_sys_proxy_server(server)
+                    if ret is not True:
+                        return _endpoint_err("sys", ret)
             ret = pm.set_sys_proxy_override(prev.get("override") or "")
             if ret is not True:
                 return _endpoint_err("sys", ret)
@@ -789,6 +912,85 @@ class Api:
             return r
         return {"error": str(LStr("errRestoreFail")), "error_key": "errRestoreFail"}
 
+    def _clear_wsl_out_of_scope(self, distros):
+        """Remove this tool's WSL-side writes from distros that just left the
+        managed scope (all user distros → default distro only), or that a
+        narrowed scope hides from quit-clear. Returns
+        {"attempted": [...], "left": [...], "errors": [...], "failed": [...]}.
+        `failed` lists the git/npm/pip endpoints whose recorded URL is still
+        present (or unverifiable) in at least one attempted distro.
+
+        Only this tool's own writes are touched (AGENTS.md: disable removes
+        only our values, or restores a previously stashed one):
+        - the shell block is removed by MARKER only — the address plays no
+          part, and a missing rc file is a no-op;
+        - git/npm/pip are unset with the exact URL recorded in _wsl_written
+          (surgical `--fixed-value --unset-all` / ini value removal), and
+          only when a record exists: no record means we never wrote there,
+          so the file holds user state.
+
+        Runs inside save_config's / clear_all_endpoints' lock section, so it
+        must NOT persist anything: _persist_restore / load_config /
+        save_config here would write a half-merged config out of order with
+        the outer save (the caller owns the persist)."""
+        attempted = list(distros or [])
+        out = {"attempted": attempted, "left": [], "errors": [], "failed": []}
+        if not attempted:
+            return out
+        # Shell managed block (marker-only delete; address is irrelevant).
+        ret = pm.set_wsl_proxy(self.applied_host, self.applied_port, False,
+                               distros=attempted)
+        if ret is not True:
+            out["errors"].append(_endpoint_err("wsl", ret)["error"])
+        records = {}
+        for t in ("gitwsl", "npmwsl", "pipwsl"):
+            record = self._wsl_written.get(t)
+            if not record:
+                continue  # never written → user state, never touched
+            parsed = self._adopt_parsed(record)
+            if not parsed:
+                continue
+            records[t] = record
+            kw = {"scheme": parsed["scheme"], "user": parsed["user"],
+                  "password": parsed["password"]}
+            if t == "gitwsl":
+                ret = pm.set_git_proxy(parsed["host"], parsed["port"], False,
+                                       use_wsl=True, distros=attempted, **kw)
+            elif t == "npmwsl":
+                ret = pm.set_npm_proxy_wsl(parsed["host"], parsed["port"],
+                                           False, distros=attempted, **kw)
+            else:
+                ret = pm.set_pip_proxy_wsl(parsed["host"], parsed["port"],
+                                           False, distros=attempted, **kw)
+            if ret is not True:
+                out["errors"].append(_endpoint_err(t, ret)["error"])
+        # Read the blocks back: a disable that reported success can still
+        # have failed to write the rc files, and reporting that as done
+        # would leave a proxy block behind with nothing left to clean it.
+        out["left"] = pm.wsl_managed_block_distros(attempted)
+        # git/npm/pip disable is best-effort and returns True even when a
+        # distro write failed, so `errors` cannot see a per-distro failure.
+        # Read each recorded URL back per distro: residue (or an unreadable
+        # distro) means the cleanup is NOT done and the record must survive.
+        if records:
+            failed = set()
+            for d in attempted:
+                kinds = pm.wsl_recorded_url_residue(
+                    d, git_url=records.get("gitwsl"),
+                    npm_url=records.get("npmwsl"),
+                    pip_url=records.get("pipwsl"))
+                if kinds is None:
+                    failed.update(records)  # unreadable = unverified, keep all
+                elif kinds:
+                    failed.update(kinds)
+                else:
+                    continue
+                if d not in out["left"]:
+                    out["left"].append(d)
+            out["failed"] = [t for t in ("gitwsl", "npmwsl", "pipwsl")
+                             if t in failed]
+        return out
+
     def _quit_clear_owns(self, target):
         """退出清理的归属判定：True 才对该端点执行 disable。
 
@@ -821,6 +1023,28 @@ class Api:
         WHOLE sequence: a concurrent UI toggle must not interleave with the
         quit path and leave half-cleared state."""
         with self._endpoint_mutation_lock:
+            # 收窄过的 scope 下，仍在本工具写入范围内的发行版可能不止一个：
+            # 逐端点循环只走 _wsl_targets()（收窄后＝默认发行版），离开 scope
+            # 的发行版没人清。而且必须放在逐端点 do_toggle 之前——do_toggle(t,
+            # False) 成功后会把 _wsl_written[t] 置空（js_api.py 的 disable
+            # 分支），之后再扫就不知道该卸哪条 URL 了。
+            sweep = pm.wsl_sweep_targets()
+            kept = {}
+            if sweep is not None:
+                res = self._clear_wsl_out_of_scope(sweep)
+                if not res["errors"] and not res["left"]:
+                    # 全部清干净：记录不再指向任何文件里的 URL，交给逐端点
+                    # 循环去处理 in-scope 发行版即可。
+                    for t in ("gitwsl", "npmwsl", "pipwsl"):
+                        self._wsl_written[t] = None
+                    self._persist_restore()
+                else:
+                    # 没清干净的端点：记录必须活过下面的逐端点循环——
+                    # in-scope 发行版 disable 成功会清掉记录，而离开 scope
+                    # 的发行版里残留的 URL 还靠这条记录才能被下次清理认领。
+                    for t in res.get("failed", []):
+                        if self._wsl_written.get(t):
+                            kept[t] = self._wsl_written[t]
             for t in ("ps", "sys", "wsl", "gitwin", "gitwsl", "npm", "pip",
                       "npmwsl", "pipwsl"):
                 try:
@@ -831,6 +1055,12 @@ class Api:
                     self.do_toggle(t, False)
                 except Exception:
                     pm.log_exception(f"clear_all_endpoints:{t}")
+            if kept:
+                for t, url in kept.items():
+                    self._wsl_written[t] = url
+                if "gitwsl" in kept:
+                    self._git_managed["gitwsl"] = kept["gitwsl"]
+                self._persist_restore()
             return True
 
     def do_toggle(self, target, on, host=None, port=None,
@@ -870,7 +1100,14 @@ class Api:
         # Stash the pre-enable value first (after a successful write the file
         # already holds OUR url, so it would be too late).
         if on and not _restoring:
-            self._stash_previous(target, self._managed_url(h, p, **kw))
+            # 暂存落不下来的 enable 在动任何端点之前就返回错误：端点一个都
+            # 没写，UI 自然回到实际（关闭）状态，不残留乐观值；内存里的
+            # self._restore[target] 保留不删（之后别的端点成功 enable 触发
+            # 的 _persist_restore 仍会把它冲落盘）。
+            stash_err = self._stash_previous(
+                target, self._managed_url(h, p, **kw))
+            if stash_err is not None:
+                return stash_err
 
         def _fail(msg, error_key=None):
             # 写入失败时保留 _stash_previous 刚存的暂存：端点写入可能已落了一
@@ -1156,12 +1393,18 @@ class Api:
         # Rollback: if any disable failed, re-enable the ones we already
         # disabled so the user's proxy state is not left half-broken.
         if dis_errs:
+            rb_errs = {}
             for tgt in disabled_ok:
-                self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)
+                err = self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)[0]
+                if err is not None:
+                    rb_errs[tgt] = err
             # 回滚的重新启用会更新 _wsl_written 记录，一并落盘
             self._persist_restore()
             return {"ok": False, "applied": [],
-                    "error": "；".join(dis_errs.values()), "note": None}
+                    "error": "；".join(
+                        list(dis_errs.values())
+                        + [f"回滚失败 {t}: {e}" for t, e in rb_errs.items()]),
+                    "note": None}
 
         # Phase 2 must succeed before applied_* moves. A failed re-enable
         # used to leave that endpoint OFF while applied_* already pointed at
@@ -1181,19 +1424,35 @@ class Api:
             else:
                 errs[tgt] = err
         if errs:
+            # Phase-2 rollback: undo the writes that DID land in this round.
+            # gitwsl must be unset by the URL actually in the file — the
+            # gateway form just written — not by new_host, or the
+            # --fixed-value unset silently no-ops and the endpoint keeps
+            # running on the port the user just gave up.
+            still_on, rb_errs = [], {}
             for tgt in applied:
-                self._switch_disable_endpoint(
-                    tgt, new_host, new_port, new_kw, ctx)
+                u = self._git_unset_target("gitwsl") if tgt == "gitwsl" else None
+                err = self._switch_disable_endpoint(
+                    tgt, new_host, new_port, new_kw, ctx, unset=u)
+                if err is not None:
+                    rb_errs[tgt] = err
+                    still_on.append(tgt)      # 仍在本轮刚写入的新地址上
             for tgt in disabled_ok:
-                self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)
+                err = self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)[0]
+                if err is not None:
+                    rb_errs[tgt] = err
             self._persist_restore()
-            return {
-                "ok": False,
-                "applied": [],
-                "error": "；".join(errs.values()),
-                "error_key": "errSwitchPartial",
-                "note": None,
-            }
+            # TODO(残留状态): still_on 里的端点实际持新 URL，而 applied_* 故意
+            # 停在旧地址。gitwsl/npmwsl/pipwsl/gitwin 无损失：_git_managed/
+            # _wsl_written 只在卸载成功时清空，失败即保留，_is_managed_wsl_url
+            # 仍判 True，quit-clear 仍能清掉它们。ps/sys/wsl/npm/pip 有已知
+            # 缺口：_ours_proxy_urls 由 applied_* 推导，quit-clear 会跳过它们
+            # ——失败方向是"端点残留开启"，绝不是"误删用户配置"。
+            return {"ok": False, "applied": still_on,
+                    "error": "；".join(
+                        list(errs.values())
+                        + [f"回滚失败 {t}: {e}" for t, e in rb_errs.items()]),
+                    "error_key": "errSwitchPartial", "note": None}
         with self._speed_lock:
             self.host, self.port = new_host, new_port
         self.scheme, self.user, self.password = (
@@ -1215,18 +1474,37 @@ class Api:
                 "note": "；".join(notes) if notes else None,
             }
         self._persist_restore()
+        # note_key "switched" 已删除：ui/i18n.js 里该键曾被重复定义覆盖成无参数
+        # 文案，而前端本就用 t("switched", {addr, n}) 自己渲染这条提示。
+        # note_parts 与 do_toggle 同范式下发双语部件（NAT 改写 / PAC 等）。
+        note_parts = []
+        for n in notes:
+            parts = parts_of(n)
+            if parts:
+                note_parts.extend(parts)
+            else:
+                note_parts.append({"text": str(n)})
         return {"ok": True, "applied": applied,
                 "error": None,
                 "note": "；".join(notes) if notes else None,
-                "note_key": "switched" if applied else None}
+                "note_parts": note_parts if notes else None}
 
     # ── switch_port helpers (Issues 8 & 17) ─────────────────────────────────
     _SWITCH_TARGETS = ("ps", "sys", "wsl", "gitwin", "gitwsl",
                        "npm", "pip", "npmwsl", "pipwsl")
 
-    def _switch_disable_endpoint(self, target, old_h, old_p, old_kw, ctx):
+    def _switch_disable_endpoint(self, target, old_h, old_p, old_kw, ctx,
+                                 unset=None):
         """Disable one endpoint during port switch.
-        Returns None on success, error string on failure."""
+        Returns None on success, error string on failure.
+
+        `unset` is the (host, port, kw) whose git proxy a gitwsl disable must
+        remove. Phase 1 leaves it None so the write-time file URL
+        (ctx["gitwsl_unset"]) is used; phase 2 passes the URL that was JUST
+        written (the gateway form), because a rollback has to undo what this
+        round actually put in the file — _git_wsl_unset_cmd is a
+        --fixed-value unset, so a URL that is not in the file is a silent
+        no-op and the caller would believe the endpoint was rolled back."""
         if target == "ps":
             ret = pm.set_ps_proxy(old_h, old_p, False, **old_kw)
             return None if ret is True else f"PowerShell: {ret}"
@@ -1239,8 +1517,11 @@ class Api:
             return None if ret is True else _endpoint_err(target, ret)["error"]
         if target in ("gitwin", "gitwsl"):
             use_wsl = target == "gitwsl"
-            uh, up, ukw = ctx["gitwsl_unset"] if target == "gitwsl" \
-                else (old_h, old_p, old_kw)
+            if use_wsl:
+                uh, up, ukw = unset if unset is not None else ctx["gitwsl_unset"]
+            else:
+                # gitwin 不做网关改写：(new_host, new_port) 即文件里的值
+                uh, up, ukw = old_h, old_p, old_kw
             ret = pm.set_git_proxy(uh, up, False, use_wsl=use_wsl, **ukw)
             if ret is True:
                 # 与 _do_toggle 的 disable 成功路径同口径：关掉后清掉会话内
@@ -1331,7 +1612,12 @@ class Api:
         cfg["host"], cfg["port"] = self.host, new_port
         cfg["scheme"], cfg["user"], cfg["password"] = (
             self.scheme, self.user, self.password)
-        cfg["applied"] = self._applied_dict()
+        # Deliberately NO cfg["applied"] here: the two callers that reach this
+        # without a successful migration ("address unchanged" / "no endpoint
+        # enabled") only sync the FORM address — writing it as applied would
+        # claim the user's own same-address proxy as ours on quit-clear. The
+        # one caller that really moved applied_* (successful switch) persists
+        # the record through _persist_restore right after.
         return cfg
 
     # ── live speed + port probe (sampled on a background thread) ──
@@ -1424,23 +1710,52 @@ class Api:
             }
             # 单次解析：所有 WSL 侧重写共用同一网关结果，写入与记录保持一致
             wh, wp = self._wsl_url_target(h, p)
+            # 四个写入点的返回值都必须检查：失败时返回的是错误串（超时、
+            # 无 WSL 等）。此前一律忽略，紧接着就把"新网关 URL"记进
+            # _wsl_written 并落盘 —— 记录指向从未写入的 URL，而文件里仍是
+            # 旧网关 URL，两者不等使 _is_managed_wsl_url 判否、
+            # _quit_clear_owns 返回 False、clear_all_endpoints continue，
+            # 陈旧代理永久留在用户发行版里。失败端点保持旧记录不动（文件
+            # 里是什么就记什么），成功的端点照常更新成新网关。
+            errs = []
             if wsl_state and wsl_state.get("on"):
-                pm.set_wsl_proxy(wh, wp, True, **kw)
+                ret = pm.set_wsl_proxy(wh, wp, True, **kw)
+                if ret is not True:
+                    # wsl 端点没有"最后写入 URL"记录（管理块按标记删除，恒可
+                    # 清理），失败只需报出去，让 UI 回到实际状态。
+                    errs.append(_endpoint_err("wsl", ret)["error"])
             git = (wsl_state or {}).get("git")
             rewrote = False
             if self._is_managed_wsl_url(git, "gitwsl"):
-                pm.set_git_proxy(wh, wp, True, use_wsl=True, **kw)
-                self._git_managed["gitwsl"] = self._managed_url(wh, wp, **kw)
-                self._wsl_written["gitwsl"] = self._managed_url(wh, wp, **kw)
-                rewrote = True
+                ret = pm.set_git_proxy(wh, wp, True, use_wsl=True, **kw)
+                if ret is True:
+                    self._git_managed["gitwsl"] = self._managed_url(wh, wp, **kw)
+                    self._wsl_written["gitwsl"] = self._managed_url(wh, wp, **kw)
+                    rewrote = True
+                else:
+                    errs.append(_endpoint_err("gitwsl", ret)["error"])
             if self._is_managed_wsl_url(npm, "npmwsl"):
-                pm.set_npm_proxy_wsl(wh, wp, True, **kw)
-                self._wsl_written["npmwsl"] = self._managed_url(wh, wp, **kw)
-                rewrote = True
+                ret = pm.set_npm_proxy_wsl(wh, wp, True, **kw)
+                if ret is True:
+                    self._wsl_written["npmwsl"] = self._managed_url(wh, wp, **kw)
+                    rewrote = True
+                else:
+                    errs.append(_endpoint_err("npmwsl", ret)["error"])
             if self._is_managed_wsl_url(pipv, "pipwsl"):
-                pm.set_pip_proxy_wsl(wh, wp, True, **kw)
-                self._wsl_written["pipwsl"] = self._managed_url(wh, wp, **kw)
-                rewrote = True
+                ret = pm.set_pip_proxy_wsl(wh, wp, True, **kw)
+                if ret is True:
+                    self._wsl_written["pipwsl"] = self._managed_url(wh, wp, **kw)
+                    rewrote = True
+                else:
+                    errs.append(_endpoint_err("pipwsl", ret)["error"])
+            # 不在这里回滚：失败端点的文件里仍是"旧的网关 URL"，代理依然可用
+            # （只是指向旧子网），且失败多半是 15s wsl.exe 超时，重试是用户
+            # 的选择。
+            if errs:
+                # 成功端点的新记录同样要落盘；失败端点保留旧记录，退出清理的
+                # 精确比对因此不会漏掉它们。
+                self._persist_restore()
+                return {"ok": False, "error": "；".join(errs)}
             if rewrote:
                 # 重写后的新网关 URL 记录落盘，重启/下次判定仍然可用
                 self._persist_restore()

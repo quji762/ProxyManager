@@ -273,6 +273,20 @@ def wininet_url(host, port, scheme="http") -> str:
     return f"http://{host}:{port}"
 
 
+def wininet_server(host, port, scheme="http") -> str:
+    """ProxyServer literal that set_sys_proxy() writes for this address.
+
+    Windows leaves the last ProxyServer in the registry when the user turns
+    the proxy off in the Internet Options UI (ProxyEnable flips to 0, the
+    server string stays), so a residual server is not necessarily a foreign
+    one: compare against this before treating it as user state.
+    """
+    sch = str(scheme or "http").strip().lower()
+    if sch.startswith("socks"):
+        return f"socks={host}:{port}"
+    return f"{host}:{port}"
+
+
 def is_proxy_url(url) -> bool:
     return parse_proxy_url(url) is not None
 
@@ -590,6 +604,39 @@ def get_ps_proxy_vars():
     return result
 
 
+def get_ps_env_snapshot():
+    """{name: value or None} for every PS_ENV_NAMES name, both spellings.
+
+    Where get_ps_proxy_vars collapses each protocol variable to one
+    canonical key (lowercase preferred), an enable writes all eight names
+    — the three URL variables in BOTH cases plus both NO_PROXY spellings —
+    so a caller that has to put the pre-enable state back needs one entry
+    per name: a three-key view cannot tell "the user only ever set the
+    lowercase name" from "both were set", and the names it omits are
+    exactly the ones a restore would otherwise delete or overwrite.
+    Missing and empty values read as None (unset); the key is opened once
+    and every name is read from that one handle.
+    """
+    result = {n: None for n in PS_ENV_NAMES}
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
+                             winreg.KEY_READ)
+        try:
+            for n in PS_ENV_NAMES:
+                try:
+                    v, _ = winreg.QueryValueEx(key, n)
+                except FileNotFoundError:
+                    continue
+                if v is not None and v != "":
+                    result[n] = v
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        # Unreadable key: every name reads as unset, same as _ps_env_first.
+        pass
+    return result
+
+
 def _read_wsl_block() -> str:
     """Return the text between the proxy-manager markers in ~/.bashrc,
     ~/.zshrc, and the fish conf.d file (empty if absent). Scoping reads to
@@ -597,11 +644,7 @@ def _read_wsl_block() -> str:
     elsewhere in the file. Walks `_wsl_targets` so a block on a non-default
     distro is still visible when writes go to every distro."""
     try:
-        cmd = (
-            f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' "
-            "~/.bashrc ~/.zshrc 2>/dev/null; "
-            "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null"
-        )
+        cmd = _wsl_block_read_cmd()
         for d in _wsl_targets():
             try:
                 r = subprocess.run(
@@ -936,6 +979,30 @@ def get_sys_proxy():
         return UNDETECTED
 
 
+def get_sys_proxy_server_raw() -> str:
+    """Raw WinINET ProxyServer regardless of ProxyEnable ('' when unset).
+
+    Windows keeps the previous ProxyServer in the registry after the user
+    turns the proxy off in the Internet Options UI: ProxyEnable flips to 0
+    but the server string stays. get_sys_proxy() reports that state as
+    UNSET, so the disable path used to delete a value the user never asked
+    this tool to remove — this reader exposes it so it can be stashed and
+    written back verbatim.
+    """
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
+                             winreg.KEY_READ)
+        try:
+            v, _ = winreg.QueryValueEx(key, "ProxyServer")
+            return str(v)
+        except FileNotFoundError:
+            return ""
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        return ""
+
+
 def _read_autoconfig_url():
     """Raw WinINET AutoConfigURL (PAC script), '' when unset."""
     try:
@@ -1103,6 +1170,35 @@ def set_sys_proxy_override(override):
         return str(e)
 
 
+def set_sys_proxy_server(server):
+    """Write ProxyServer verbatim ('' deletes the value), never touching
+    ProxyEnable.
+
+    Puts back a residual server the disable path deleted while the proxy was
+    off — the user's "off but the address still remembered" state. Re-arming
+    the proxy is NOT this function's job, so ProxyEnable is left exactly as
+    it is. Returns True on success, an error string on failure.
+    """
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,
+                             winreg.KEY_SET_VALUE)
+        try:
+            if server:
+                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ,
+                                  str(server))
+            else:
+                try:
+                    winreg.DeleteValue(key, "ProxyServer")
+                except FileNotFoundError:
+                    pass
+        finally:
+            winreg.CloseKey(key)
+        _wininet_notify()
+        return True
+    except OSError as e:
+        return str(e)
+
+
 def wsl_available():
     """True iff `wsl -e` can actually run bash (feature enabled + a distro
     installed). wsl.exe itself always exists in System32 on Win10/11, so its
@@ -1160,10 +1256,38 @@ def wsl_default_shell():
         return None
 
 
+_wsl_distros_cache = None  # (time.monotonic(), [names]) — TTL cache, see below
+_WSL_DISTRO_TTL = 2.0
+
+
+def _invalidate_wsl_distros_cache():
+    """Drop the cached `wsl -l -q` enumeration so the next read re-runs it.
+    Called after a WSL restart, which can change the installed distros."""
+    global _wsl_distros_cache
+    _wsl_distros_cache = None
+
+
+invalidate_wsl_distros_cache = _invalidate_wsl_distros_cache
+
+
 def _wsl_distros():
     """Names of installed user distros (wsl -l -q emits UTF-16LE). Docker's
     infra distros are skipped. Empty list -> WSL unusable or unparseable;
-    callers then fall back to the default distro."""
+    callers then fall back to the default distro.
+
+    A single port switch walks this list ~10 times (one per status read and
+    per WSL-side setter target), each a separate wsl.exe cold start, so the
+    result is cached for _WSL_DISTRO_TTL seconds. Only a NON-EMPTY list is
+    cached: a failure, a timeout or an empty enumeration must not freeze
+    "WSL is unusable" for the next caller (WSL may come back a second
+    later). Callers get a copy and must not mutate the cached list."""
+    import time
+    global _wsl_distros_cache
+    cached = _wsl_distros_cache  # snapshot: another thread may clear it
+    if cached is not None:
+        t, names = cached
+        if time.monotonic() - t < _WSL_DISTRO_TTL:
+            return list(names)
     try:
         r = subprocess.run(["wsl", "-l", "-q"], capture_output=True, timeout=15,
                            creationflags=subprocess.CREATE_NO_WINDOW)
@@ -1172,7 +1296,10 @@ def _wsl_distros():
         raw = (r.stdout.decode("utf-16-le", errors="ignore")
                .replace("\x00", "").lstrip("\ufeff"))
         names = [n.strip() for n in raw.replace("\r\n", "\n").split("\n") if n.strip()]
-        return [n for n in names if n and not n.startswith("docker-desktop")]
+        names = [n for n in names if n and not n.startswith("docker-desktop")]
+        if names:
+            _wsl_distros_cache = (time.monotonic(), list(names))
+        return names
     except Exception:
         return []
 
@@ -1183,6 +1310,129 @@ _wsl_apply_all = True  # True: every user distro; False: default distro only
 def set_wsl_apply_all(enabled: bool) -> None:
     global _wsl_apply_all
     _wsl_apply_all = bool(enabled)
+
+
+def get_wsl_apply_all() -> bool:
+    """Current scope: True = every user distro, False = default distro only."""
+    return _wsl_apply_all
+
+
+def wsl_default_distro_name() -> str:
+    """Name of WSL's default distro, or "" when it cannot be determined
+    (no WSL, wsl.exe failure, timeout, empty output).
+
+    Callers MUST treat "" as "unknown" and skip any scope cleanup: guessing
+    a default distro here would remove this tool's writes from a distro the
+    user still works in (AGENTS.md: disable removes only our values)."""
+    try:
+        r = subprocess.run(
+            ["wsl", "-e", "bash", "-c", 'printf %s "$WSL_DISTRO_NAME"'],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if r.returncode != 0:
+            return ""
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def wsl_out_of_scope_distros() -> list:
+    """User distros that leave the managed scope when it narrows to the
+    default distro: every enumerated distro except the default one. Empty
+    when the default distro is unknown or nothing can be enumerated."""
+    default = wsl_default_distro_name()
+    if not default:
+        return []
+    return [n for n in (_wsl_distros() or []) if n.casefold() != default.casefold()]
+
+
+def wsl_sweep_targets():
+    """Distros a quit-clear sweep must still cover while the scope is
+    narrowed: this tool may have written them back when it was still
+    "all user distros", and the narrowed scope hides them from every later
+    read/write path. None when scope=all — _wsl_targets() already covers
+    every distro there, so no sweep is needed."""
+    if _wsl_apply_all:
+        return None
+    return _wsl_distros() or [""]
+
+
+def _wsl_block_read_cmd() -> str:
+    """Bash that prints the proxy-manager managed block (empty if absent).
+    Shared by _read_wsl_block and wsl_managed_block_distros so both read
+    exactly the same region."""
+    return (
+        f"sed -n '/{re.escape(WSL_PROXY_BEGIN)}/,/{re.escape(WSL_PROXY_END)}/p' "
+        "~/.bashrc ~/.zshrc 2>/dev/null; "
+        "cat ~/.config/fish/conf.d/proxy-manager.fish 2>/dev/null"
+    )
+
+
+def wsl_managed_block_distros(distros) -> list:
+    """Subset of `distros` that still carries a proxy-manager shell block.
+
+    Read-back verification: set_wsl_proxy's disable path is best-effort and
+    reports success even when the rc write failed, so without reading the
+    block back a failed cleanup would be reported as done. A distro that
+    cannot be read (timeout / wsl failure) is skipped rather than fatal."""
+    out = []
+    for d in (distros or []):
+        try:
+            r = subprocess.run(
+                ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c",
+                                                     _wsl_block_read_cmd()],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        except Exception:
+            continue
+        if (r.stdout or "").strip():
+            out.append(d)
+    return out
+
+
+def wsl_recorded_url_residue(distro, git_url=None, npm_url=None, pip_url=None):
+    """Which recorded URLs this tool wrote are STILL present in one distro's
+    git/npm/pip config: a list of endpoint kinds ("gitwsl"/"npmwsl"/"pipwsl"),
+    or None when the distro cannot be read.
+
+    Read-back for the scope-cleanup path: the git/npm/pip disable setters are
+    best-effort and return True even when a distro write failed, so the
+    cleanup's error list cannot see a per-distro failure. Without reading the
+    recorded URL back, a failed cleanup would clear the written-URL record
+    and orphan the residue in a distro the narrowed scope no longer reads.
+    None (unreadable) means "cleanup unverified", never "clean"."""
+    out = []
+    try:
+        if git_url:
+            for key in ("http.proxy", "https.proxy"):
+                v = _wsl_git_config_get(distro, key)
+                if v and v.strip() == str(git_url).strip():
+                    out.append("gitwsl")
+                    break
+        if npm_url:
+            data = _wsl_pull_file(distro, _NPMrc_PATH_WSL)
+            if data is not None:
+                text = _decode_ini_bytes(data)[0]
+                if any((_ini_get(text, k) or "").strip()
+                       == str(npm_url).strip() for k in NPM_PROXY_KEYS):
+                    out.append("npmwsl")
+        if pip_url:
+            for path, section in ((_PIP_CONF_PATH_WSL, "global"),
+                                  (_PIP_CONF_LEGACY_WSL, None)):
+                data = _wsl_pull_file(distro, path)
+                if data is None:
+                    continue
+                v = _ini_get(_decode_ini_bytes(data)[0], "proxy",
+                             section=section)
+                if v and v.strip() == str(pip_url).strip():
+                    out.append("pipwsl")
+                    break
+        return out
+    except Exception:
+        return None
 
 
 def _wsl_targets():
@@ -1245,11 +1495,15 @@ def _wsl_posix_script(enable: bool) -> str:
     )
 
 
-def set_wsl_proxy(host, port, enable=True, scheme="http", user="", password=""):
+def set_wsl_proxy(host, port, enable=True, scheme="http", user="", password="",
+                  distros=None):
     # NAT rewrite is the caller's job (js_api resolves via _wsl_url_target
     # ONCE, then writes and records the same host). Doing nat_host here would
     # be a second independent gateway probe and could disagree with the
     # "last written URL" record.
+    # `distros` is an explicit target list for callers that must reach
+    # distros the current scope no longer covers (scope-narrowing cleanup);
+    # None keeps the scope-derived _wsl_targets() behavior byte for byte.
     write_host = host
     url = build_proxy_url(write_host, port, scheme, user, password)
     # Merge loopback bypass entries into whatever NO_PROXY the user already
@@ -1339,7 +1593,7 @@ unset _pm_np _pm_e
         # infra distros. Enable fails loudly; disable is best-effort.
         errs = []
         done = []
-        for d in (_wsl_targets()):
+        for d in (list(distros) if distros is not None else _wsl_targets()):
             try:
                 cmd = ["wsl"] + (["-d", d] if d else []) + ["-e", "bash", "-c", script]
                 r = subprocess.run(
@@ -1454,23 +1708,95 @@ def _git_wsl_unset_cmd(url: str) -> str:
     )
 
 
+def _wsl_git_config_get(distro, key):
+    """Current `git config --global` value of `key` inside one distro, or
+    None when the key is unset. `key` is a literal from this module
+    ("http.proxy" / "https.proxy"), never user input.
+
+    `git config --get` exits 1 for a missing key and 0 for a present one, so
+    a returncode in (0, 1) is a trustworthy answer. Anything else — git
+    missing (127), a wsl.exe failure, a timeout — is an UNKNOWN state and
+    MUST raise: reporting it as "unset" would let the caller overwrite the
+    user's proxy without ever having snapshotted it, which is exactly what
+    the multi-distro rollback snapshot exists to prevent. The OSError lands
+    in the callers' per-distro handler, which fails that distro instead of
+    writing to it."""
+    where = f"WSL({distro}): " if distro else ""
+    try:
+        r = subprocess.run(
+            ["wsl"] + (["-d", distro] if distro else [])
+            + ["-e", "bash", "-c", f"git config --global --get {key}"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception as e:
+        raise OSError(f"{where}git config --get {key}: {e}") from e
+    if r.returncode == 1:
+        return None
+    if r.returncode != 0:
+        raise OSError(LStr("errGitFailWslWhere",
+                           {"where": where, "code": r.returncode}))
+    return (r.stdout or "").strip()
+
+
+def _wsl_git_config_set(distro, key, value):
+    """Write `value` into one distro's git global config; an empty value
+    unsets the key (the state a key the user never set must come back as).
+    Returns True, or raises OSError so a failed rollback is logged instead of
+    silently leaving this tool's URL in the distro.
+
+    `--unset-all` exits 5 when the key was already absent — the desired end
+    state — so (0, 5) counts as done there; a replace-all must exit 0."""
+    if value:
+        script = f"git config --global --replace-all {key} '{_bash_sq(value)}'"
+        ok = (0,)
+    else:
+        script = f"git config --global --unset-all {key}"
+        ok = (0, 5)
+    r = subprocess.run(
+        ["wsl"] + (["-d", distro] if distro else []) + ["-e", "bash", "-c", script],
+        capture_output=True, timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    if r.returncode not in ok:
+        where = f"WSL({distro}): " if distro else ""
+        raise OSError(LStr("errGitFailWslWhere",
+                           {"where": where, "code": r.returncode}))
+    return True
+
+
 def set_git_proxy(host, port, enable=True, use_wsl=False,
-                  scheme="http", user="", password=""):
+                  scheme="http", user="", password="", distros=None):
     """Configure git's global http.proxy/https.proxy, either on Windows
     (use_wsl=False) or inside WSL (use_wsl=True).
 
     Host/port/userinfo are pre-validated by the UI, so the URL is injection-safe.
     Disabling is best-effort: a missing git binary (or missing WSL) simply
     means there is nothing to clean up and is reported as success, so it
-    never blocks the unconditional disable flow."""
+    never blocks the unconditional disable flow.
+
+    `distros` is an explicit target list for the WSL side (callers reaching
+    distros the current scope no longer covers); None keeps the scope-derived
+    _wsl_targets() behavior. Ignored when use_wsl=False."""
     url = build_proxy_url(host, port, scheme, user, password)
     try:
         if use_wsl:
             errs = []
             done = []
-            for d in (_wsl_targets()):
+            targets = list(distros) if distros is not None else list(_wsl_targets())
+            # 多发行版：任一目标写入失败都要回滚已写入的发行版，而回滚必须写回
+            # 用户原值（不是只卸掉本工具的 URL）——覆盖前先按发行版快照。
+            # 快照读失败（OSError）进 except → errs，该发行版不写入。
+            # 单目标时回滚循环不可能执行（要么全成功、要么 done 为空），
+            # 省掉每个发行版两次 wsl.exe 读取，命令序列与从前逐字一致。
+            snap = {} if enable and len(targets) > 1 else None
+            for d in targets:
                 where = f"WSL({d}): " if d else ""
                 try:
+                    if snap is not None:
+                        snap[d] = {
+                            "http.proxy": _wsl_git_config_get(d, "http.proxy"),
+                            "https.proxy": _wsl_git_config_get(d, "https.proxy"),
+                        }
                     if enable:
                         sq = _bash_sq(url)
                         # https 失败时把 http.proxy 恢复成写入前的值（没有则
@@ -1513,15 +1839,22 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                     if enable:
                         errs.append(f"{where}{e}")
             if enable and errs:
-                # 任一日标失败就对已写入的发行版卸掉刚写进去的 URL：js_api 只在
-                # 全部成功时记录 _wsl_written，漏回滚会让退出清理漏掉这些发行版。
+                # 任一日标失败就对已写入的发行版回滚到快照里的用户原值
+                # （启用前没有该键就 unset）：js_api 只在全部成功时记录
+                # _wsl_written，漏回滚、或只卸掉本工具的 URL，都会把用户
+                # 原来的代理配置一并丢掉。
                 for d in done:
                     try:
-                        subprocess.run(
-                            ["wsl"] + (["-d", d] if d else [])
-                            + ["-e", "bash", "-c", _git_wsl_unset_cmd(url)],
-                            capture_output=True, timeout=15,
-                            creationflags=subprocess.CREATE_NO_WINDOW)
+                        if snap is None:
+                            subprocess.run(
+                                ["wsl"] + (["-d", d] if d else [])
+                                + ["-e", "bash", "-c", _git_wsl_unset_cmd(url)],
+                                capture_output=True, timeout=15,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+                        else:
+                            for key in ("http.proxy", "https.proxy"):
+                                _wsl_git_config_set(
+                                    d, key, (snap.get(d) or {}).get(key))
                     except Exception:
                         log_exception_once("gitwsl_rollback", "set_git_proxy rollback")
                 return LJoin(errs)
@@ -1952,6 +2285,37 @@ def _wsl_edit_ini(distro, path, keys, url, equals, section=None):
     return True
 
 
+def _wsl_ini_snapshot(distro, path, keys, section=None):
+    """Current values of `keys` in one distro's config file, taken BEFORE
+    this tool overwrites them. Only keys that really have a value are
+    returned — a key the user never set must come back as absent, never as
+    an invented value — and a file that doesn't exist yields {}. Raises
+    OSError when the distro cannot be read, so the caller fails that distro
+    instead of overwriting a proxy it never snapshotted (same contract as
+    _wsl_git_config_get)."""
+    data = _wsl_pull_file(distro, path)
+    if data is None:
+        return {}
+    text = _decode_ini_bytes(data)[0]
+    out = {}
+    for key in keys:
+        v = _ini_get(text, key, section)
+        if v:
+            out[key] = v
+    return out
+
+
+def _wsl_ini_restore(distro, path, keys, snap, equals, section=None):
+    """Put one distro's config file back to its pre-enable state, key by key:
+    a snapshotted value is written back (its trailing comment survives,
+    _ini_edit only rewrites the value), a key without one has our line
+    removed. Surgical — a value the user set for another endpoint is not
+    equal to `equals`, so it is never touched."""
+    for key in keys:
+        _wsl_edit_ini(distro, path, (key,), (snap or {}).get(key),
+                      equals=equals, section=section)
+
+
 def get_npm_proxy_wsl(distro=None):
     """npm proxy inside the distro(s). Reads every user distro and returns
     the first proxy found (multi-distro setups are rare and usually kept in
@@ -2005,35 +2369,53 @@ def get_pip_proxy_wsl(distro=None):
         return UNDETECTED
 
 
-def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=""):
+def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password="",
+                      distros=None):
     """Write/clear npm's proxy + https-proxy in every user distro's ~/.npmrc.
     Same disable contract as the Windows npm endpoint.
 
     Host is used as-is: NAT loopback→gateway rewrite happens in js_api
     (_wsl_url_target) so the written URL and the wsl_written record share
-    one gateway probe. Passing a loopback host writes 127.0.0.1 literally."""
+    one gateway probe. Passing a loopback host writes 127.0.0.1 literally.
+
+    `distros` is an explicit target list for callers reaching distros the
+    current scope no longer covers; None keeps the scope-derived behavior."""
     write_host = host
     url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
         done = []
-        for d in (_wsl_targets()):
+        targets = list(distros) if distros is not None else list(_wsl_targets())
+        # 多发行版：回滚要写回用户原值，覆盖前先按发行版快照。单发行版时
+        # 回滚循环不可能执行（要么全成功、要么 done 为空），省掉一次读取，
+        # 命令序列与从前逐字一致。
+        snap = {} if enable and len(targets) > 1 else None
+        for d in targets:
             try:
+                if snap is not None:
+                    snap[d] = _wsl_ini_snapshot(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS)
                 _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
                               url if enable else None, equals=url)
                 if enable:
                     done.append(d)
-            except OSError as e:
+            except Exception as e:
+                # TimeoutExpired 不是 OSError：只捕 OSError 会让超时跳过
+                # 下面的回滚循环，已写入的发行版带着本工具 URL 却无记录。
                 if enable:
                     errs.append(e)
         if errs:
-            # 任一日标失败就对已成功写入的发行版卸掉刚写进去的代理：js_api
-            # 只在全部成功时记录 _wsl_written，漏回滚会让退出清理漏掉它们。
+            # 任一日标失败就对已成功写入的发行版回滚到快照里的用户原值：
+            # js_api 只在全部成功时记录 _wsl_written，漏回滚、或只卸掉本工具
+            # 的 URL，都会把用户原来的 .npmrc 代理一并丢掉。
             for d in done:
                 try:
-                    _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
-                                  None, equals=url)
-                except OSError:
+                    if snap is None:
+                        _wsl_edit_ini(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
+                                      None, equals=url)
+                    else:
+                        _wsl_ini_restore(d, _NPMrc_PATH_WSL, NPM_PROXY_KEYS,
+                                         snap.get(d), equals=url)
+                except Exception:
                     log_exception_once("npmwsl_rollback", "set_npm_proxy_wsl rollback")
         if enable and errs:
             return LJoin(errs)
@@ -2043,19 +2425,27 @@ def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
         return True if not enable else "WSL 操作失败"
 
 
-def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=""):
+def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password="",
+                      distros=None):
     """Write/clear `proxy` under [global] in every user distro's XDG
     pip.conf; disable also cleans the legacy ~/.pip/pip.conf.
 
     Host is used as-is (see set_npm_proxy_wsl): NAT rewrite is done once in
-    js_api before the call."""
+    js_api before the call. `distros` is an explicit target list for callers
+    reaching distros the current scope no longer covers."""
     write_host = host
     url = build_proxy_url(write_host, port, scheme, user, password)
     try:
         errs = []
         done = []
-        for d in (_wsl_targets()):
+        targets = list(distros) if distros is not None else list(_wsl_targets())
+        # 多发行版：回滚要写回用户原值，覆盖前先按发行版快照（同 npm）。
+        snap = {} if enable and len(targets) > 1 else None
+        for d in targets:
             try:
+                if snap is not None:
+                    snap[d] = _wsl_ini_snapshot(d, _PIP_CONF_PATH_WSL,
+                                                ("proxy",), section="global")
                 _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
                               url if enable else None, equals=url,
                               section="global")
@@ -2065,17 +2455,23 @@ def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
                                   None, equals=url)
                 if enable:
                     done.append(d)
-            except OSError as e:
+            except Exception as e:
+                # 同 npm：TimeoutExpired 不是 OSError，必须进 errs 触发回滚。
                 if enable:
                     errs.append(e)
         if errs:
-            # 任一日标失败就对已成功写入的发行版卸掉刚写进去的代理（只回滚
+            # 任一日标失败就对已成功写入的发行版回滚到快照里的用户原值（只回滚
             # 启用真正写过的 XDG 路径，legacy 路径启用时从未写过）。
             for d in done:
                 try:
-                    _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
-                                  None, equals=url, section="global")
-                except OSError:
+                    if snap is None:
+                        _wsl_edit_ini(d, _PIP_CONF_PATH_WSL, ("proxy",),
+                                      None, equals=url, section="global")
+                    else:
+                        _wsl_ini_restore(d, _PIP_CONF_PATH_WSL, ("proxy",),
+                                         snap.get(d), equals=url,
+                                         section="global")
+                except Exception:
                     log_exception_once("pipwsl_rollback", "set_pip_proxy_wsl rollback")
         if enable and errs:
             return LJoin(errs)
@@ -2089,6 +2485,9 @@ def restart_wsl():
     try:
         subprocess.run(["wsl", "--shutdown"],
                        capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+        # The distro list can change with a restart (installs/removals while
+        # down), and every caller caches the enumeration for a short TTL.
+        invalidate_wsl_distros_cache()
         # A cold start after --shutdown can easily exceed 15s on slow disks
         # (vhdx compaction, AV scans) — a timeout here would misreport the
         # restart as failed, so probe with retries.

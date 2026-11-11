@@ -214,27 +214,42 @@ def valid_host(h) -> bool:
         and "://" not in h and ":" not in h
 
 
-def _load_applied(raw, fallback):
-    """Validate the persisted applied-* address, or copy the form fields.
+def _load_applied(raw):
+    """Validate the persisted applied-* address, or None when never written.
 
-    Legacy configs have no `applied` key; treating the form fields as
-    applied matches the previous startup behavior (no worse than today).
+    A missing key, a non-dict value, an empty dict, or an invalid host/port
+    ALL mean one thing: this tool has never written an endpoint, and callers
+    must treat the result as "no record". host/port are the IDENTITY fields —
+    they answer "is this address ours?", which is what _ours_proxy_urls /
+    _quit_clear_owns compare against — so a corrupt value yields no record at
+    all rather than a record pointing somewhere else.
+
+    Backfilling from the form fields (the old fallback) is exactly what
+    contract A2 / the AGENTS.md core invariant forbids: a hand-edited or
+    half-corrupt config.json would then produce a valid-looking record for an
+    address this tool never wrote, and quit-clear would silently delete the
+    user's own proxy at that same address.
+
+    scheme/user/password only take part in URL equality, so a corrupt value
+    there is sanitized to a safe default instead of dropping the whole record:
+    the defaults can never make a user-configured proxy compare equal to ours.
     """
     if not isinstance(raw, dict):
-        return dict(fallback)
+        return None
     host = str(raw.get("host") or "")
     port = str(raw.get("port") or "")
+    # host/port identify the record: an invalid value means there is no
+    # usable record, never a repaired one.
+    if not valid_host(host):
+        return None
+    if not pm.is_valid_port(port):
+        return None
+    port = str(int(port))
     scheme = str(raw.get("scheme") or "http").strip().lower()
     user = str(raw.get("user") or "")
     password = str(raw.get("password") or "")
     if password:
         password = _dpapi_decrypt(password)
-    if not valid_host(host):
-        host = fallback["host"]
-    if pm.is_valid_port(port):
-        port = str(int(port))
-    else:
-        port = fallback["port"]
     if not pm.is_valid_scheme(scheme):
         scheme = "http"
     if not pm.is_valid_userinfo(user):
@@ -418,10 +433,9 @@ def load_config():
     out["wsl_written"] = wsl_written if isinstance(wsl_written, dict) else {}
     # Last address actually written to endpoints. Distinct from the form
     # fields (host/port/…) which persistSoon may save before switch_port.
-    out["applied"] = _load_applied(cfg.get("applied"), {
-        "host": out["host"], "port": out["port"], "scheme": out["scheme"],
-        "user": out["user"], "password": out["password"],
-    })
+    # No fallback to the form address: a corrupt host/port yields None
+    # ("never written"), never a repaired record (see _load_applied).
+    out["applied"] = _load_applied(cfg.get("applied"))
     if migrated:
         try:
             save_config(out)

@@ -83,16 +83,18 @@ def test_missing_ports_key_still_defaults(tmp_path, monkeypatch):
     assert config_store.load_config()["ports"] == list(config_store.DEFAULT_PORTS)
 
 
-def test_applied_roundtrip_and_legacy_fallback(tmp_path, monkeypatch):
+def test_applied_roundtrip_and_no_legacy_fallback(tmp_path, monkeypatch):
     cfg_file = tmp_path / "config.json"
     monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
     monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
-    # Legacy file: no applied key → form fields are used.
+    # Legacy file: no applied key → NO record. The form address must never be
+    # promoted to "already applied": nothing was ever written to an endpoint,
+    # so claiming it would let switch_port/quit-clear touch the user's own
+    # same-address proxy (contract A2 / AGENTS.md core invariant).
     cfg_file.write_text(json.dumps({"host": "10.0.0.1", "port": "1080"}),
                         encoding="utf-8")
     cfg = config_store.load_config()
-    assert cfg["applied"]["host"] == "10.0.0.1"
-    assert cfg["applied"]["port"] == "1080"
+    assert cfg["applied"] is None
     cfg["applied"] = {"host": "127.0.0.1", "port": "7897",
                       "scheme": "socks5", "user": "alice", "password": "s3cret"}
     cfg["host"], cfg["port"] = "10.0.0.1", "1080"
@@ -211,3 +213,80 @@ def test_save_config_writes_bak(tmp_path, monkeypatch):
     assert config_store.save_config(cfg) is True
     bak = json.loads((tmp_path / "config.json.bak").read_text(encoding="utf-8"))
     assert bak["restore"] == {"npm": "http://10.0.0.1:1"}
+
+
+def test_corrupt_applied_host_yields_no_record(tmp_path, monkeypatch):
+    """A hand-edited applied.host (illegal characters) must NOT be "repaired"
+    from the form address. host is the identity field _ours_proxy_urls /
+    _quit_clear_owns compare against, so a fabricated record would make
+    quit-clear delete the user's own same-address proxy. The form host/port
+    below are deliberately VALID and different, so a passing assertion cannot
+    be an accident of the fallback happening to produce a valid address."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps(
+        {"host": "10.0.0.1", "port": "1080",
+         "applied": {"host": "ho st!", "port": "7897"}}), encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    cfg = config_store.load_config()
+    assert cfg["applied"] is None
+    assert cfg["host"] == "10.0.0.1"
+    assert cfg["port"] == "1080"
+
+
+def test_corrupt_applied_port_yields_no_record(tmp_path, monkeypatch):
+    """Same contract for the port: a non-numeric port means no record at all,
+    never the form port."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps(
+        {"host": "10.0.0.1", "port": "1080",
+         "applied": {"host": "127.0.0.1", "port": "abc"}}), encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    cfg = config_store.load_config()
+    assert cfg["applied"] is None
+
+
+def test_applied_with_invalid_scheme_is_sanitized_not_dropped(tmp_path, monkeypatch):
+    """scheme/user/password only take part in URL equality, so a corrupt value
+    there is sanitized to a safe default instead of discarding the record:
+    dropping it would claim "never written" for endpoints this tool DID write
+    (leaving them uncleared on quit), while the safe default can never make a
+    user-configured proxy compare equal to ours."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps(
+        {"host": "10.0.0.1", "port": "1080",
+         "applied": {"host": "127.0.0.1", "port": "7897", "scheme": "ftp",
+                     "user": "a:b", "password": "x y"}}), encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    cfg = config_store.load_config()
+    assert cfg["applied"] == {"host": "127.0.0.1", "port": "7897",
+                              "scheme": "http", "user": "", "password": ""}
+
+
+def test_no_applied_key_still_none(tmp_path, monkeypatch):
+    """Existing semantics: no applied key means this tool never wrote an
+    endpoint, so the form address must not be promoted into a record."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"host": "10.0.0.1", "port": "1080"}),
+                        encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    assert config_store.load_config()["applied"] is None
+
+
+def test_empty_applied_dict_yields_no_record(tmp_path, monkeypatch):
+    """An empty object is a dict, so the isinstance branch passes — it must
+    still fall through to "no record" (host "" is not a valid host)."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"host": "10.0.0.1", "port": "1080",
+                                    "applied": {}}), encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    assert config_store.load_config()["applied"] is None
+
+
+def test_non_dict_applied_yields_no_record(tmp_path, monkeypatch):
+    """A list/string in the applied slot is a corrupt file, not a record."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"host": "10.0.0.1", "port": "1080",
+                                    "applied": ["127.0.0.1", "7897"]}),
+                        encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    assert config_store.load_config()["applied"] is None

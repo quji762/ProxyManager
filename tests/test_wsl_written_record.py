@@ -352,3 +352,86 @@ def test_quit_clear_closes_own_sys_proxy_with_credentials(tmp_path, monkeypatch)
         assert api._quit_clear_owns("sys") is True
         assert api.clear_all_endpoints() is True
     assert len(sys_calls) == 1
+
+
+def _restart_wsl_patches(api, old_git_url, git_ret, git_calls):
+    """Patch everything restart_wsl's WSL-rewrite phase touches.
+
+    `old_git_url` is what the file still holds (the URL this tool wrote before
+    the subnet moved) — refresh_item reports it as the detected git(WSL) value,
+    so it matches the persisted record and the endpoint is a rewrite candidate.
+    The gateway probe resolves to the NEW subnet, exactly like a real restart
+    that moved the NAT range. `git_ret` stands in for set_git_proxy's return
+    (True, or the error string a partial failure produces)."""
+    return [
+        patch("js_api.pm.restart_wsl", return_value=True),
+        patch("js_api.pm.get_wsl_network_mode", return_value="NAT"),
+        patch("js_api.pm.get_wsl_gateway_ip", return_value="172.25.0.1"),
+        patch.object(api, "refresh_item",
+                     return_value={"on": False, "git": old_git_url}),
+        patch("js_api.pm.get_npm_proxy_wsl", return_value=pm.UNSET),
+        patch("js_api.pm.get_pip_proxy_wsl", return_value=pm.UNSET),
+        patch("js_api.pm.set_git_proxy",
+              side_effect=lambda *a, **k: git_calls.append(a) or git_ret),
+        patch("js_api.pm.set_wsl_proxy", return_value=True),
+        patch("js_api.pm.set_npm_proxy_wsl", return_value=True),
+        patch("js_api.pm.set_pip_proxy_wsl", return_value=True),
+    ]
+
+
+def _restart_wsl_api(tmp_path, monkeypatch, old_git_url):
+    api = _make_api(tmp_path, monkeypatch)
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    # 上一次写入记录的是旧子网的网关（工具写入后文件未变，变的是网关）
+    api._wsl_written["gitwsl"] = old_git_url
+    return api
+
+
+def test_restart_wsl_keeps_old_record_when_rewrite_fails(tmp_path, monkeypatch):
+    """重写失败（set_git_proxy 返回错误串）时不得把"新网关 URL"记成已写入：
+    文件里仍是旧网关 URL，记录一旦抢先更新成新网关，两者不等会让
+    _is_managed_wsl_url 判否 → _quit_clear_owns False → clear_all_endpoints
+    continue，陈旧代理永久留在用户发行版里。"""
+    old_git_url = "http://172.24.0.1:7897"
+    api = _restart_wsl_api(tmp_path, monkeypatch, old_git_url)
+    git_calls = []
+    with ExitStack() as stack:
+        for p in _restart_wsl_patches(api, old_git_url, "timeout", git_calls):
+            stack.enter_context(p)
+        r = api.restart_wsl()
+        # 失败也把真实失败报出去（UI 不得保留乐观值）
+        assert r["ok"] is False
+        assert "Git(WSL)" in r["error"]
+        # 记录保持旧网关 URL：文件里是什么就记什么
+        assert api._wsl_written["gitwsl"] == old_git_url
+        assert api._git_managed["gitwsl"] is None
+        assert git_calls == [("172.25.0.1", "7897", True)]
+        # 旧记录 == 文件里的旧网关 URL → 退出清理仍然认领这个端点
+        assert api._quit_clear_owns("gitwsl") is True
+
+
+def test_restart_wsl_updates_record_on_success(tmp_path, monkeypatch):
+    """重写成功：记录与 config.json 里的落盘都换成新网关 URL（DPAPI 加密
+    形态），退出清理据此认领改写后的端点。"""
+    old_git_url = "http://172.24.0.1:7897"
+    new_git_url = "http://172.25.0.1:7897"
+    api = _restart_wsl_api(tmp_path, monkeypatch, old_git_url)
+    git_calls = []
+    with ExitStack() as stack:
+        for p in _restart_wsl_patches(api, old_git_url, True, git_calls):
+            stack.enter_context(p)
+        r = api.restart_wsl()
+        assert r["ok"] is True
+        assert r.get("error") is None
+        assert api._wsl_written["gitwsl"] == new_git_url
+        assert api._git_managed["gitwsl"] == new_git_url
+        assert git_calls == [("172.25.0.1", "7897", True)]
+
+    raw = json.loads((tmp_path / "c.json").read_text(encoding="utf-8"))
+    on_disk = raw["wsl_written"]["gitwsl"]
+    assert on_disk.startswith("DPAPI:")
+    assert "172.25.0.1" not in on_disk
+    # 落盘记录可解密读回，重启后判定仍然可用
+    api2 = _make_api(tmp_path, monkeypatch)
+    assert api2._wsl_written["gitwsl"] == new_git_url

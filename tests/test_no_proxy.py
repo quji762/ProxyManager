@@ -1,5 +1,7 @@
 """NO_PROXY merge/strip must preserve user entries and only manage ours."""
 
+from unittest.mock import patch
+
 from proxy_manager import NO_PROXY_VALUE, _merged_no_proxy, _stripped_no_proxy
 
 
@@ -52,7 +54,7 @@ def test_sys_proxy_server_to_url_http_and_socks():
 # Fake registry: get_sys_proxy / set_sys_proxy must never touch the real
 # WinINET values in tests.
 import proxy_manager as pm  # noqa: E402
-from unittest.mock import patch  # noqa: E402
+import js_api  # noqa: E402
 
 _INET = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
 
@@ -137,3 +139,75 @@ def test_get_sys_proxy_stays_backward_compatible():
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
         pm.set_sys_proxy("127.0.0.1", "7897", True)
         assert pm.get_sys_proxy() == "http://127.0.0.1:7897"
+
+
+def _api_for_inet():
+    """An Api whose only real dependency is the patched winreg layer."""
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        return js_api.Api()
+
+
+def test_get_sys_proxy_server_raw_ignores_enable_flag():
+    """ProxyEnable=0 with a ProxyServer left behind is exactly what Windows
+    leaves after the user turns the proxy off in the UI — get_sys_proxy()
+    says UNSET there, the raw reader must still surface the address."""
+    state = {"ProxyEnable": 0, "ProxyServer": "corp:8080", "ProxyOverride": ""}
+    patches = _patched_inet(state)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        assert pm.get_sys_proxy() == pm.UNSET
+        assert pm.get_sys_proxy_server_raw() == "corp:8080"
+
+
+def test_set_sys_proxy_server_leaves_enable_flag_alone():
+    """Restoring a remembered address must not re-arm the proxy: the server
+    is written verbatim ('socks=…' included) and ProxyEnable is untouched."""
+    state = _fake_inet_state(ProxyEnable=1, ProxyServer="corp:8080")
+    patches = _patched_inet(state)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        assert pm.set_sys_proxy_server("socks=corp:1080") is True
+        assert state["ProxyServer"] == "socks=corp:1080"
+        assert state["ProxyEnable"] == 1
+        assert pm.set_sys_proxy_server("") is True
+        assert "ProxyServer" not in state       # '' deletes the value
+        assert state["ProxyEnable"] == 1
+
+
+def test_sys_residual_server_is_restored_after_enable_disable():
+    """End-to-end for the residual case: the user's proxy was OFF but the
+    server address was still in the registry. The enable stashes that
+    residual (it is not ours), the disable's DeleteValue('ProxyServer')
+    destroys it, and the restore puts the exact string back — while
+    ProxyEnable stays 0, so the proxy is NOT re-armed.
+
+    Api level on purpose: the disable branch of set_sys_proxy still deletes
+    ProxyServer (by design), only the restore path re-writes it."""
+    state = {"ProxyEnable": 0, "ProxyServer": "corp:8080", "ProxyOverride": ""}
+    patches = _patched_inet(state)
+    api = _api_for_inet()
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        assert js_api.pm.get_sys_proxy() == pm.UNSET
+        assert js_api.pm.get_sys_proxy_server_raw() == "corp:8080"
+        assert api.do_toggle("sys", True, "127.0.0.1", "7897")["ok"] is True
+        assert api._restore["sys"] == {"url": None, "override": None,
+                                       "server": "corp:8080"}
+        assert api.do_toggle("sys", False)["ok"] is True
+
+    assert state["ProxyServer"] == "corp:8080"   # user's address back verbatim
+    assert state["ProxyEnable"] == 0             # …and the proxy stays off
+
+
+def test_sys_stash_skips_our_own_residual():
+    """Our own leftover — we enabled 127.0.0.1:7897 and the user then turned
+    the proxy off in the Windows UI — must never be stashed: the disable
+    would write it back and re-arm a proxy the user just switched off."""
+    api = _api_for_inet()
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    state = {"ProxyEnable": 0, "ProxyServer": "127.0.0.1:7897",
+             "ProxyOverride": ""}
+    patches = _patched_inet(state)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        assert api.do_toggle("sys", True, "127.0.0.1", "7897")["ok"] is True
+
+    stashed = api._restore.get("sys")
+    assert stashed is None or "server" not in stashed

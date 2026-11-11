@@ -464,5 +464,112 @@ class TestDpapiFailureLogging(unittest.TestCase):
         self.assertTrue(config_store._kernel32.LocalFree.argtypes)
 
 
+class TestStashPersistFailureAbortsEnable(unittest.TestCase):
+    """暂存落盘失败时必须中止 enable：否则"先保存再覆盖"在保存失败时照样
+    覆盖端点，进程一退出这份覆盖前的用户原值就永久丢失。
+
+    _persist_restore 的 DpapiError / _persist_cfg 分支必须把错误返回给
+    _stash_previous，再被 _do_toggle 在动任何端点之前传播出来（ps / sys /
+    通用三个调用点都不许只看日志）。
+    """
+
+    def _api(self):
+        """An Api whose config lives in the per-test temp dir (conftest
+        redirects config_store) and whose registry/network probes are mocked
+        away — no real WinINET/env-var/WSL access."""
+        import js_api
+        import proxy_manager as pm
+
+        with mock.patch.object(pm, "winreg"), \
+                mock.patch("proxy_manager.get_net_counters",
+                           return_value=None):
+            return js_api.Api()
+
+    def test_persist_restore_reports_dpapi_failure(self):
+        """_persist_restore 本身：加密失败必须返回 errDpapi 错误 dict
+        （旧实现只 log_exception 然后 return None，调用方无法感知）。"""
+        import js_api
+
+        api = self._api()
+        api._restore["npm"] = "http://corp:8080"
+        with mock.patch.object(js_api, "_stash_encrypt",
+                               side_effect=config_store.DpapiError):
+            out = api._persist_restore()
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out["error_key"], "errDpapi")
+
+    def test_generic_branch_aborts_enable(self):
+        """npm/pip/gitwin 等通用分支：暂存加密失败时一个端点都不写，
+        错误以 errDpapi 返回，内存暂存保留。"""
+        import js_api
+
+        spy = []
+        api = self._api()
+        with mock.patch.object(js_api, "_dpapi_encrypt",
+                               side_effect=config_store.DpapiError("boom")), \
+                mock.patch.object(js_api.pm, "get_npm_proxy",
+                                  return_value="http://corp:8080"), \
+                mock.patch.object(js_api.pm, "set_npm_proxy",
+                                  side_effect=lambda *a, **k: spy.append(a)
+                                  or True):
+            out = api.do_toggle("npm", True, "127.0.0.1", "7897")
+
+        self.assertEqual(out.get("error_key"), "errDpapi")
+        self.assertEqual(spy, [])                 # 端点未被覆盖
+        self.assertEqual(api._restore.get("npm"), "http://corp:8080")
+
+    def test_sys_branch_aborts_enable(self):
+        """sys 分支（WinINET）：暂存加密失败时 set_sys_proxy 一次都没调，
+        用户原 ProxyOverride 留在内存暂存里等下一次落盘。"""
+        import js_api
+
+        spy = []
+        api = self._api()
+        with mock.patch.object(js_api, "_dpapi_encrypt",
+                               side_effect=config_store.DpapiError("boom")), \
+                mock.patch.object(js_api.pm, "get_sys_proxy",
+                                  return_value="http://192.168.1.50:7897"), \
+                mock.patch.object(js_api.pm, "get_sys_proxy_override",
+                                  return_value="corp.local"), \
+                mock.patch.object(js_api.pm, "get_sys_proxy_server_raw",
+                                  return_value="192.168.1.50:7897"), \
+                mock.patch.object(js_api.pm, "set_sys_proxy",
+                                  side_effect=lambda *a, **k: spy.append(a)
+                                  or True):
+            out = api.do_toggle("sys", True, "127.0.0.1", "7897")
+
+        self.assertEqual(out.get("error_key"), "errDpapi")
+        self.assertEqual(spy, [])
+        self.assertEqual(api._restore["sys"]["override"], "corp.local")
+
+    def test_ps_branch_aborts_enable(self):
+        """ps 分支（PowerShell 用户环境变量）：暂存加密失败时 set_ps_proxy
+        一次都没调，用户原 HTTP_PROXY 留在内存暂存里。"""
+        import js_api
+        import proxy_manager as pm
+
+        spy = []
+        api = self._api()
+        snapshot = {n: None for n in pm.PS_ENV_NAMES}
+        snapshot["HTTP_PROXY"] = "http://corp:8080"
+        with mock.patch.object(js_api, "_dpapi_encrypt",
+                               side_effect=config_store.DpapiError("boom")), \
+                mock.patch.object(js_api.pm, "get_ps_env_snapshot",
+                                  return_value=snapshot), \
+                mock.patch.object(js_api.pm, "get_ps_no_proxy",
+                                  return_value=""), \
+                mock.patch.object(js_api.pm, "get_ps_status",
+                                  return_value="http://corp:8080"), \
+                mock.patch.object(js_api.pm, "set_ps_proxy",
+                                  side_effect=lambda *a, **k: spy.append(a)
+                                  or True):
+            out = api.do_toggle("ps", True, "127.0.0.1", "7897")
+
+        self.assertEqual(out.get("error_key"), "errDpapi")
+        self.assertEqual(spy, [])
+        self.assertEqual(api._restore["ps"]["env"]["HTTP_PROXY"],
+                         "http://corp:8080")
+
+
 if __name__ == "__main__":
     unittest.main()
