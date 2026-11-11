@@ -18,6 +18,7 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 - **Keyboard accessibility**: the confirm and Settings dialogs are proper modal ARIA dialogs with a focus trap, focus-on-open / restore-on-close and Escape-to-close; the Win/WSL tabs follow the tablist pattern with arrow-key roving focus; endpoint switches carry accessible names; and keyboard focus survives endpoint repaints (`ui/index.html`, `ui/app.js`).
 
 ### Changed
+- Added build/packaging guards: `requirements.txt` must match `pyproject [project].dependencies`, `requirements-build.txt` must match the `[build]` extra, `.gitignore` must keep covering the sensitive config artifacts, and `APP_VERSION` must stay `x.y.z` (`tests/test_build_hygiene.py`).
 - Documentation is consolidated into README, AGENTS.md and CHANGELOG.md.
 - Proxy write/restore semantics, WSL networking rules and DPAPI constraints are now explicit agent invariants.
 - `applied` is now only ever a real applied record: a config without it means ProxyManager has never written an endpoint, and the form address is no longer promoted into it (`config_store.py`). A plain save, a port quick-switch that migrates nothing and a legacy config therefore leave no record behind, so nothing is claimed as ours on quit-clear or quick-switch (`js_api.py`).
