@@ -1660,10 +1660,14 @@ async function boot() {
     $("authRow").hidden = false;
     $("authToggle").setAttribute("aria-expanded", "true");
   }
+  // 契约A2：无 applied 记录＝本工具从未写入端点，绝不能用表单地址回填
+  // lastApplied（否则 appliedAddr() 把用户手工配置的同地址代理误判为已应用，
+  // 点击关闭即删）。与 syncFormAfterRestore 同口径；表单与 applied 的差异由
+  // 下方 applyAddress 迁移分支处理（switch_port 无记录时不认领任何端点）。
   lastApplied = {
-    host: String(c.applied_host || c.host || ""),
-    port: String(c.applied_port || c.port || ""),
-    scheme: c.applied_scheme || c.scheme || "http",
+    host: String(c.applied_host || ""),
+    port: String(c.applied_port || ""),
+    scheme: c.applied_scheme || "http",
     user: c.applied_user || "", password: c.applied_password || "",
   };
   setLang(c.lang || ((navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en"));
