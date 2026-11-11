@@ -412,6 +412,8 @@ body.has-bg .card { backdrop-filter: blur(24px) saturate(1.25); -webkit-backdrop
 .group-cap { font-size: 11px; font-weight: 700; color: var(--text2); margin: 10px 0 4px; letter-spacing: .3px; }
 .group-cap:first-of-type { margin-top: 0; }
 .net-hint { margin-top: 6px; font-size: 10.5px; color: var(--text3); line-height: 1.5; }
+/* PAC caveat sits right under the WinINET row, not at the card bottom */
+.net-hint.pac-hint { margin-top: 2px; padding-top: 0; color: var(--amber); word-break: break-all; }
 
 /* ═══════════════════════ Status bar ═══════════════════════ */
 .statusbar {

@@ -7,6 +7,8 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 ### Added
 - Tray menu now shows how many endpoints are currently enabled (derived from the applied record and persisted switches, never the form fields) and adds one-click **Enable all** / **Disable all**; both run on a background worker with balloon feedback so the tray never blocks (`tray_icon.py`).
 - A one-click **Test all** button probes every channel of the visible lane concurrently, painting each result as it arrives, with a 45 s watchdog and a short in-page history of recent results (kept in memory only — never written to `config.json`) (`ui/app.js`).
+- The Windows lane now shows a PAC caveat under the system-proxy row when an `AutoConfigURL` is registered: browsers may follow the PAC script, so the static proxy shown is not necessarily in effect. The hint is read-only and rendered as plain text (`ui/app.js`, `js_api.py`).
+- Settings gained a persistent update-status row (last check result, re-check button, and an **Open download page** button when an update exists). The download button opens only the fixed repository releases page or the cached release URL — it accepts no caller-supplied URL. The status is kept in memory only (`ui/app.js`, `js_api.py`).
 
 ### Changed
 - Documentation is consolidated into README, AGENTS.md and CHANGELOG.md.

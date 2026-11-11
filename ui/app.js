@@ -46,6 +46,8 @@ const api = (() => {
         if (w === "pipwsl") return mockState.pipWslVal;
         if (w === "ip") return mockState.lip;
         if (w === "mode") return mockState.wmode;
+        if (w === "pac") return { url: mockState.ps ? mockState.psHttp : "",
+          autoconfig_url: "", pac: false };
         return null;
       }
       case "prepare_toggle": return { ok: true };
@@ -101,6 +103,8 @@ const api = (() => {
       case "clear_background": return true;
       case "set_autostart": mockState.autostart = !!args[0]; return { ok: true };
       case "copy": return true;
+      case "check_update": return { status: "latest" };
+      case "open_release_page": return true;
       default: return null;
     }
   }
@@ -647,6 +651,22 @@ function scheduleRender() {
   if (renderTimer) return;
   renderTimer = setTimeout(() => { renderTimer = null; renderEndpoints(); }, _RENDER_BATCH_MS);
 }
+/* PAC (AutoConfigURL) hint under the WinINET row. The URL is registry data:
+   it goes through textContent, never innerHTML. Lives inside #varsWin, so
+   the WSL lane hides it with the whole card. */
+let pacInfo = null;
+function renderPacHint() {
+  const el = $("pacHint");
+  if (!el) return;
+  const r = pacInfo;
+  if (r && r.pac && r.autoconfig_url) {
+    el.textContent = t("pacActive", { url: r.autoconfig_url });
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+    el.textContent = "";
+  }
+}
 let refreshing = false;
 let refreshQueued = false;
 async function refreshAll() {
@@ -713,6 +733,13 @@ async function refreshAll() {
     state.sys = String(v) === expect;
     set("vSys", v);
     scheduleRender();
+  }).catch(() => {}));
+  // PAC awareness is a value-only probe (like ip/mode): it fills one hint
+  // node, never repaints the endpoint list, so the 8-probe render batch is
+  // unchanged.
+  if (lane === "win") track(api.call("refresh_item", "pac").then((r) => {
+    pacInfo = r || null;
+    renderPacHint();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "wsl").then((r) => {
     anyOk = true;
@@ -1013,6 +1040,7 @@ async function openSettings() {
   setTgl($("tglAuto"), !!c.autostart);
   setTgl($("tglQuitClear"), !!c.quit_clear);
   setTgl($("tglWslAll"), c.wsl_all_distros !== false);
+  renderUpdateStatus();
   if (c.bg_path) {
     const bg = await api.call("get_background");
     if (bg && bg.error) toast(msgText(bg), "err");
@@ -1075,6 +1103,8 @@ $("btnTheme").onclick = toggleTheme;
 $("btnPin").onclick = togglePin;
 $("btnSettings").onclick = openSettings;
 $("settingsClose").onclick = closeSettings;
+$("btnUpdateCheck").onclick = doUpdateCheck;
+$("btnUpdateDl").onclick = () => { api.call("open_release_page").catch(() => {}); };
 $("btnMin").onclick = () => api.call("window_control", "minimize");
 $("btnMax").onclick = toggleMaximize;
 $("btnClose").onclick = async () => {
@@ -1377,6 +1407,8 @@ $("tglWslAll").onclick = async () => {
 if ($("inLang")) {
   $("inLang").addEventListener("change", () => {
     setLang($("inLang").value);
+    renderUpdateStatus();
+    renderPacHint();
     api.call("save_config", { lang });
     toast(t("langSet"), "ok");
   });
@@ -1456,15 +1488,43 @@ async function boot() {
 
 /* One update check per UI session, fired after boot. The backend call has a
    5s timeout and the result is cached there for 10 min; offline users see
-   nothing (the "error" status is silent by design). */
+   nothing (the "error" status is silent by design). The result is also kept
+   in memory for the settings page's persistent status row — never persisted
+   to config.json. */
 let updateChecked = false;
+let updateInfo = null;
 function checkUpdateOnce() {
   if (updateChecked) return;
   updateChecked = true;
   api.call("check_update").then((r) => {
+    updateInfo = r || null;
+    renderUpdateStatus();
     if (r && r.status === "update" && r.latest)
       toast(t("updateAvail", { latest: r.latest }), "");
   }).catch(() => {});
+}
+function renderUpdateStatus() {
+  const el = $("updateStatus"), dl = $("btnUpdateDl");
+  if (!el) return;
+  const r = updateInfo;
+  if (!r) el.textContent = t("updateUnknown");
+  else if (r.status === "latest") el.textContent = t("updateLatest");
+  else if (r.status === "update") el.textContent = t("updateAvailStatus", { latest: r.latest || "" });
+  else el.textContent = t("updateError");
+  if (dl) dl.hidden = !(r && r.status === "update");
+}
+async function doUpdateCheck() {
+  const btn = $("btnUpdateCheck"), el = $("updateStatus");
+  if (btn && btn.disabled) return;
+  if (btn) btn.disabled = true;
+  if (el) el.textContent = t("updateChecking");
+  try {
+    updateInfo = await api.call("check_update");
+  } catch (_) {
+    updateInfo = { status: "error" };
+  }
+  renderUpdateStatus();
+  if (btn) btn.disabled = false;
 }
 
 function probeWslCounts() {

@@ -36,9 +36,11 @@ WSL endpoints can target all user distributions or only the default distro; narr
 - WSL2 NAT-aware host gateway rewriting; mirrored mode keeps loopback.
 - Automatic `NO_PROXY` preservation for local traffic.
 - Read-back of actual endpoint state so a failed write does not leave a misleading toggle.
+- PAC awareness: when an `AutoConfigURL` is registered, a hint under the system-proxy row warns that browsers may follow the PAC script instead of the static proxy.
 - Connectivity tests through the configured proxy source, plus a one-click **Test all** that probes every channel of the current page at once.
 - Restore-before-overwrite semantics: an existing different proxy is stashed and restored when ProxyManager disables its own setting.
 - Tray with a live enabled-endpoint count and one-click enable/disable all, autostart, always-on-top, theme/background settings and optional clear-on-quit behavior.
+- Update check with a persistent status row in Settings, a re-check button and a one-click link to the releases download page.
 
 ## Requirements
 

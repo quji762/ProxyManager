@@ -72,3 +72,70 @@ def test_result_cached_for_repeated_calls():
         api.check_update()
         api.check_update()
     assert m.call_count == 1
+
+
+# ── open_release_page: fixed destination, no open-redirect surface ──────────
+_RELEASES = "https://github.com/quji762/ProxyManager/releases"
+
+
+def test_open_release_page_takes_no_url_argument():
+    import inspect
+    params = list(inspect.signature(Api.open_release_page).parameters)
+    assert params == ["self"], (
+        "open_release_page must not accept a caller-supplied URL — that "
+        "would turn the bridge into an open redirect")
+
+
+def test_open_release_page_uses_fixed_url_without_cache():
+    api = _api()
+    with patch("webbrowser.open", return_value=True) as m:
+        assert api.open_release_page() is True
+    m.assert_called_once_with(_RELEASES)
+
+
+def test_open_release_page_prefers_cached_repo_url():
+    api = _api()
+    tag_url = _RELEASES + "/tag/v9.9.9"
+    Api._UPDATE_CACHE = (0.0, {"status": "update", "url": tag_url})
+    with patch("webbrowser.open", return_value=True) as m:
+        api.open_release_page()
+    m.assert_called_once_with(tag_url)
+
+
+def test_open_release_page_rejects_foreign_cached_url():
+    api = _api()
+    for bad in ("https://evil.example/phish",
+                "https://github.com/quji762/ProxyManager.evil/x",
+                "http://github.com/quji762/ProxyManager/releases"):
+        Api._UPDATE_CACHE = (0.0, {"status": "update", "url": bad})
+        with patch("webbrowser.open", return_value=True) as m:
+            api.open_release_page()
+        m.assert_called_once_with(_RELEASES)
+
+
+def test_open_release_page_returns_false_on_browser_failure():
+    api = _api()
+    with patch("webbrowser.open", side_effect=OSError("no browser")), \
+         patch("js_api.pm.log_exception") as log:
+        assert api.open_release_page() is False
+    log.assert_called_once()
+
+
+# ── refresh_item("pac"): read-only PAC awareness, sys shape unchanged ───────
+def test_refresh_item_pac_returns_extended_sys_shape():
+    api = _api()
+    ex = {"url": "127.0.0.1:7890",
+          "autoconfig_url": "http://wpad/wpad.dat", "pac": True}
+    with patch("js_api.pm.get_sys_proxy_ex", return_value=ex) as m:
+        assert api.refresh_item("pac") == ex
+    m.assert_called_once_with()
+
+
+def test_refresh_item_sys_shape_unchanged():
+    """The sys probe must keep returning a plain string — the endpoint
+    list and the test chip consume it positionally."""
+    api = _api()
+    with patch("js_api.pm.get_sys_proxy", return_value="127.0.0.1:7890"):
+        r = api.refresh_item("sys")
+    assert r == "127.0.0.1:7890"
+    assert isinstance(r, str)

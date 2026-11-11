@@ -463,6 +463,10 @@ class Api:
                     "vars": pm.get_ps_proxy_vars()}
         if which == "sys":
             return pm.get_sys_proxy()
+        if which == "pac":
+            # Read-only PAC awareness for the WinINET row: a registered
+            # AutoConfigURL means browsers may ignore the static proxy.
+            return pm.get_sys_proxy_ex()
         if which == "wsl":
             ip, block, wgit = pm.get_wsl_ip_and_block()
             return {"ip": ip, "on": bool(pm.get_wsl_status(block)),
@@ -1832,6 +1836,26 @@ class Api:
             return _result("latest")
         except Exception as e:
             return _result("error", error=str(e)[:120])
+
+    def open_release_page(self):
+        """Open the GitHub releases page in the system browser.
+
+        Takes NO url argument on purpose: the only destinations are the
+        fixed repository releases URL and the html_url of the cached
+        check_update result, so a compromised/buggy frontend cannot turn
+        this into an open-redirect to an arbitrary site."""
+        import webbrowser
+        url = "https://github.com/quji762/ProxyManager/releases"
+        cached = type(self)._UPDATE_CACHE
+        if cached and isinstance(cached[1], dict):
+            candidate = str(cached[1].get("url") or "")
+            if candidate.startswith("https://github.com/quji762/ProxyManager/"):
+                url = candidate
+        try:
+            return bool(webbrowser.open(url))
+        except Exception:
+            pm.log_exception("open_release_page")
+            return False
 
     def copy(self, text):
         """Clipboard fallback for pages where navigator.clipboard is

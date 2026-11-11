@@ -163,6 +163,7 @@
         <div class="kv"><span class="k">HTTPS_PROXY</span><span class="v copyable" id="vPsHttps" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="ps_https" data-i18n="test" data-i18n-tip="tipTestHttps" data-tip="通过 HTTPS_PROXY 发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">ALL_PROXY</span><span class="v copyable" id="vPsAll" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="ps_all" data-i18n="test" data-i18n-tip="tipTestAll" data-tip="通过 ALL_PROXY 发起连通性测试">测试</button></div>
         <div class="kv"><span class="k" data-i18n="sysProxy">系统代理（WinINET）</span><span class="v copyable" id="vSys" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="sys" data-i18n="test" data-i18n-tip="tipTestSys" data-tip="通过系统代理发起连通性测试">测试</button></div>
+        <div class="net-hint pac-hint" id="pacHint" hidden></div>
         <div class="kv"><span class="k" data-i18n="gitGlobal">Git（git config --global）</span><span class="v copyable" id="vPsGit" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="gitwin" data-i18n="test" data-i18n-tip="tipTest" data-tip="通过该代理发起连通性测试">测试</button></div>
         <div class="group-cap" data-i18n="groupPkg">包管理器（用户级配置文件）</div>
         <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v copyable" id="vNpm" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="npm" data-i18n="test" data-i18n-tip="tipTest" data-tip="通过该代理发起连通性测试">测试</button></div>
@@ -274,6 +275,11 @@
     <div class="set-row">
       <div class="lbl"><b data-i18n="wslAllTitle">WSL 应用到所有发行版</b><span data-i18n="wslAllDesc">关闭后只写入默认发行版</span></div>
       <button type="button" class="tgl" id="tglWslAll" role="switch" aria-checked="false"></button>
+    </div>
+    <div class="set-row">
+      <div class="lbl"><b data-i18n="updateTitle">版本更新</b><span id="updateStatus">—</span></div>
+      <button class="btn small outline" id="btnUpdateCheck" data-i18n="updateRecheck">重新检查</button>
+      <button class="btn small subtle" id="btnUpdateDl" data-i18n="updateDownload" hidden>打开下载页</button>
     </div>
 
     <div class="dlg-btns">
