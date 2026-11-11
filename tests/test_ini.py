@@ -29,6 +29,16 @@ def test_ini_edit_surgical_remove_keeps_foreign_value():
     assert _ini_get(new, "https-proxy") is None
 
 
+def test_ini_edit_disable_keeps_empty_valued_line():
+    """An empty `proxy =` line is not ours (we always write a non-empty URL):
+    disable must preserve it verbatim, not drop it just because it is empty."""
+    text = "proxy =\nhttps-proxy = http://127.0.0.1:7897\n"
+    new = _ini_edit(text, ("proxy", "https-proxy"), None,
+                    equals="http://127.0.0.1:7897")
+    assert "proxy =\n" in new
+    assert _ini_get(new, "https-proxy") is None
+
+
 def test_ini_edit_section_append():
     text = "[global]\ntimeout = 15\n"
     new = _ini_edit(text, ("proxy",), "http://127.0.0.1:7897",

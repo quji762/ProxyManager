@@ -1773,7 +1773,8 @@ def _wsl_git_config_set(distro, key, value):
 
 
 def set_git_proxy(host, port, enable=True, use_wsl=False,
-                  scheme="http", user="", password="", distros=None):
+                  scheme="http", user="", password="", distros=None,
+                  raw_url=None):
     """Configure git's global http.proxy/https.proxy, either on Windows
     (use_wsl=False) or inside WSL (use_wsl=True).
 
@@ -1784,8 +1785,11 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
 
     `distros` is an explicit target list for the WSL side (callers reaching
     distros the current scope no longer covers); None keeps the scope-derived
-    _wsl_targets() behavior. Ignored when use_wsl=False."""
-    url = build_proxy_url(host, port, scheme, user, password)
+    _wsl_targets() behavior. Ignored when use_wsl=False. `raw_url` (restore
+    path) writes the user's original URL verbatim, bypassing build_proxy_url's
+    scheme/path normalization."""
+    url = raw_url if raw_url is not None \
+        else build_proxy_url(host, port, scheme, user, password)
     try:
         if use_wsl:
             errs = []
@@ -2049,10 +2053,10 @@ def _ini_edit(text, keys, url, equals, section=None, eol="\n"):
         value_part, comment = _ini_value_comment(m.group(4))
         cur = value_part.strip().strip('"').strip("'")
         if url is None:
-            if cur and cur != equals:
-                out.append(line)  # user's own value: untouched
+            if cur != equals:
+                out.append(line)  # user's own value (incl. empty): untouched
                 continue
-            continue              # our line: dropped entirely
+            continue              # our line (value == equals): dropped
         q = value_part[:1] if value_part[:1] in "\"'" else ""
         # 行尾注释原样保留：启用替换只换值，不吞掉用户写在这一行上的注释
         tail = f" {comment}{line[len(body):]}" if comment \
@@ -2115,7 +2119,9 @@ def _atomic_write_text(path, text, encoding="utf-8"):
     """Write `text` to `path` via tmp + os.replace so a mid-write failure
     (disk full, AV lock) cannot truncate the original file. Same contract
     as config_store.save_config. newline="" keeps \\r\\n verbatim."""
-    tmp = f"{path}.{os.getpid()}.tmp"
+    # pid+uuid：同进程内多线程并发写同一 path 时，仅 pid 的 tmp 名会互相
+    # 截断/覆盖；uuid 保证每次写入的临时文件唯一。
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
         with open(tmp, "w", encoding=encoding, newline="", errors="replace") as f:
             f.write(text)
@@ -2133,11 +2139,16 @@ def _atomic_write_text(path, text, encoding="utf-8"):
         raise
 
 
-def set_npm_proxy(host, port, enable=True, scheme="http", user="", password=""):
+def set_npm_proxy(host, port, enable=True, scheme="http", user="", password="",
+                  raw_url=None):
     """Write/clear npm's proxy + https-proxy in ~/.npmrc. npm re-reads this
     file on every invocation, so the next npm command picks the change up.
-    Disable is best-effort: a missing file means nothing to clean up."""
-    url = build_proxy_url(host, port, scheme, user, password)
+    Disable is best-effort: a missing file means nothing to clean up.
+    `raw_url` (restore path) writes the user's original URL verbatim instead
+    of re-building it — build_proxy_url would normalize https/socks4 and drop
+    any path, degrading the value being put back."""
+    url = raw_url if raw_url is not None \
+        else build_proxy_url(host, port, scheme, user, password)
     try:
         try:
             text, _enc = _read_ini(NPM_CONFIG_PATH)
@@ -2169,13 +2180,15 @@ def get_pip_proxy():
     return _ini_get(text, "proxy", section="global") or UNSET
 
 
-def set_pip_proxy(host, port, enable=True, scheme="http", user="", password=""):
+def set_pip_proxy(host, port, enable=True, scheme="http", user="", password="",
+                  raw_url=None):
     """Write/clear the proxy key pip reads: `proxy` under [global] (--proxy is
     a general option in pip, so global.proxy applies to every pip command,
     not just `pip install`). File-based, so it applies to every interpreter's
     pip including `py -m pip` without pip.exe on PATH. Disable is
-    best-effort."""
-    url = build_proxy_url(host, port, scheme, user, password)
+    best-effort. `raw_url` writes the user's original URL verbatim (restore)."""
+    url = raw_url if raw_url is not None \
+        else build_proxy_url(host, port, scheme, user, password)
     path = _pip_config_path()
     try:
         try:

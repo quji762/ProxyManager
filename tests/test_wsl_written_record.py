@@ -29,12 +29,13 @@ class FakeWslEndpoint:
         return self.url or pm.UNSET
 
     def setter(self, host, port, enable=True, scheme="http",
-               user="", password=""):
+               user="", password="", raw_url=None):
         self.calls.append((host, str(port), enable))
         if enable:
-            # js_api 传入的已是解析后的 host；不再做二次 NAT
-            self.url = pm.build_proxy_url(host, port, scheme, user,
-                                          password)
+            # js_api 传入的已是解析后的 host；不再做二次 NAT。raw_url（恢复
+            # 路径）逐字写回，与真实 setter 一致。
+            self.url = raw_url if raw_url is not None \
+                else pm.build_proxy_url(host, port, scheme, user, password)
         elif self.url == pm.build_proxy_url(host, port, scheme, user,
                                             password):
             self.url = None  # surgical unset, same contract as pm

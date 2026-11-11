@@ -1080,9 +1080,13 @@ class Api:
         parsed = self._adopt_parsed(prev)
         if not parsed:
             return None
+        # 逐字写回用户原 URL：parsed 已被 parse_proxy_url 归一化（https→http、
+        # socks4→socks5、丢 path），直接用它的分量重建会降级用户原代理。raw_url
+        # 让 setter 写回暂存里的原始字符串（_restoring=True 不认领所有权）。
         r = self.do_toggle(
             target, True, parsed["host"], parsed["port"],
-            parsed["scheme"], parsed["user"], parsed["password"], True)
+            parsed["scheme"], parsed["user"], parsed["password"], True,
+            raw_url=prev)
         return self._finish_restore(target, r)
 
     def _finish_restore(self, target, r):
@@ -1246,15 +1250,17 @@ class Api:
             return True
 
     def do_toggle(self, target, on, host=None, port=None,
-                  scheme=None, user=None, password=None, _restoring=False):
+                  scheme=None, user=None, password=None, _restoring=False,
+                  raw_url=None):
         """Serialize against the tray-quit clear (clear_all_endpoints runs
         on the pystray thread while js_api workers toggle in parallel)."""
         with self._endpoint_mutation_lock:
             return self._do_toggle(target, on, host, port, scheme, user,
-                                   password, _restoring)
+                                   password, _restoring, raw_url)
 
     def _do_toggle(self, target, on, host=None, port=None,
-                   scheme=None, user=None, password=None, _restoring=False):
+                   scheme=None, user=None, password=None, _restoring=False,
+                   raw_url=None):
         # Enabling requires a valid address; disabling must never be blocked
         # by one (ps/wsl removal ignores the address, and git falls back to
         # the managed/detected URL), so only validate on the enable path.
@@ -1336,7 +1342,9 @@ class Api:
                     nat_note = self._wsl_nat_note(h, p, gh, gp)
                     if nat_note:
                         notes.append(nat_note)
-                ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl, **kw)
+                gru = {"raw_url": raw_url} if raw_url is not None else {}
+                ret = pm.set_git_proxy(gh, gp, True, use_wsl=use_wsl,
+                                       **gru, **kw)
                 if ret is not True:
                     return _fail(ret)
                 self._git_managed[target] = self._managed_url(gh, gp, **kw)
@@ -1360,16 +1368,32 @@ class Api:
             setter_name, label, detected_name, on_note = self._ENDPOINT_INFO[target]
             setter = getattr(pm, setter_name)
             if not on:
-                h, p, kw = self._detected_hpk(getattr(pm, detected_name)(), h, p, kw)
+                if target in ("ps", "npm", "pip") and self.applied_host:
+                    # 这些 setter 是外科式的（set_ps_proxy 只删 cur==url 的
+                    # 键；_ini_edit 只删值等于 equals 的行）。卸载 URL 必须用
+                    # 本工具最后写入的 applied 地址，而不是当前检测值：用检测
+                    # 值重建会让守卫恒相等，用户启用后手工改成的代理会在关闭
+                    # 时被一并删掉（违反"disable 只移除本工具的值"）。无 applied
+                    # 记录时退回检测值（沿用既有行为，quit-clear 另有归属门）。
+                    h, p = self.applied_host, str(self.applied_port)
+                    kw = dict(self.applied_kw)
+                else:
+                    h, p, kw = self._detected_hpk(
+                        getattr(pm, detected_name)(), h, p, kw)
+            # raw_url（恢复路径）只传给支持逐字写入的 npm/pip 系 setter，且仅
+            # 在确有值时附加——正常开关不多加 kwarg，ps/sys 也不接受该参数。
+            ru = {"raw_url": raw_url} \
+                if raw_url is not None \
+                and target in ("npm", "pip", "npmwsl", "pipwsl") else {}
             if on and target in ("npmwsl", "pipwsl"):
                 # 与 gitwsl 同构：先解析网关，再写入，并用同一 (wh, wp) 记录。
                 wh, wp = self._wsl_url_target(h, p)
                 nat_note = self._wsl_nat_note(h, p, wh, wp)
                 if nat_note:
                     notes.append(nat_note)
-                ret = setter(wh, wp, True, **kw)
+                ret = setter(wh, wp, True, **ru, **kw)
             else:
-                ret = setter(h, p, on, **kw)
+                ret = setter(h, p, on, **ru, **kw)
             if target == "sys":
                 ok, sys_note = self._sys_result(ret)
                 if not ok:
@@ -2048,7 +2072,8 @@ class Api:
         try:
             subprocess_run = __import__("subprocess").run
             subprocess_run(["clip.exe"], input=(text + "\n").encode("utf-8"),
-                           creationflags=0x08000000, check=True)  # CREATE_NO_WINDOW
+                           creationflags=0x08000000, check=True,  # CREATE_NO_WINDOW
+                           timeout=5)  # 剪贴板被占用时 clip.exe 可能挂起
             return True
         except Exception:
             pm.log_exception("copy")
