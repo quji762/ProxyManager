@@ -49,6 +49,25 @@ def test_speed_full_migration_persisted(tmp_path, monkeypatch):
     assert raw.get("speed_full") == 40
 
 
+def test_schema_version_stamped_and_idempotent(tmp_path, monkeypatch):
+    """Legacy configs (no version) get stamped and persisted once; a current
+    config is not rewritten, and re-running the migrator is a no-op."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"git": True, "speed_full": 5}), encoding="utf-8")
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(cfg_file))
+    monkeypatch.setattr(config_store, "APP_DIR", str(tmp_path))
+    config_store.load_config()
+    raw = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
+
+    assert config_store._migrate_config(
+        {"schema_version": config_store.CONFIG_SCHEMA_VERSION}) is False
+    v0 = {}
+    assert config_store._migrate_config(v0) is True
+    assert v0["schema_version"] == config_store.CONFIG_SCHEMA_VERSION
+    assert config_store._migrate_config(v0) is False
+
+
 def test_save_preserves_unknown_keys(tmp_path, monkeypatch):
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(json.dumps({"future_flag": True, "port": "1080"}), encoding="utf-8")

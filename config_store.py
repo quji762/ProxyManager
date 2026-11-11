@@ -212,6 +212,7 @@ _SAVE_KEYS = (
     "residual",
     "wsl_written",
     "presets",
+    "schema_version",
     "win_rect", "win_max",
 )
 
@@ -392,6 +393,40 @@ def _recover_from_bak():
     return data, "bak"
 
 
+# Bumped whenever a load-time migration changes the meaning of an on-disk
+# key. A config without the key is treated as version 0 (written before this
+# framework existed). Each migration step below must be idempotent — load runs
+# on every start, including on configs that are already current.
+CONFIG_SCHEMA_VERSION = 2
+
+
+def _migrate_config(cfg):
+    """Apply ordered, idempotent schema migrations to a raw on-disk config.
+
+    Returns True when anything changed (or the version was stamped), so
+    load_config can persist the upgraded file once. Keying off the version
+    instead of re-inspecting every key each load keeps future format changes
+    deterministic and greppable.
+    """
+    try:
+        version = int(cfg.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    changed = False
+    # v1: the single legacy `git` switch split into git_win / git_wsl.
+    if version < 1 and "git" in cfg and "git_win" not in cfg:
+        cfg["git_win"] = cfg["git_wsl"] = bool(cfg["git"])
+        changed = True
+    # v2: the old 5 s "full speed" default became 40.
+    if version < 2 and cfg.get("speed_full") == 5:
+        cfg["speed_full"] = 40
+        changed = True
+    if version != CONFIG_SCHEMA_VERSION:
+        cfg["schema_version"] = CONFIG_SCHEMA_VERSION
+        changed = True
+    return changed
+
+
 def load_config():
     global _load_warning
     defaults = {
@@ -427,8 +462,7 @@ def load_config():
     if source in ("bak", "corrupt") and _load_warning is None:
         _load_warning = source
 
-    if "git" in cfg and "git_win" not in cfg:
-        cfg["git_win"] = cfg["git_wsl"] = bool(cfg["git"])
+    migrated = _migrate_config(cfg)
 
     out = dict(defaults)
     for k in ("host", "port", "mode", "bg_path", "scheme", "user", "password", "lang"):
@@ -484,10 +518,6 @@ def load_config():
     except (TypeError, ValueError):
         pass
     try:
-        migrated = False
-        if cfg.get("speed_full") == 5:
-            cfg["speed_full"] = 40
-            migrated = True
         s = float(cfg.get("speed_full", 40))
         out["speed_full"] = round(s, 1) if 0 < s <= 100000 else 40
     except (TypeError, ValueError):
@@ -513,7 +543,11 @@ def load_config():
     out["applied"] = _load_applied(cfg.get("applied"))
     out["residual"] = _load_residual(cfg.get("residual"))
     out["presets"] = _load_presets(cfg.get("presets"))
-    if migrated:
+    out["schema_version"] = CONFIG_SCHEMA_VERSION
+    # Persist an upgrade only when a real file was read: a corrupt config was
+    # just quarantined and a missing one never existed, so re-saving here would
+    # silently recreate config.json and mask the load warning.
+    if migrated and source in ("file", "bak"):
         try:
             save_config(out)
         except Exception:
