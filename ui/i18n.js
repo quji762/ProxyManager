@@ -43,6 +43,7 @@ const I18N = {
     epCapWslDef: "参与切换 · 仅默认发行版",
     epTitleWin: "Windows 代理端点",
     epTitleWsl: "WSL 代理端点",
+    laneTabsLabel: "代理渠道",
     railOn: "全部开启",
     railOff: "全部关闭",
     tipRailOn: "批量开启当前页的全部端点",
@@ -303,6 +304,7 @@ const I18N = {
     epCapWslDef: "Switched together · default distro only",
     epTitleWin: "Windows endpoints",
     epTitleWsl: "WSL endpoints",
+    laneTabsLabel: "Proxy channel",
     railOn: "Enable all",
     railOff: "Disable all",
     tipRailOn: "Enable every endpoint on this page",
@@ -558,6 +560,9 @@ function applyI18n() {
   });
   document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
     el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  document.querySelectorAll("[data-i18n-aria]").forEach((el) => {
+    el.setAttribute("aria-label", t(el.dataset.i18nAria));
   });
   document.title = t("appName");
   const bg = document.getElementById("bgName");

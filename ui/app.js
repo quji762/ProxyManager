@@ -244,6 +244,7 @@ window.addEventListener("drop", (e) => { if (_isFileDrag(e)) e.preventDefault();
    queued: overlapping confirmations would otherwise swallow the first. */
 const _dlgQueue = [];
 let _dlgOpen = false;
+let _settingsPrevFocus = null;
 function confirmDlg(text, okText) {
   okText = okText || t("continue");
   return new Promise((resolve) => {
@@ -270,6 +271,28 @@ function _pumpDlg() {
   $("dlgOk").onclick = () => done(true);
   $("dlgCancel").onclick = () => done(false);
 }
+
+/* Modal focus trap: keep Tab cycling inside the open dialog so keyboard users
+   cannot reach the obscured background. The confirm dialog takes priority over
+   settings because it can be opened on top of it (e.g. backup restore). */
+const _FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+function _trapFocus(e) {
+  if (e.key !== "Tab") return;
+  const ov = _dlgOpen ? $("overlay")
+    : ($("settingsOv").classList.contains("show") ? $("settingsOv") : null);
+  if (!ov) return;
+  const items = [...ov.querySelectorAll(_FOCUSABLE)]
+    .filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey && (active === first || !ov.contains(active))) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (active === last || !ov.contains(active))) {
+    e.preventDefault(); first.focus();
+  }
+}
+document.addEventListener("keydown", _trapFocus);
 
 /* ═══════════════ State ═══════════════ */
 const ICONS = {
@@ -308,18 +331,27 @@ function epCard(d) {
       <div class="name-row"><span class="name">${t(d.nameKey)}</span>${badge}</div>
       <div class="desc">${t(d.descKey)} · <code id="epv-${d.id}">${esc_(val)}</code></div>
     </div>
-    <button type="button" class="tgl ${on ? "on" : ""}" id="sw-${d.id}" data-ep="${d.id}" role="switch" aria-checked="${on}" data-tip="${on ? t("clickOff") : t("clickOn")}"></button>
+    <button type="button" class="tgl ${on ? "on" : ""}" id="sw-${d.id}" data-ep="${d.id}" role="switch" aria-checked="${on}" aria-label="${t(d.nameKey)}" data-tip="${on ? t("clickOff") : t("clickOn")}"></button>
   </div>`;
 }
 function renderEndpoints() {
   const host = $("epList");
+  // innerHTML replacement drops keyboard focus; remember a focused switch so
+  // a keyboard user toggling an endpoint stays on it after the re-render.
+  const active = document.activeElement;
+  const focusId = active && host.contains(active) && active.id ? active.id : null;
   host.innerHTML = EP_DEFS.filter((d) => d.lane === curLane).map(epCard).join("");
+  if (focusId) {
+    const back = $(focusId);
+    if (back && back !== document.activeElement) back.focus();
+  }
   // Click handlers are delegated on #epList (see Wiring section) so they
   // survive innerHTML replacement during refreshAll without stale closures.
   $("epCap").textContent = curLane === "win"
     ? t("epCapWin")
     : (cfg.wsl_all_distros !== false ? t("epCapWslAll") : t("epCapWslDef"));
   $("epTitle").textContent = curLane === "win" ? t("epTitleWin") : t("epTitleWsl");
+  host.setAttribute("aria-labelledby", curLane === "win" ? "tabWin" : "tabWsl");
   updateHero();
 }
 
@@ -331,6 +363,9 @@ function setLane(lane) {
   $("tabWsl").classList.toggle("active", lane === "wsl");
   $("tabWin").setAttribute("aria-selected", String(lane === "win"));
   $("tabWsl").setAttribute("aria-selected", String(lane === "wsl"));
+  // Roving tabindex: only the active tab is in the tab order (tablist pattern).
+  $("tabWin").tabIndex = lane === "win" ? 0 : -1;
+  $("tabWsl").tabIndex = lane === "wsl" ? 0 : -1;
   $("netWin").hidden = lane !== "win";
   $("netWsl").hidden = lane !== "wsl";
   $("varsWin").hidden = lane !== "win";
@@ -1156,6 +1191,7 @@ const saveSettings = debounce(() => {
 }, 350);
 
 async function openSettings() {
+  _settingsPrevFocus = document.activeElement;
   const c = await api.call("get_config");
   cfg.bg_dim = c.bg_dim ?? 0.45; cfg.card_alpha = c.card_alpha ?? 0.92;
   $("rgDim").value = Math.round(cfg.bg_dim * 100);
@@ -1173,10 +1209,12 @@ async function openSettings() {
     applyBg(c.bg_path, bg && bg.data, cfg.bg_dim);
   } else applyBg("", null, cfg.bg_dim);
   $("settingsOv").classList.add("show");
+  $("settingsClose").focus();
 }
 function closeSettings() {
   $("settingsOv").classList.remove("show");
   saveSettings();
+  if (_settingsPrevFocus && _settingsPrevFocus.isConnected) _settingsPrevFocus.focus();
 }
 $("settingsOv").addEventListener("mousedown", (e) => {
   if (e.target === $("settingsOv")) closeSettings();
@@ -1553,7 +1591,10 @@ $("profileAddBtn").onclick = async () => {
 };
 $("profileAddIn").addEventListener("keydown", (e) => { if (e.key === "Enter") $("profileAddBtn").click(); });
 document.addEventListener("keydown", (e) => {
-  if (!_dlgOpen) return;
+  if (!_dlgOpen) {
+    if (e.key === "Escape" && $("settingsOv").classList.contains("show")) closeSettings();
+    return;
+  }
   if (e.key === "Escape") $("dlgCancel").click();
   // Enter confirms; skipped while the settings dialog is open (its inputs
   // have their own Enter handling).

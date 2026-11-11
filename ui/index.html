@@ -62,15 +62,15 @@
       <div class="hero-row">
         <div class="hero-line" id="heroLine"><b>0 / 9</b> <span class="dim">个端点已启用</span></div>
         <div class="cfg-row">
-          <div class="field"><label data-i18n="scheme">协议</label>
+          <div class="field"><label for="inScheme" data-i18n="scheme">协议</label>
             <select id="inScheme">
               <option value="http">HTTP</option>
               <option value="socks5">SOCKS5</option>
               <option value="socks5h">SOCKS5h</option>
             </select>
           </div>
-          <div class="field"><label data-i18n="host">代理地址</label><input id="inHost" spellcheck="false" autocomplete="off"></div>
-          <div class="field"><label data-i18n="port">端口</label><input id="inPort" class="w-port" spellcheck="false" autocomplete="off"></div>
+          <div class="field"><label for="inHost" data-i18n="host">代理地址</label><input id="inHost" spellcheck="false" autocomplete="off"></div>
+          <div class="field"><label for="inPort" data-i18n="port">端口</label><input id="inPort" class="w-port" spellcheck="false" autocomplete="off"></div>
         </div>
       </div>
       <button type="button" class="auth-toggle" id="authToggle" aria-expanded="false" aria-controls="authRow">
@@ -78,8 +78,8 @@
         <span data-i18n="authToggle">代理认证</span><span class="dim" data-i18n="authOptional">可选</span>
       </button>
       <div class="cfg-row auth-row" id="authRow" hidden>
-        <div class="field"><label><span data-i18n="user">用户名</span> <span class="dim" data-i18n="authOptional">可选</span></label><input id="inUser" class="w-auth" spellcheck="false" autocomplete="off"></div>
-        <div class="field"><label><span data-i18n="password">密码</span> <span class="dim" data-i18n="authOptional">可选</span></label><input id="inPass" class="w-auth" type="password" spellcheck="false" autocomplete="off"></div>
+        <div class="field"><label for="inUser"><span data-i18n="user">用户名</span> <span class="dim" data-i18n="authOptional">可选</span></label><input id="inUser" class="w-auth" spellcheck="false" autocomplete="off"></div>
+        <div class="field"><label for="inPass"><span data-i18n="password">密码</span> <span class="dim" data-i18n="authOptional">可选</span></label><input id="inPass" class="w-auth" type="password" spellcheck="false" autocomplete="off"></div>
       </div>
       <div class="ports-wrap">
         <div class="port-chips" id="portChips"></div>
@@ -139,7 +139,7 @@
     <h2 id="epTitle">代理端点</h2><span class="cap" id="epCap">参与切换的端点</span>
   </div>
   <div class="ep-wrap">
-    <div class="ep-list" id="epList"></div>
+    <div class="ep-list" id="epList" role="tabpanel" aria-labelledby="tabWin"></div>
     <button type="button" class="vt-rail" id="vtRailOn" data-i18n-tip="tipRailOn" data-tip="批量开启当前页的全部端点">
       <div class="vt-knob"></div>
       <div class="vt-word" data-i18n="railOn">全部开启</div>
@@ -202,12 +202,12 @@
     <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7v10M5 10v4M15 4v16M19 9v6"/></svg></div>
     <div><div class="lbl" data-i18n="sbPort">代理端口</div><div class="val" id="sbPort"><span class="dot n"></span>检测中</div></div>
   </div>
-  <div class="lane-tabs" id="laneTabs" role="tablist">
-    <button class="lane-tab active" id="tabWin" role="tab" aria-selected="true" data-i18n-tip="tipTabWin" data-tip="Windows 侧的 PowerShell / Git / npm / pip">
+  <div class="lane-tabs" id="laneTabs" role="tablist" aria-label="代理渠道" data-i18n-aria="laneTabsLabel">
+    <button class="lane-tab active" id="tabWin" role="tab" aria-selected="true" aria-controls="epList" tabindex="0" data-i18n-tip="tipTabWin" data-tip="Windows 侧的 PowerShell / Git / npm / pip">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
       <span>Win</span><span class="cnt" id="cntWin">0/5</span>
     </button>
-    <button class="lane-tab" id="tabWsl" role="tab" aria-selected="false" data-i18n-tip="tipTabWsl" data-tip="WSL 各发行版的终端 / Git / npm / pip">
+    <button class="lane-tab" id="tabWsl" role="tab" aria-selected="false" aria-controls="epList" tabindex="-1" data-i18n-tip="tipTabWsl" data-tip="WSL 各发行版的终端 / Git / npm / pip">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M7 9l2.5 2.5L7 14M12 14h5"/></svg>
       <span>WSL</span><span class="cnt" id="cntWsl">–/4</span>
     </button>
@@ -237,7 +237,7 @@
 
 <!-- ════════ Confirm dialog ════════ -->
 <div class="overlay" id="overlay">
-  <div class="card dialog">
+  <div class="card dialog" role="dialog" aria-modal="true" aria-labelledby="dlgTitleText" aria-describedby="dlgText">
     <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span id="dlgTitleText" data-i18n="confirmTitle">确认操作</span></h4>
     <p id="dlgText"></p>
     <div class="dlg-btns">
@@ -249,8 +249,8 @@
 
 <!-- ════════ Settings dialog ════════ -->
 <div class="overlay" id="settingsOv">
-  <div class="card dialog settings">
-    <h4><svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span data-i18n="settings">设置</span><span id="appVersion"></span></h4>
+  <div class="card dialog settings" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <h4><svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span id="settingsTitle" data-i18n="settings">设置</span><span id="appVersion"></span></h4>
 
     <div class="set-row">
       <div class="lbl"><b data-i18n="lang">界面语言</b><span data-i18n="langDesc">立即切换，写入配置</span></div>
@@ -266,26 +266,26 @@
       <button class="btn small subtle" id="bgClear" data-i18n="bgClear">恢复默认</button>
     </div>
     <div class="set-row">
-      <div class="lbl"><b data-i18n="dimTitle">背景遮罩强度</b><span data-i18n="dimDesc">压暗背景图片，保证前景可读性</span></div>
-      <input type="range" id="rgDim" min="0" max="80" step="5">
+      <div class="lbl"><b id="lblDim" data-i18n="dimTitle">背景遮罩强度</b><span data-i18n="dimDesc">压暗背景图片，保证前景可读性</span></div>
+      <input type="range" id="rgDim" min="0" max="80" step="5" aria-labelledby="lblDim">
       <span class="range-val" id="rgDimVal">45%</span>
     </div>
     <div class="set-row">
-      <div class="lbl"><b data-i18n="alphaTitle">卡片不透明度</b><span data-i18n="alphaDesc">数值越低，卡片越通透（磨砂感越强）</span></div>
-      <input type="range" id="rgAlpha" min="50" max="100" step="2">
+      <div class="lbl"><b id="lblAlpha" data-i18n="alphaTitle">卡片不透明度</b><span data-i18n="alphaDesc">数值越低，卡片越通透（磨砂感越强）</span></div>
+      <input type="range" id="rgAlpha" min="50" max="100" step="2" aria-labelledby="lblAlpha">
       <span class="range-val" id="rgAlphaVal">92%</span>
     </div>
     <div class="set-row">
-      <div class="lbl"><b data-i18n="autoTitle">开机自动启动</b><span data-i18n="autoDesc">登录后在托盘运行，不弹出主窗口</span></div>
-      <button type="button" class="tgl" id="tglAuto" role="switch" aria-checked="false"></button>
+      <div class="lbl"><b id="lblAuto" data-i18n="autoTitle">开机自动启动</b><span data-i18n="autoDesc">登录后在托盘运行，不弹出主窗口</span></div>
+      <button type="button" class="tgl" id="tglAuto" role="switch" aria-checked="false" aria-labelledby="lblAuto"></button>
     </div>
     <div class="set-row">
-      <div class="lbl"><b data-i18n="quitClearTitle">退出时关闭代理</b><span data-i18n="quitClearDesc">托盘「退出」时关闭本工具写入的代理，并恢复覆盖前的值</span></div>
-      <button type="button" class="tgl" id="tglQuitClear" role="switch" aria-checked="false"></button>
+      <div class="lbl"><b id="lblQuitClear" data-i18n="quitClearTitle">退出时关闭代理</b><span data-i18n="quitClearDesc">托盘「退出」时关闭本工具写入的代理，并恢复覆盖前的值</span></div>
+      <button type="button" class="tgl" id="tglQuitClear" role="switch" aria-checked="false" aria-labelledby="lblQuitClear"></button>
     </div>
     <div class="set-row">
-      <div class="lbl"><b data-i18n="wslAllTitle">WSL 应用到所有发行版</b><span data-i18n="wslAllDesc">关闭后只写入默认发行版</span></div>
-      <button type="button" class="tgl" id="tglWslAll" role="switch" aria-checked="false"></button>
+      <div class="lbl"><b id="lblWslAll" data-i18n="wslAllTitle">WSL 应用到所有发行版</b><span data-i18n="wslAllDesc">关闭后只写入默认发行版</span></div>
+      <button type="button" class="tgl" id="tglWslAll" role="switch" aria-checked="false" aria-labelledby="lblWslAll"></button>
     </div>
     <div class="set-row">
       <div class="lbl"><b data-i18n="updateTitle">版本更新</b><span id="updateStatus">—</span></div>
@@ -304,8 +304,8 @@
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
-<div class="tip" id="tooltip"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<div class="tip" id="tooltip" role="tooltip"></div>
 
 <script src="i18n.js"></script>
 <script src="app.js"></script>
