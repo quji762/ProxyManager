@@ -75,7 +75,7 @@ class FakeWsl:
         # `sed -n` 是读命令独有前缀（写/禁用走 apply_posix/awk，读文件走 if [ -f ）。
         if script.startswith("sed -n '/"):
             R.stdout = BLOCK if distro in self.block_distros else b""
-        elif script.startswith("dir=$(dirname"):
+        elif ".pmXXXXXX" in script:
             pass                       # atomic push → success
         elif script.startswith('if [ -f "'):
             data = self.files.get(script.split('"')[1])
@@ -534,7 +534,7 @@ def _stateful_wsl_files(initial):
                 R.returncode = 3
             else:
                 R.stdout = data
-        elif script.startswith("dir=$(dirname"):
+        elif ".pmXXXXXX" in script:
             if ("push", d) in run.timeouts:
                 raise subprocess.TimeoutExpired(cmd, 15)
             files[d] = kw.get("input")
