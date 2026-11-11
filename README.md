@@ -26,19 +26,19 @@ WSL:
 - npm user proxy
 - pip user proxy
 
-WSL endpoints can target all user distributions or only the default distro.
+WSL endpoints can target all user distributions or only the default distro; narrowing to the default distro removes ProxyManager's own settings from the distros that leave the scope.
 
 ## Key features
 
 - HTTP, SOCKS5 and SOCKS5H endpoints with optional credentials.
 - Independent Win/WSL switches plus page-level enable/disable actions.
-- Port presets and re-application of currently enabled endpoints.
+- Port presets and re-application of currently enabled endpoints; a partial failure rolls back what was changed and reports which endpoint failed and why.
 - WSL2 NAT-aware host gateway rewriting; mirrored mode keeps loopback.
 - Automatic `NO_PROXY` preservation for local traffic.
 - Read-back of actual endpoint state so a failed write does not leave a misleading toggle.
-- Connectivity tests through the configured proxy source.
+- Connectivity tests through the configured proxy source, plus a one-click **Test all** that probes every channel of the current page at once.
 - Restore-before-overwrite semantics: an existing different proxy is stashed and restored when ProxyManager disables its own setting.
-- Tray, autostart, always-on-top, theme/background settings and optional clear-on-quit behavior.
+- Tray with a live enabled-endpoint count and one-click enable/disable all, autostart, always-on-top, theme/background settings and optional clear-on-quit behavior.
 
 ## Requirements
 

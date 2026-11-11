@@ -31,7 +31,7 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 - WSL2 NAT 下，Windows loopback 通常不可直接从 distro 使用；按现有逻辑解析 host gateway。
 - mirrored networking 可继续使用 loopback。
 - Docker/基础设施类 distro 继续跳过，不把它们当普通用户发行版。
-- 设置可选择 all user distros 或 default distro；读写和恢复路径遵守相同 scope。
+- 设置可选择 all user distros 或 default distro；读写和恢复路径遵守相同 scope。由 all 收窄到 default 时，会按标记/记录的 URL 外科式清掉离开 scope 的发行版里本工具自己写入的配置（默认发行版不动）。
 - shell block 只管理本工具自己的标记区域，禁止覆盖整个 `.bashrc`/`.zshrc`。
 - `Restart WSL` 是破坏性较强的操作：会终止 distro 内进程，UI 文案/确认不能弱化。
 
@@ -48,7 +48,7 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 配置至少区分：
 
 - 用户当前编辑的 host/port/scheme/user/password；
-- `applied`：真正写到端点的最后一组值；
+- `applied`：真正写到端点的最后一组值；没有 `applied` 记录表示本工具从未写入过端点，不得用表单地址回填。
 - `restore`：覆盖其他代理前保存的值。
 
 端口 quick-switch 只能重新应用“当前确实由 ProxyManager 管理并开启”的端点。
