@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Regression: NAT rewrite must be resolved ONCE per operation so the
 written URL, the wsl_written record, and the user-facing note cannot
 disagree. Also covers git half-write rollback, multi-distro read
@@ -409,9 +408,11 @@ class TestWslSnapshotHelpers:
                 stdout = ""
             return R()
 
-        with patch.object(pm.subprocess, "run", side_effect=fake_run):
-            with pytest.raises(OSError):
-                pm._wsl_git_config_get("Ubuntu", "http.proxy")
+        with (
+            patch.object(pm.subprocess, "run", side_effect=fake_run),
+            pytest.raises(OSError),
+        ):
+            pm._wsl_git_config_get("Ubuntu", "http.proxy")
 
     def test_git_set_replace_all_or_unset_all(self):
         calls = []
@@ -443,10 +444,12 @@ class TestWslSnapshotHelpers:
                 stderr = "boom"
             return R()
 
-        with patch.object(pm.subprocess, "run", side_effect=fake_run):
-            with pytest.raises(OSError):
-                pm._wsl_git_config_set("Ubuntu", "http.proxy",
-                                       "http://corp:8080")
+        with (
+            patch.object(pm.subprocess, "run", side_effect=fake_run),
+            pytest.raises(OSError),
+        ):
+            pm._wsl_git_config_set("Ubuntu", "http.proxy",
+                                   "http://corp:8080")
 
     def test_git_set_treats_absent_key_as_done(self):
         """--unset-all 对不存在的键退出 5，而那正是目标状态。"""

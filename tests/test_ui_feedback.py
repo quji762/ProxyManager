@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Static (no JS runtime) contract checks for the port-switch feedback paths.
 
 The repo has no JS test harness — CI runs ruff + pytest only — so these

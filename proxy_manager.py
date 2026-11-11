@@ -10,17 +10,16 @@ Front-end entry point: app.py (pywebview + WebView2).
 """
 
 import collections
+import ctypes
 import os
 import re
 import socket
 import subprocess
 import uuid
-import ctypes
 import winreg
-from typing import Optional
 from urllib.parse import quote, unquote, urlparse
 
-from messages import LStr, LJoin
+from messages import LJoin, LStr
 
 # ── Optional dependencies ─────────────────────────────────────────────────────
 try:
@@ -43,8 +42,8 @@ SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
 
 def _log_crash(exc_type, exc_val, exc_tb):
     """Append a timestamped traceback to crash.log. Best-effort: never raises."""
-    import traceback
     import datetime
+    import traceback
     try:
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
@@ -67,9 +66,9 @@ def log_exception(prefix: str = "") -> None:
     Call from `except Exception` handlers that would otherwise `pass` so
     field failures are diagnosable in a --windowed build. Never raises.
     """
-    import traceback
     import datetime
     import sys
+    import traceback
     try:
         exc_type, exc_val, exc_tb = sys.exc_info()
         if exc_type is None:
@@ -388,7 +387,7 @@ def get_wsl_ip_and_block():
 # Cache is keyed by .wslconfig's mtime so editing networkingMode and clicking
 # refresh picks up the new value instead of returning a stale, never-expiring
 # result (the original version cached indefinitely once first computed).
-_wsl_network_mode_cache: Optional[tuple] = None  # (mtime, mode_str)
+_wsl_network_mode_cache: tuple | None = None  # (mtime, mode_str)
 
 
 def _invalidate_wsl_network_mode_cache():
@@ -413,13 +412,13 @@ def get_wsl_network_mode():
             if cached_mtime == mtime:
                 return cached_mode
         if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
+            with open(p, encoding="utf-8") as f:
                 lines = f.read().splitlines()
             # .wslconfig is INI-shaped: only honor networkingMode under [wsl2].
             in_wsl2 = False
             for raw in lines:
                 line = raw.strip()
-                if not line or line.startswith("#") or line.startswith(";"):
+                if not line or line.startswith(("#", ";")):
                     continue
                 if line.startswith("[") and line.endswith("]"):
                     in_wsl2 = (line.lower() == "[wsl2]")
@@ -451,7 +450,7 @@ def get_wsl_network_mode():
 _primary_iface = None  # cached name of the interface we decided to track
 
 
-def _pick_primary_iface() -> Optional[str]:
+def _pick_primary_iface() -> str | None:
     """Choose the best interface to monitor: the one that is up, carries an
     IP, and is not a obvious virtual/loopback adapter. Returns None if psutil
     is unavailable or no suitable interface exists."""
@@ -617,7 +616,7 @@ def get_ps_env_snapshot():
     Missing and empty values read as None (unset); the key is opened once
     and every name is read from that one handle.
     """
-    result = {n: None for n in PS_ENV_NAMES}
+    result = dict.fromkeys(PS_ENV_NAMES)
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, ENV_REG_PATH, 0,
                              winreg.KEY_READ)
@@ -678,7 +677,7 @@ def _parse_export(block: str, name: str):
     return m.group(1).strip() if m else None
 
 
-def get_wsl_proxy_vars(block: Optional[str] = None):
+def get_wsl_proxy_vars(block: str | None = None):
     """Read HTTP_PROXY / HTTPS_PROXY / ALL_PROXY produced by this tool from WSL.
     Pass an existing block (from _read_wsl_block) to avoid a redundant WSL
     subprocess call."""
@@ -694,7 +693,7 @@ def get_wsl_proxy_vars(block: Optional[str] = None):
     return result
 
 
-def get_wsl_status(block: Optional[str] = None):
+def get_wsl_status(block: str | None = None):
     if block is None:
         block = _read_wsl_block()
     if not block:
@@ -908,7 +907,7 @@ def _sys_proxy_server_to_url(server: str):
         socks_picked = None
         for part in s.split(";"):
             pl = part.lower()
-            if pl.startswith("socks=") or pl.startswith("socks5="):
+            if pl.startswith(("socks=", "socks5=")):
                 socks_picked = part.split("=", 1)[1]
             elif pl.startswith("http="):
                 picked = part.split("=", 1)[1]
@@ -924,9 +923,7 @@ def _sys_proxy_server_to_url(server: str):
             return f"socks5://{hostport}"
         else:
             s = s.split("=", 1)[-1].strip()
-    if s.startswith("http://") or s.startswith("https://") \
-            or s.startswith("socks5://") or s.startswith("socks5h://") \
-            or s.startswith("socks4://"):
+    if s.startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://")):
         return s
     return f"http://{s}"
 
@@ -1048,10 +1045,7 @@ def set_sys_proxy(host, port, enable=True, scheme="http", user="", password=""):
     still written, but browsers may keep routing through the PAC script.
     """
     sch = str(scheme or "http").strip().lower()
-    if sch.startswith("socks"):
-        server = f"socks={host}:{port}"
-    else:
-        server = f"{host}:{port}"
+    server = f"socks={host}:{port}" if sch.startswith("socks") else f"{host}:{port}"
     url = build_proxy_url(host, port, scheme, user, password)
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, INET_REG_PATH, 0,

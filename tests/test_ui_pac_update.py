@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Static (no JS runtime) contract checks for the PAC hint and the
 persistent update-status row.
 

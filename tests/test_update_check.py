@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 """Update check: GitHub API response parsing and version comparison.
 
 The HTTP call itself is mocked — no network in tests.
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from js_api import Api
 
 
 def _payload(tag):
     resp = MagicMock()
-    resp.read.return_value = ('{"tag_name": "%s", "html_url": "https://x"}' % tag).encode()
+    resp.read.return_value = f'{{"tag_name": "{tag}", "html_url": "https://x"}}'.encode()
     resp.__enter__.return_value = resp
     return resp
 
@@ -25,8 +24,7 @@ def teardown_function(_):
 
 
 def _api():
-    api = Api.__new__(Api)  # skip __init__ (threads, config)
-    return api
+    return Api.__new__(Api)  # skip __init__ (threads, config)
 
 
 def test_update_available_when_latest_is_newer():

@@ -12,16 +12,16 @@ def test_version_constant_exists():
 
 
 def test_valid_host_accepts_plain_hosts():
-    assert appmod._valid_host("127.0.0.1")
-    assert appmod._valid_host("proxy.local")
+    assert config_store.valid_host("127.0.0.1")
+    assert config_store.valid_host("proxy.local")
     assert config_store.valid_host("my-proxy.example.com")
 
 
 def test_valid_host_rejects_injection():
-    assert not appmod._valid_host("http://evil")
-    assert not appmod._valid_host("1.2.3.4:80")
-    assert not appmod._valid_host("a b")
-    assert not appmod._valid_host("")
+    assert not config_store.valid_host("http://evil")
+    assert not config_store.valid_host("1.2.3.4:80")
+    assert not config_store.valid_host("a b")
+    assert not config_store.valid_host("")
 
 
 def test_is_valid_port():

@@ -13,6 +13,7 @@ import time
 import types
 
 import PIL.Image
+
 import config_store
 import proxy_manager as pm
 import tray_icon
@@ -67,7 +68,7 @@ class _FakeNotifyIconReg:
             try:
                 return reg.entries[key[1]][name]
             except KeyError:
-                raise FileNotFoundError(name)
+                raise FileNotFoundError(name) from None
 
         def set_value(key, name, reserved, vtype, value):
             reg.writes.append((key[1], name, value))
@@ -249,8 +250,7 @@ def _build_tray(monkeypatch, api):
     fake = _FakePystray()
     fake.install(monkeypatch)
     monkeypatch.setattr(tray_icon, "_tray_busy", False)
-    icon = tray_icon._make_tray(api, None)
-    return icon
+    return tray_icon._make_tray(api, None)
 
 
 def _wait_tray_idle(timeout=10.0):

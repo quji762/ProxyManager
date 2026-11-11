@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Config backup / one-click restore.
 
 The load-bearing contract: restore routes through save_config, which persists

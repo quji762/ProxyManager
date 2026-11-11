@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Named address presets: CRUD, DPAPI protection, sanitization, and apply.
 
 A preset is a saved FORM address; applying it reuses switch_port's full-address

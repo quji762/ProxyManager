@@ -1,7 +1,7 @@
 """Surgical INI editing for npm/pip config files."""
 
-from proxy_manager import _eol_of, _ini_edit, _ini_get
 import proxy_manager as pm
+from proxy_manager import _eol_of, _ini_edit, _ini_get
 
 
 def test_ini_get_quoted_and_equals():

@@ -2,7 +2,6 @@
 get_background's mime map must agree on the extension set."""
 
 import base64
-
 from unittest.mock import patch
 
 import config_store

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Autostart (HKCU ...\\Run) round-trip and save_config's failure paths.
 
 Both had zero coverage. autostart_set / autostart_enabled / autostart_command
@@ -71,7 +70,7 @@ def _fake_winreg(monkeypatch, **failures):
 
 def _source_command():
     """What autostart_command() builds for a source (non-frozen) run."""
-    return '"%s" "%s" --tray' % (sys.executable, config_store.ENTRY_SCRIPT)
+    return f'"{sys.executable}" "{config_store.ENTRY_SCRIPT}" --tray'
 
 
 class TestAutostartRoundTrip:
@@ -124,8 +123,7 @@ class TestAutostartCommandForms:
                             r"D:\我的 的应用\ProxyManager\app.py")
         assert config_store.autostart_set(True) is True
         stored = values[config_store.AUTOSTART_NAME]
-        assert stored == ('"%s" "%s" --tray'
-                          % (sys.executable, config_store.ENTRY_SCRIPT))
+        assert stored == f'"{sys.executable}" "{config_store.ENTRY_SCRIPT}" --tray'
         assert config_store.autostart_enabled() is True
 
     def test_frozen_form_is_executable_only(self, monkeypatch):
@@ -134,9 +132,9 @@ class TestAutostartCommandForms:
         _reg, values = _fake_winreg(monkeypatch)
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr(sys, "executable", r"C:\Program Files\ProxyManager\ProxyManager.exe")
-        assert config_store.autostart_command() == '"%s" --tray' % sys.executable
+        assert config_store.autostart_command() == f'"{sys.executable}" --tray'
         assert config_store.autostart_set(True) is True
-        assert values[config_store.AUTOSTART_NAME] == '"%s" --tray' % sys.executable
+        assert values[config_store.AUTOSTART_NAME] == f'"{sys.executable}" --tray'
         assert config_store.autostart_enabled() is True
 
     def test_frozen_form_matches_stale_frozen_value(self, monkeypatch):
@@ -144,7 +142,7 @@ class TestAutostartCommandForms:
         an older build at the same exe path."""
         _reg, values = _fake_winreg(monkeypatch)
         monkeypatch.setattr(sys, "frozen", True, raising=False)
-        values[config_store.AUTOSTART_NAME] = '"%s" --tray' % sys.executable
+        values[config_store.AUTOSTART_NAME] = f'"{sys.executable}" --tray'
         assert config_store.autostart_enabled() is True
 
     def test_legacy_entry_script_value_still_counts_as_enabled(self, monkeypatch):
@@ -152,7 +150,7 @@ class TestAutostartCommandForms:
         app.py) is still ours — do not offer to "enable" what is already on."""
         _reg, values = _fake_winreg(monkeypatch)
         values[config_store.AUTOSTART_NAME] = \
-            '"C:\\Old\\Python\\python.exe" "%s" --tray' % config_store.ENTRY_SCRIPT
+            f'"C:\\Old\\Python\\python.exe" "{config_store.ENTRY_SCRIPT}" --tray'
         assert config_store.autostart_enabled() is True
 
     def test_unrelated_stale_value_is_not_ours(self, monkeypatch):

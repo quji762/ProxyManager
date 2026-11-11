@@ -7,19 +7,42 @@ import threading
 import time
 
 import proxy_manager as pm
-from messages import LStr, parts_of
 from config_store import (
-    APP_VERSION, DEFAULT_PORTS, MAX_BG_BYTES, MAX_PRESETS, MAX_PRESET_NAME,
-    PROBE_URLS, _cfg_lock,
-    _DPAPI_PREFIX, DpapiError, _dpapi_decrypt, _dpapi_encrypt,
-    autostart_enabled, autostart_set, load_config, save_config, valid_host,
+    _DPAPI_PREFIX,
+    APP_VERSION,
+    DEFAULT_PORTS,
+    MAX_BG_BYTES,
+    MAX_PRESET_NAME,
+    MAX_PRESETS,
+    PROBE_URLS,
+    DpapiError,
+    _cfg_lock,
+    _dpapi_decrypt,
+    _dpapi_encrypt,
+    autostart_enabled,
+    autostart_set,
     config_load_warning,
-    create_backup, read_backup,
-    list_backups as _cfg_list_backups, delete_backup as _cfg_delete_backup,
+    create_backup,
+    load_config,
+    read_backup,
+    save_config,
+    valid_host,
 )
+from config_store import (
+    delete_backup as _cfg_delete_backup,
+)
+from config_store import (
+    list_backups as _cfg_list_backups,
+)
+from messages import LStr, parts_of
 from window_win32 import (
-    _POINT, _RECT, _is_maximized, _our_hwnds, _work_area_for_hwnd,
-    set_resize_maximized, user32,
+    _POINT,
+    _RECT,
+    _is_maximized,
+    _our_hwnds,
+    _work_area_for_hwnd,
+    set_resize_maximized,
+    user32,
 )
 
 # File picker filter: must stay in sync with the extensions save_config
@@ -782,6 +805,7 @@ class Api:
                 pm.log_exception("persist_restore: " + err["error"])
                 return {"error": err["error"],
                         "error_key": err.get("error_key", "saveFail")}
+            return None
 
     def _detected_url(self, target):
         if target == "ps":
@@ -808,7 +832,7 @@ class Api:
     def _stash_previous(self, target, new_url):
         """Remember a pre-existing proxy so disable can put it back."""
         if target == "wsl" or self._restore.get(target):
-            return
+            return None
         if target == "ps":
             # PowerShell enable overwrites HTTP/HTTPS/ALL_PROXY and merges
             # NO_PROXY — a single URL cannot round-trip a state where those
@@ -851,7 +875,7 @@ class Api:
                 else:
                     env[n] = str(v)
             if not any(env.values()):
-                return  # user had nothing here; the surgical disable suffices
+                return None  # user had nothing here; the surgical disable suffices
             self._restore[target] = {"env": env}
             # 暂存落不下来必须中止：否则 enable 会覆盖端点，而覆盖前的用户
             # 原值随进程退出永久丢失（内存里的 self._restore 保留不删，之后
@@ -859,7 +883,7 @@ class Api:
             perr = self._persist_restore()
             if perr is not None:
                 return perr
-            return
+            return None
         if target == "sys":
             # System enable merges our bypass entries into ProxyOverride —
             # stash the full original list so disable puts it back verbatim
@@ -896,21 +920,21 @@ class Api:
                         self.applied_kw["scheme"]):
                     server = residual
             if not override and not url and not server:
-                return
+                return None
             self._restore[target] = {"url": url, "override": override or None,
                                      "server": server}
             perr = self._persist_restore()
             if perr is not None:
                 return perr
-            return
+            return None
         cur = self._detected_url(target)
         if not cur or cur == new_url:
-            return
+            return None
         # Leftovers from this tool (last applied address, or the NAT
         # gateway rewrite of it) are not user state — stashing them made
         # disable "restore" our own URL, so the switch needed two clicks.
         if cur in self._ours_proxy_urls(target):
-            return
+            return None
         # NAT 子网在工具外变化后的"陈旧网关"形式同样是本工具写的 URL：
         # 当作用户代理暂存会让关闭时把它当用户状态"恢复"回来。判定依据是
         # "最后写入 URL"的持久化记录（精确相等，含网关改写形态）——工具写入
@@ -919,11 +943,12 @@ class Api:
         # 还原：宁可工具自己的旧 URL 被多恢复一次，也不冒覆盖用户配置的风险。
         if target in ("gitwsl", "npmwsl", "pipwsl") \
                 and self._is_managed_wsl_url(cur, target):
-            return
+            return None
         self._restore[target] = cur
         perr = self._persist_restore()
         if perr is not None:
             return perr
+        return None
 
     def _restore_stashed(self, target, prev):
         """Restore a dict-shaped stash (ps env vars / sys bypass list): write
@@ -1914,8 +1939,8 @@ class Api:
         the check only happens when the UI calls this (boot, once per
         session), it never phones home in the background, and failures are
         silent (offline machines see nothing)."""
-        import urllib.request as _urlreq
         import json as _json
+        import urllib.request as _urlreq
 
         cls = type(self)
         now = time.monotonic()
@@ -2171,7 +2196,7 @@ class Api:
             form = getattr(self._window, "native", None) if self._window else None
             if form is None:
                 return False
-            from System import Type, Func  # noqa: E402
+            from System import Func, Type  # noqa: E402
             from System.Drawing import Color  # noqa: E402
 
             def _set():
@@ -2316,7 +2341,7 @@ class Api:
                 form = getattr(w, "native", None)
                 if form is None:
                     return {"ok": False}
-                from System import Type, Func  # noqa: E402
+                from System import Func, Type  # noqa: E402
 
                 def _move():
                     if _is_maximized():

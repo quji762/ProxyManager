@@ -2,7 +2,6 @@
 
 from proxy_manager import _parse_export
 
-
 BLOCK = '''# >>> proxy-manager begin >>>
 export HTTP_PROXY="http://172.24.0.1:7897"
 export HTTPS_PROXY="http://172.24.0.1:7897"

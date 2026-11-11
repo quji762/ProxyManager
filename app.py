@@ -16,21 +16,34 @@ import threading
 import time
 
 import proxy_manager as pm
+import window_win32 as win32
 from config_store import (  # noqa: F401  (APP_VERSION re-exported for tests)
-    APP_VERSION, UI_PATH, load_config, save_config,
-    valid_host as _valid_host,
+    APP_VERSION,
+    UI_PATH,
+    load_config,
+    save_config,
 )
 from js_api import Api
 from tray_icon import (
-    _make_tray, _promote_tray_icon_async,
-    _refresh_tray_icon, _restore_window_geometry, _show_main_window,
+    _make_tray,
+    _promote_tray_icon_async,
+    _refresh_tray_icon,
+    _restore_window_geometry,
+    _show_main_window,
     _sync_tray_lang,
 )
 from window_win32 import (
-    WM_NCHITTEST, _ENUMCHILD, _MIN_H, _MIN_W, _RECT, _SW_RESTORE, _our_hwnds,
-    ensure_nonclient_drag, ensure_resize_hook, user32,
+    _ENUMCHILD,
+    _MIN_H,
+    _MIN_W,
+    _RECT,
+    _SW_RESTORE,
+    WM_NCHITTEST,
+    _our_hwnds,
+    ensure_nonclient_drag,
+    ensure_resize_hook,
+    user32,
 )
-import window_win32 as win32
 
 FRAMELESS = True
 _START_HIDDEN = any(a in ("--tray", "--hidden") for a in sys.argv[1:])

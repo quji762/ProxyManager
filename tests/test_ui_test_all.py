@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Static (no JS runtime) contract checks for the 全部测试 batch probe.
 
 CI runs ruff + pytest only — no JS harness — so these parse ui/index.html,

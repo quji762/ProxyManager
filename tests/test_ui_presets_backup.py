@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Static (no JS runtime) contract checks for named address presets and
 config backup / one-click restore.
 

@@ -4,7 +4,6 @@ applied_* and _git_managed are only consistent when mutated inside one
 critical section. Everything here runs against fakes — no real endpoints."""
 
 import threading
-
 from unittest.mock import patch
 
 import config_store

@@ -515,9 +515,9 @@ def ensure_resize_hook(window=None):
     if not _hook_is_ours(hwnd):
         install_resize_hook(hwnd)
     ok = _hook_is_ours(hwnd)
-    if ok and window is not None and _padded_hwnd != hwnd:
-        if _apply_window_padding(window, _BORDER_PX):
-            _padded_hwnd = hwnd
+    if (ok and window is not None and _padded_hwnd != hwnd
+            and _apply_window_padding(window, _BORDER_PX)):
+        _padded_hwnd = hwnd
     return ok
 
 
@@ -545,7 +545,7 @@ def _apply_window_padding(window, px):
         form = getattr(window, "native", None)
         if form is None:
             return False
-        from System import Type, Func  # noqa: E402  (pythonnet)
+        from System import Func, Type  # noqa: E402  (pythonnet)
         from System.Windows.Forms import Padding  # noqa: E402
 
         def _set():
@@ -604,7 +604,7 @@ def ensure_nonclient_drag(window=None):
         form = getattr(window, "native", None) if window is not None else None
         if form is None:
             return False
-        from System import Type, Func  # noqa: E402  (pythonnet)
+        from System import Func, Type  # noqa: E402  (pythonnet)
 
         def _set():
             browser = getattr(form, "browser", None)  # EdgeChrome instance

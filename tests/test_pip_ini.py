@@ -2,8 +2,8 @@
 must neither be rewritten on enable/disable nor make the UI report enabled.
 Regression: _ini_edit matched key lines regardless of section."""
 
-from proxy_manager import _ini_edit, _ini_get
 import proxy_manager as pm
+from proxy_manager import _ini_edit, _ini_get
 
 
 def test_ini_edit_enable_touches_global_only():

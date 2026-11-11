@@ -144,7 +144,7 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
             }
             self.assertTrue(api.save_config({"host": "127.0.0.1"}))
 
-            with open(cfg_file, "r", encoding="utf-8") as f:
+            with open(cfg_file, encoding="utf-8") as f:
                 raw = json.load(f)
             restore_on_disk = raw["restore"]
             # 字符串形态：DPAPI 密文，绝无明文 URL/凭据
@@ -207,7 +207,7 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
                 barrier.set()
                 self.assertTrue(api.save_config({"host": "127.0.0.1"}))
 
-            with open(cfg_file, "r", encoding="utf-8") as f:
+            with open(cfg_file, encoding="utf-8") as f:
                 raw = json.load(f)
             # 快照里只有 pip；加密途中插入的 gitwin 不得出现在本次落盘
             self.assertIn("pip", raw["restore"])
@@ -319,7 +319,7 @@ class TestSaveConfigPersistsEncryptedRestore(unittest.TestCase):
 
             self.assertEqual(errors, [])
             # 最终磁盘 restore 仍是密文（DPAPI: 前缀，无明文 URL 残留）
-            with open(cfg_file, "r", encoding="utf-8") as f:
+            with open(cfg_file, encoding="utf-8") as f:
                 raw = json.load(f)
             for target, payload in raw["restore"].items():
                 if isinstance(payload, str):
@@ -380,9 +380,9 @@ class TestDpapiFailureLogging(unittest.TestCase):
 
         with mock.patch.object(config_store._crypt32, "CryptProtectData",
                                side_effect=OSError("mock dpapi failure")), \
-                mock.patch.object(pm, "log_exception") as fake_log:
-            with self.assertRaises(config_store.DpapiError):
-                config_store._dpapi_encrypt("secret")
+                mock.patch.object(pm, "log_exception") as fake_log, \
+                self.assertRaises(config_store.DpapiError):
+            config_store._dpapi_encrypt("secret")
         fake_log.assert_called_once()
         msg = fake_log.call_args[0][0]
         self.assertIn("dpapi_encrypt", msg)
@@ -394,9 +394,9 @@ class TestDpapiFailureLogging(unittest.TestCase):
 
         with mock.patch.object(config_store._crypt32, "CryptProtectData",
                                return_value=0), \
-                mock.patch.object(pm, "log_exception") as fake_log:
-            with self.assertRaises(config_store.DpapiError):
-                config_store._dpapi_encrypt("secret")
+                mock.patch.object(pm, "log_exception") as fake_log, \
+                self.assertRaises(config_store.DpapiError):
+            config_store._dpapi_encrypt("secret")
         fake_log.assert_called_once()
         msg = fake_log.call_args[0][0]
         self.assertIn("dpapi_encrypt", msg)
@@ -451,9 +451,9 @@ class TestDpapiFailureLogging(unittest.TestCase):
         with mock.patch.object(config_store, "CONFIG_FILE", str(cfg_path)), \
                 mock.patch.object(config_store, "APP_DIR", tmp.name), \
                 mock.patch.object(config_store, "_dpapi_encrypt",
-                                  side_effect=config_store.DpapiError("nope")):
-            with self.assertRaises(config_store.DpapiError):
-                config_store.save_config({"password": "super-secret", "host": "127.0.0.1"})
+                                  side_effect=config_store.DpapiError("nope")), \
+                self.assertRaises(config_store.DpapiError):
+            config_store.save_config({"password": "super-secret", "host": "127.0.0.1"})
         text = cfg_path.read_text(encoding="utf-8")
         self.assertNotIn("super-secret", text)
 
@@ -550,7 +550,7 @@ class TestStashPersistFailureAbortsEnable(unittest.TestCase):
 
         spy = []
         api = self._api()
-        snapshot = {n: None for n in pm.PS_ENV_NAMES}
+        snapshot = dict.fromkeys(pm.PS_ENV_NAMES)
         snapshot["HTTP_PROXY"] = "http://corp:8080"
         with mock.patch.object(js_api, "_dpapi_encrypt",
                                side_effect=config_store.DpapiError("boom")), \

@@ -513,7 +513,7 @@ def _stateful_wsl_files(initial):
     """Fake wsl.exe over per-distro file state: pulls read the current bytes,
     pushes replace them; `timeouts` maps (distro, phase) to TimeoutExpired.
     phase: 'pull' / 'push'."""
-    files = {d: data for d, data in initial.items()}
+    files = dict(initial)
     pushes = []
 
     def run(cmd, **kw):

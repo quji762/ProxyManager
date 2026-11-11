@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Regression: atomic file writes, registry rollback, native-close quit_clear."""
 
 import json

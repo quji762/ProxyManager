@@ -53,8 +53,8 @@ def test_sys_proxy_server_to_url_http_and_socks():
 # ── PAC (AutoConfigURL) awareness ─────────────────────────────────────────────
 # Fake registry: get_sys_proxy / set_sys_proxy must never touch the real
 # WinINET values in tests.
-import proxy_manager as pm  # noqa: E402
 import js_api  # noqa: E402
+import proxy_manager as pm  # noqa: E402
 
 _INET = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
 

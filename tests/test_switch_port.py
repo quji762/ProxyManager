@@ -259,7 +259,7 @@ def test_fresh_config_does_not_persist_form_as_applied(tmp_path, monkeypatch):
                              "HTTPS_PROXY": pm.UNSET,
                              "ALL_PROXY": pm.UNSET}), \
          patch("js_api.pm.get_ps_env_snapshot",
-               return_value={n: None for n in pm.PS_ENV_NAMES}), \
+               return_value=dict.fromkeys(pm.PS_ENV_NAMES)), \
          patch("js_api.pm.get_ps_no_proxy", return_value=""), \
          patch("js_api.pm.set_ps_proxy", return_value=True):
         r = api.do_toggle("ps", True, "127.0.0.1", "7897")

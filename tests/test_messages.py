@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """The backend message catalog (messages.TEMPLATES) and the frontend i18n
 table (ui/i18n.js) must stay in sync: every key the backend can emit must
 exist in BOTH language tables, or an English UI would fall back to the zh
@@ -44,7 +43,7 @@ def test_backend_templates_render_with_params():
     for key, tpl in messages.TEMPLATES.items():
         for lang, text in tpl.items():
             names = set(placeholder.findall(text))
-            s = text.format(**{n: "x" for n in names})
+            s = text.format(**dict.fromkeys(names, "x"))
             assert s, f"{key}/{lang} rendered empty"
 
 

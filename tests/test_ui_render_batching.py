@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Static (no JS runtime) checks for the refresh render batching.
 
 CI runs ruff + pytest only — no JS harness — so ui/app.js is parsed with
