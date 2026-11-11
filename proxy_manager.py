@@ -40,18 +40,26 @@ _CRASH_LOG = os.path.join(_APPDATA, "ProxyManager", "crash.log")
 SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
 
 
+_URL_CRED_RE = re.compile(r"(://)[^/\s:@]+:[^/\s@]+@")
+
+
 def _exc_log_text(exc_type, exc_val):
     """Exception text that is safe for crash.log.
 
     subprocess exceptions (TimeoutExpired / CalledProcessError) stringify to
     the full argv, which embeds the proxy URL including user:pass@ — AGENTS.md
     forbids writing that to a log. Those reduce to the type name alone (still
-    diagnosable, never a secret). Other exceptions (winreg/OSError/DPAPI)
-    carry no argv and stringify safely.
+    diagnosable, never a secret).
+
+    A non-subprocess message can still embed a credentialed URL (an OSError
+    built around one), so userinfo is redacted generally, and CR/LF are escaped
+    so a message cannot forge an extra crash.log record.
     """
     if isinstance(exc_val, subprocess.SubprocessError):
         return exc_type.__name__
-    return f"{exc_type.__name__}: {exc_val}"
+    text = _URL_CRED_RE.sub(r"\1***@", str(exc_val))
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    return f"{exc_type.__name__}: {text}"
 
 
 def _log_crash(exc_type, exc_val, exc_tb):

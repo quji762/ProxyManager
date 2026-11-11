@@ -55,6 +55,7 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 
 ### Security
 - Subprocess errors no longer leak credentials: `TimeoutExpired`/`CalledProcessError` embed the full argv (including credentialed proxy URLs) in their `str()`. These are now rendered as fixed localized messages across the WSL/Git/npm/pip error paths, so passwords cannot reach the UI, screenshots or logs (`js_api.py`, `messages.py`).
+- `crash.log` is hardened against log injection and embedded secrets: a non-subprocess message that embeds `scheme://user:pass@` has its userinfo redacted, and CR/LF are escaped so an exception message cannot forge an extra log record (`proxy_manager.py`).
 - Port presets are HTML-escaped on render: port values come from `config.json` / restored backups and may be arbitrary strings; they are now escaped in both attribute and text slots, closing an HTML-injection vector (`ui/app.js`).
 - Background images are confined to local files: `save_config` / `get_background` reject UNC and device paths so loading a background cannot trigger SMB authentication (an NTLM-relay surface) (`js_api.py`, `proxy_manager.py`).
 - Restore hardening: a PowerShell stash that fails to decrypt keeps its `DPAPI:` marker so restore falls back to surgical disable instead of treating every environment variable name as a user value to delete; the system-proxy restore validates the stashed URL and refuses to write a malformed `ProxyServer` (`js_api.py`).

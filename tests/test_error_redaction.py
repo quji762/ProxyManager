@@ -117,3 +117,30 @@ def test_log_exception_keeps_non_subprocess_message(tmp_path, monkeypatch):
         pm.log_exception("unit")
     text = log.read_text(encoding="utf-8")
     assert "OSError: disk full" in text
+
+
+def test_log_exception_redacts_embedded_url_credentials(tmp_path, monkeypatch):
+    """A non-subprocess message that embeds a credentialed URL is redacted."""
+    log = tmp_path / "crash.log"
+    monkeypatch.setattr(pm, "_CRASH_LOG", str(log))
+    try:
+        raise OSError(f"connect failed for {CRED_URL}")
+    except OSError:
+        pm.log_exception("unit")
+    text = log.read_text(encoding="utf-8")
+    assert SECRET not in text
+    assert CRED_URL not in text
+    assert "http://***@" in text
+
+
+def test_log_exception_escapes_newlines(tmp_path, monkeypatch):
+    """A newline in an exception message must not forge a second log record."""
+    log = tmp_path / "crash.log"
+    monkeypatch.setattr(pm, "_CRASH_LOG", str(log))
+    try:
+        raise ValueError("line1\n[2026] forged entry")
+    except ValueError:
+        pm.log_exception("unit")
+    text = log.read_text(encoding="utf-8")
+    assert "line1\\n[2026] forged entry" in text
+    assert "\n[2026] forged entry" not in text
