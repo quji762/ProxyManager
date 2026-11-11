@@ -153,7 +153,10 @@
       </div>
     </div>
     <div class="card info-card">
-      <h3 id="varsTitle" data-i18n="varsTitle">环境变量</h3>
+      <div class="vars-head">
+        <h3 id="varsTitle" data-i18n="varsTitle">环境变量</h3>
+        <button type="button" class="dim-btn" id="btnTestAll" data-i18n="testAll">全部测试</button>
+      </div>
       <div id="varsWin">
         <div class="group-cap" data-i18n="groupPs">POWERSHELL（用户环境变量）</div>
         <div class="kv"><span class="k">HTTP_PROXY</span><span class="v copyable" id="vPsHttp" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="ps" data-i18n="test" data-i18n-tip="tipTest" data-tip="通过该代理发起连通性测试">测试</button></div>
@@ -175,6 +178,8 @@
         <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v copyable" id="vNpmWsl" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="npmwsl" data-i18n="test" data-i18n-tip="tipTestWsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">pip（~/.config/pip/pip.conf）</span><span class="v copyable" id="vPipWsl" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="pipwsl" data-i18n="test" data-i18n-tip="tipTestWsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
       </div>
+      <div class="test-history-cap" id="testHistoryTitle" data-i18n="testHistoryTitle" hidden>最近测试结果</div>
+      <ul id="testHistory" class="test-history" hidden></ul>
     </div>
   </div>
 </div>

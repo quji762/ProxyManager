@@ -291,6 +291,7 @@ function setLane(lane) {
   // 重启 WSL lives on the status bar but only concerns the WSL page.
   $("btnWslRestart").hidden = lane !== "wsl";
   renderEndpoints();  // updateHero refreshes sbGit/sbNpm/sbPip for the lane
+  renderHistory();    // the result history is lane-scoped too
   refreshAll();       // probe the newly visible lane (states may be stale)
 }
 
@@ -523,6 +524,19 @@ function confirmMessage(pre) {
   return pre.message || "";
 }
 
+/* Port-switch failure detail. msgText() alone drops the backend's detail
+   lines whenever error_key is set (it returns the localized label), and a
+   bare r.error would lose that label plus any bilingual per-endpoint parts
+   — so combine them: localized head + backend detail. Only the port-switch
+   path uses this; other callers keep msgText()'s "key wins" behavior. */
+function switchErrText(r) {
+  const key = r && r.error_key;
+  const body = (r && (r.error_parts || r.note_parts)) ? msgText(r) : (r && r.error);
+  if (!key) return msgText(r);
+  if (!body || body === t(key)) return t(key);
+  return `${t(key)}\n${body}`;
+}
+
 async function applyAddress(next, prev) {
   next = next || snapshotAddr();
   next.host = String(next.host || "").trim();
@@ -563,7 +577,7 @@ async function applyAddress(next, prev) {
     const r = await api.call("switch_port", next.port, next.host, next.scheme, next.user, next.password);
     if (r && r.error) {
       const n = (r.applied || []).length;
-      toast(n ? t("switchedPartial", { addr: shown, n, err: msgText(r) }) : msgText(r), "err");
+      toast(n ? t("switchedPartial", { addr: shown, n, err: switchErrText(r) }) : switchErrText(r), "err");
       if (!(r.applied && r.applied.length)) {
         if (prev) {
           $("inHost").value = prev.host;
@@ -580,7 +594,11 @@ async function applyAddress(next, prev) {
       // applied 为空＝没有任何端点被写入（契约A2）：不把表单地址提升为
       // lastApplied，否则 appliedAddr() 会把用户手工代理误判为已应用。
       if (n) lastApplied = Object.assign({}, next);
-      toast(n ? t("switched", { addr: shown, n }) : t("addrSet", { addr: shown }), "ok");
+      // Backend notes (NAT gateway rewrite, PAC, per-machine policy) are the
+      // honest report of what actually happened — same contract as
+      // toggleEndpoint's note branch above.
+      const note = r && (r.note || r.note_parts) ? msgText(r) : "";
+      toast(note || (n ? t("switched", { addr: shown, n }) : t("addrSet", { addr: shown })), "ok");
     }
   } catch (e) {
     toast(t("switchFail", { err: e }), "err");
@@ -615,6 +633,20 @@ function setBusyAll(b) {
 }
 
 /* ═══════════════ Refresh (parallel, lane-aware) ═══════════════ */
+/* Coalesce the endpoint repaints that a refresh's parallel probes each
+   trigger: eight probes settling at once would redraw the list eight times.
+   A 30ms timer is deliberate — awaiting Promise.all instead would hold the
+   first frame hostage to the slowest probe (a WSL slice can take ~15s), and
+   progressive results must stay visible. The callback reads the same
+   state/detected the probe callbacks already updated, so the final frame is
+   identical to today's; re-entrant refreshes (refreshQueued) simply share
+   the one pending timer. */
+const _RENDER_BATCH_MS = 30;
+let renderTimer = null;
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => { renderTimer = null; renderEndpoints(); }, _RENDER_BATCH_MS);
+}
 let refreshing = false;
 let refreshQueued = false;
 async function refreshAll() {
@@ -672,7 +704,7 @@ async function refreshAll() {
     detected.ps = r.status ? r.vars.HTTP_PROXY : null;
     set("vPsHttp", r.vars.HTTP_PROXY); set("vPsHttps", r.vars.HTTPS_PROXY);
     if (r.vars.ALL_PROXY) set("vPsAll", r.vars.ALL_PROXY);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "win") track(api.call("refresh_item", "sys").then((v) => {
     anyOk = true;
@@ -680,7 +712,7 @@ async function refreshAll() {
     detected.sys = v;
     state.sys = String(v) === expect;
     set("vSys", v);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "wsl").then((r) => {
     anyOk = true;
@@ -693,42 +725,42 @@ async function refreshAll() {
     set("vWslHttp", r.vars.HTTP_PROXY); set("vWslHttps", r.vars.HTTPS_PROXY);
     if (r.vars.ALL_PROXY) set("vWslAll", r.vars.ALL_PROXY);
     set("vWslGit", r.git);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "win") track(api.call("refresh_item", "gitwin").then((v) => {
     anyOk = true;
     detected.gitwin = v;
     state.gitwin = urlLooksOurs(v);
     set("vPsGit", v);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "win") track(api.call("refresh_item", "npm").then((v) => {
     anyOk = true;
     detected.npm = v;
     state.npm = urlLooksOurs(v);
     set("vNpm", v);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "win") track(api.call("refresh_item", "pip").then((v) => {
     anyOk = true;
     detected.pip = v;
     state.pip = urlLooksOurs(v);
     set("vPip", v);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "npmwsl").then((v) => {
     anyOk = true;
     detected.npmwsl = v;
     state.npmwsl = urlLooksOurs(v, null, true, cfg.wsl_written.npmwsl);
     set("vNpmWsl", v);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "pipwsl").then((v) => {
     anyOk = true;
     detected.pipwsl = v;
     state.pipwsl = urlLooksOurs(v, null, true, cfg.wsl_written.pipwsl);
     set("vPipWsl", v);
-    renderEndpoints();
+    scheduleRender();
   }).catch(() => {}));
   if (lane === "win") track(api.call("refresh_item", "ip").then((v) => { set("vLip", v); }).catch(() => {}));
   if (lane === "wsl") track(api.call("refresh_item", "mode").then((v) => {
@@ -1114,6 +1146,125 @@ document.addEventListener("click", async (e) => {
   });
 });
 
+/* ── Test all channels of the visible lane ── */
+/* The per-variable chips map 1:1 onto js_api.test_channel's sources
+   (Windows) + wsl_sources (WSL): every data-test in ui/index.html is one
+   entry here, and tests/test_ui_test_all.py asserts that equality. */
+const TEST_CHANNELS = {
+  win: ["ps", "ps_https", "ps_all", "sys", "gitwin", "npm", "pip"],
+  wsl: ["wsl", "wsl_https", "wsl_all", "gitwsl", "npmwsl", "pipwsl"],
+};
+/* Worst case per probe, measured on the backend side: the Windows curl probe
+   walks 4 targets at --max-time 5 with an 8s subprocess timeout (~32s; the
+   urllib fallback 4×5s), and the WSL probe runs 4×5s inside a 25s subprocess
+   timeout. A serial sweep of 13 channels would therefore take 260-400s, so
+   the probes run concurrently — and even then a hung proxy pins the batch at
+   25-32s, hence the watchdog. js_api has NO cancel channel: an in-flight
+   probe cannot be aborted, so this only guarantees the UI stops waiting and
+   marks whatever is still pending as timed out. */
+const _TEST_ALL_TIMEOUT_MS = 45000;
+const TEST_HISTORY_MAX = 10;
+/* Memory only: latencies and failure reasons never enter config.json (a
+   sensitive file), never reach persistSoon's payload and are never sent to
+   save_config — a reload clears the list. */
+let testHistory = [];
+
+function testChannelName(which) {
+  const chip = document.querySelector(`.test-chip[data-test="${which}"]`);
+  const row = chip && chip.closest(".kv");
+  const k = row && row.querySelector(".k");
+  return (k && k.textContent.trim()) || which;
+}
+
+/* Same ✓/✗ rendering as the single-chip handler, minus the 3s revert: a
+   batch run's results stay readable until the next run. */
+function paintTestChip(which, ok, ms, error) {
+  document.querySelectorAll(`.test-chip[data-test="${which}"]`).forEach((c) => {
+    c.classList.remove("testing");
+    if (ok) { c.classList.add("ok"); c.textContent = `✓ ${ms}ms`; c.title = ""; }
+    else { c.classList.add("fail"); c.textContent = error ? "✗ " + String(error).slice(0, 40) : "✗"; c.title = error || ""; }
+  });
+}
+
+function pushTestHistory(which, ok, ms, error) {
+  testHistory.unshift({ which, ok: !!ok, ms: ms || 0, error: error ? String(error) : "", at: Date.now() });
+  if (testHistory.length > TEST_HISTORY_MAX) testHistory.length = TEST_HISTORY_MAX;
+}
+
+function renderHistory() {
+  const ul = $("testHistory"), cap = $("testHistoryTitle");
+  if (!ul) return;
+  // Lane-scoped: the WSL page never shows Windows-lane results and vice versa.
+  const inLane = TEST_CHANNELS[curLane] || [];
+  const rows = testHistory.filter((h) => inLane.includes(h.which));
+  if (cap) cap.hidden = !rows.length;
+  ul.hidden = !rows.length;
+  const pad = (v) => String(v).padStart(2, "0");
+  ul.innerHTML = rows.map((h) => {
+    const d = new Date(h.at);
+    const res = h.ok ? `✓ ${h.ms}ms` : `✗ ${esc_(h.error || t("unknown"))}`;
+    return `<li class="${h.ok ? "ok" : "fail"}"><span class="th-ch">${esc_(testChannelName(h.which))}</span>`
+      + `<span class="th-res">${res}</span><span class="th-at">${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}</span></li>`;
+  }).join("");
+}
+
+async function testAllChannels() {
+  const btn = $("btnTestAll");
+  // busyAll covers batch toggles / port switches / WSL restarts; the button's
+  // own testing class guards a double-click mid-run.
+  if (busyAll || !btn || btn.classList.contains("testing")) return;
+  const channels = TEST_CHANNELS[curLane] || [];
+  if (!channels.length) return;
+  setBusyAll(true);
+  btn.disabled = true;
+  btn.classList.add("testing");
+  btn.textContent = t("testAllBusy");
+  const done = new Set();
+  // Per-channel settle: paints the chip and the history row the moment THAT
+  // probe answers — no waiting for the whole batch, and one channel's throw
+  // or {ok:false} never blocks the others.
+  const settle = (which, ok, ms, error) => {
+    if (done.has(which)) return;   // first result wins; the watchdog fills the rest
+    done.add(which);
+    paintTestChip(which, ok, ms, error);
+    pushTestHistory(which, ok, ms, error);
+    renderHistory();
+  };
+  const all = channels.map((which) => {
+    document.querySelectorAll(`.test-chip[data-test="${which}"]`).forEach((c) => {
+      c.classList.remove("ok", "fail");
+      c.classList.add("testing");
+      c.textContent = t("testing");
+    });
+    return api.call("test_channel", which).then((r) => {
+      settle(which, !!(r && r.ok), r && r.ms, (r && r.error) || "");
+    }).catch((err) => settle(which, false, 0, String(err)));
+  });
+  let timer = null;
+  const watchdog = new Promise((res) => { timer = setTimeout(() => res("timeout"), _TEST_ALL_TIMEOUT_MS); });
+  try {
+    await Promise.race([Promise.all(all), watchdog]);
+    for (const which of channels) {
+      if (!done.has(which)) settle(which, false, 0, t("testAllTimeout"));
+    }
+  } finally {
+    clearTimeout(timer);
+    setBusyAll(false);
+    btn.disabled = false;
+    btn.classList.remove("testing");
+    btn.textContent = t("testAll");
+    renderEndpoints();
+    renderHistory();
+    // 批处理期间被 busyAll 挡下的地址切换在这里收尾（与 refreshAll 的 settle
+    // 同口径）：否则要等下一次 refreshAll 才消费，"完成后自动应用" 就是空话。
+    if (pendingApply) {
+      const p = pendingApply; pendingApply = null;
+      applyAddress(p.next, p.prev);
+    }
+  }
+}
+$("btnTestAll").onclick = () => testAllChannels();
+
 /* Title-bar drag + double-click: native-first. Python enables WebView2's
    IsNonClientRegionSupportEnabled and #dragRegion carries app-region: drag,
    so the browser hit-tests a press here as HTCAPTION and the OS runs its
@@ -1203,12 +1354,24 @@ $("tglQuitClear").onclick = () => {
   api.call("save_config", { quit_clear: on });
   toast(on ? t("quitClearOn") : t("quitClearOff"), "ok");
 };
-$("tglWslAll").onclick = () => {
+$("tglWslAll").onclick = async () => {
   const on = !$("tglWslAll").classList.contains("on");
   setTgl($("tglWslAll"), on);
   cfg.wsl_all_distros = on;
-  api.call("save_config", { wsl_all_distros: on });
-  toast(on ? t("wslAllOn") : t("wslAllOff"), "ok");
+  // The scope transition also cleans THIS TOOL's proxy config out of the
+  // distros that just left scope (A1 contract): {attempted, left, errors}.
+  // Say so — the user asked for a narrower scope, and silently leaving our
+  // block behind in the other distros would be a lie by omission.
+  const r = await api.call("save_config", { wsl_all_distros: on });
+  const cu = r && r.wsl_cleanup;
+  if (cu && (cu.attempted || []).length && !(cu.left || []).length && !(cu.errors || []).length) {
+    toast(t("wslScopeCleaned"), "ok");
+  } else if (cu && ((cu.left || []).length || (cu.errors || []).length)) {
+    const errs = cu.errors || [];
+    toast(t("setFail", { err: (errs.length ? msgText(errs[0]) : (cu.left || []).join("、")) || t("unknown") }), "err");
+  } else {
+    toast(on ? t("wslAllOn") : t("wslAllOff"), "ok");
+  }
   if (curLane === "wsl") renderEndpoints();
 };
 if ($("inLang")) {
@@ -1273,6 +1436,7 @@ async function boot() {
   } catch (_) { /* cosmetic only */ }
   renderPorts();
   renderEndpoints();
+  renderHistory();
   // Form fields may have been persistSoon'd without switch_port. If they
   // differ from the last applied address, finish that migration now so a
   // restart cannot leave endpoints on the old port.

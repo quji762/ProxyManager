@@ -64,6 +64,10 @@ const I18N = {
     gitGlobal: "Git（git config --global）",
     test: "测试",
     testing: "测试中",
+    testAll: "全部测试",
+    testAllBusy: "测试中…",
+    testHistoryTitle: "最近测试结果",
+    testAllTimeout: "超时",
     tipTest: "通过该代理发起连通性测试",
     tipTestHttps: "通过 HTTPS_PROXY 发起连通性测试",
     tipTestAll: "通过 ALL_PROXY 发起连通性测试",
@@ -175,8 +179,7 @@ const I18N = {
     copied: "  ✓ 已复制",
     saveFail: "配置保存失败（磁盘已满或权限不足）",
     errDpapi: "DPAPI 加密失败，密码未保存（不会以明文落盘）",
-    errSwitchPartial: "换端口失败，已恢复到原来的地址",
-    switched: "已切换端口",
+    errSwitchPartial: "换端口失败，可能未完全恢复到原来的地址，请看明细",
     configRecovered: "配置文件已损坏，已从上次完好备份恢复（覆盖前的代理暂存仍在）",
     configCorrupt: "配置文件已损坏且没有可用备份。覆盖前的代理暂存已丢失，关闭端点时不会还原用户原代理",
     speedFullBad: "满值须为正数（MB/s）",
@@ -188,6 +191,7 @@ const I18N = {
     quitClearOff: "退出时保留代理设置",
     wslAllOn: "WSL 将写入所有发行版",
     wslAllOff: "WSL 只写入默认发行版",
+    wslScopeCleaned: "已从其他发行版移除本工具的代理配置",
     langSet: "界面语言已切换",
     pickFail: "选择图片失败: {err}",
     unknown: "未知错误",
@@ -288,6 +292,10 @@ const I18N = {
     gitGlobal: "Git (git config --global)",
     test: "Test",
     testing: "Testing",
+    testAll: "Test all",
+    testAllBusy: "Testing…",
+    testHistoryTitle: "Recent results",
+    testAllTimeout: "timeout",
     tipTest: "Probe connectivity through this proxy",
     tipTestHttps: "Probe through HTTPS_PROXY",
     tipTestAll: "Probe through ALL_PROXY",
@@ -399,8 +407,7 @@ const I18N = {
     copied: "  ✓ copied",
     saveFail: "Failed to save config (disk full or permission denied)",
     errDpapi: "DPAPI encrypt failed; password was not saved (not stored in plaintext)",
-    errSwitchPartial: "Port switch failed; restored the previous address",
-    switched: "Port switched",
+    errSwitchPartial: "Port switch failed; the previous address may not be fully restored — see details",
     configRecovered: "Config was corrupt; restored the last good backup (stashed proxies kept)",
     configCorrupt: "Config was corrupt and no backup was available. Stashed proxies are gone; disabling an endpoint will not restore a previous value",
     speedFullBad: "Full scale must be a positive number (MB/s)",
@@ -412,6 +419,7 @@ const I18N = {
     quitClearOff: "Quit will leave proxies as they are",
     wslAllOn: "WSL writes will hit every user distro",
     wslAllOff: "WSL writes will hit the default distro only",
+    wslScopeCleaned: "Removed this tool's proxy config from the other distros",
     langSet: "Language updated",
     pickFail: "Could not pick image: {err}",
     unknown: "Unknown error",
@@ -474,6 +482,8 @@ function setLang(next) {
 function applyI18n() {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     if (el.id === "bgName" || el.id === "speedCap") return;
+    // 全部测试 keeps its "测试中…" label while a batch run is in flight.
+    if (el.id === "btnTestAll" && el.classList.contains("testing")) return;
     if (el.classList.contains("test-chip") &&
         (el.classList.contains("testing") || el.classList.contains("ok") ||
          el.classList.contains("fail"))) return;

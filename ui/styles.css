@@ -365,6 +365,29 @@ body.has-bg .card { backdrop-filter: blur(24px) saturate(1.25); -webkit-backdrop
   min-height: 100%;
 }
 .info-card h3 { font-size: 13px; font-weight: 700; margin-bottom: 9px; }
+/* 环境变量 title row: heading + 全部测试 action on one line */
+.vars-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.vars-head h3 { margin-bottom: 0; }
+/* dim action button (全部测试) — quieter than .test-chip, same ok/fail palette */
+.dim-btn {
+  flex: none; font-family: var(--font); font-size: 10.5px; font-weight: 700;
+  color: var(--text3); background: var(--chip); border: 1px solid transparent;
+  border-radius: 9px; padding: 2px 9px; cursor: default; white-space: nowrap;
+  transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
+}
+.dim-btn:hover { color: var(--accent); border-color: var(--accent); }
+.dim-btn:disabled { opacity: .55; pointer-events: none; }
+.dim-btn.testing { color: var(--text2); background: var(--chip-hover); }
+.test-history-cap { font-size: 11px; font-weight: 700; color: var(--text2); margin: 10px 0 4px; letter-spacing: .3px; }
+.test-history { list-style: none; margin: 0 0 2px; padding: 0; max-height: 110px; overflow-y: auto; }
+.test-history li { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 2px 0; }
+.test-history .th-ch { width: 190px; flex: none; color: var(--text2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.test-history .th-res { flex: 1; min-width: 0; font-family: var(--mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.test-history .th-at { flex: none; color: var(--text3); font-family: var(--mono); font-size: 10.5px; }
+.test-history li.ok .th-res { color: var(--green); }
+.test-history li.fail .th-res { color: var(--red); }
 .info-card .net-hint { margin-top: auto; padding-top: 8px; }
 .kv { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 2.5px 0; }
 .kv .k { width: 190px; flex: none; font-size: 12px; color: var(--text2);
