@@ -97,6 +97,14 @@ def test_apply_i18n_repaints_history_and_backups():
     assert 'settingsOv' in body and 'classList.contains("show")' in body
 
 
+def test_apply_i18n_repaints_pac_hint_and_speed_cap():
+    body = _func_body(I18N_JS, "applyI18n")
+    assert 'typeof renderPacHint === "function"' in body
+    assert 'typeof renderSpeedCap === "function"' in body
+    assert "renderPacHint();" in body
+    assert "renderSpeedCap();" in body
+
+
 # ── i18n completeness ───────────────────────────────────────────────────────
 def test_zh_en_tables_have_identical_keys():
     tables = _i18n_tables()

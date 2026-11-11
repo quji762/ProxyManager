@@ -1084,6 +1084,17 @@ function fmtMB(num) {
    Starts as null until boot() loads the saved value; persistSoon skips it
    while null so a pre-boot debounce never overwrites the config. */
 let speedFullMbps = null;
+/* Last interface name the speed caption was rendered with, so a language
+   switch can repaint it immediately instead of waiting up to 1 s for the next
+   speed tick. */
+let speedIface = "";
+function renderSpeedCap() {
+  const el = $("speedCap");
+  if (!el) return;
+  el.textContent = speedIface
+    ? t("speedCapIface", { iface: speedIface })
+    : t("speedCap");
+}
 const MbpsToBps = (m) => m * 1000 * 1000 / 8;
 let speedLoopStarted = false;
 function startSpeedLoop() {
@@ -1110,8 +1121,8 @@ async function tickSpeed() {
         ? `<span class="dot n"></span>${t("detecting")}`
         : s.alive ? `<span class="dot g"></span>${t("online")} · ` + esc_(s.port || $("inPort").value || "7897")
                   : `<span class="dot r"></span>${t("noResponse")}`;
-      if (s.iface) $("speedCap").textContent = t("speedCapIface", { iface: s.iface });
-      else $("speedCap").textContent = t("speedCap");
+      speedIface = s.iface || "";
+      renderSpeedCap();
     }
   } catch (e) { /* keep last values */ }
   setTimeout(tickSpeed, 1000);

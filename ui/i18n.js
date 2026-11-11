@@ -579,6 +579,11 @@ function applyI18n() {
   if (typeof renderPorts === "function") renderPorts();
   if (typeof renderProfiles === "function") renderProfiles();
   if (typeof updateHero === "function") updateHero();
+  // These are generated from t() at render time, not data-i18n nodes, so a
+  // language switch must repaint them explicitly (otherwise the PAC hint and
+  // the speed caption stay in the previous language).
+  if (typeof renderPacHint === "function") renderPacHint();
+  if (typeof renderSpeedCap === "function") renderSpeedCap();
   // History rows carry localized channel names; the backup list's action
   // buttons are generated (not data-i18n), so both must repaint on a language
   // switch. Backups only re-fetch while settings is open to avoid a backend
