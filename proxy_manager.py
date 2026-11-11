@@ -2131,7 +2131,14 @@ def _decode_ini_bytes(data: bytes):
     hand-saved with GBK comments must not make the WSL reads/writes raise
     UnicodeDecodeError (which is not an OSError, so it slipped past every
     endpoint's error handling). The returned encoding is reused on write so
-    the file round-trips ('utf-16' re-emits the BOM on encode)."""
+    the file round-trips ('utf-16' re-emits the BOM on encode).
+
+    A BOM-less UTF-16LE/BE file (Notepad "Unicode" saved without the mark, or
+    an editor that stripped it) decodes as UTF-8 — NUL is valid UTF-8 — leaving
+    \\x00 between characters. Every key then fails to match, so the tool would
+    append a duplicate instead of editing the real line. NULs never occur in a
+    real INI, so when UTF-8 yields one and a UTF-16 read is NUL-free, use that.
+    """
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
         try:
             return data.decode("utf-16"), "utf-16"
@@ -2139,7 +2146,25 @@ def _decode_ini_bytes(data: bytes):
             pass
     try:
         enc = "utf-8-sig" if data[:3] == b"\xef\xbb\xbf" else "utf-8"
-        return data.decode("utf-8-sig"), enc
+        text = data.decode("utf-8-sig")
+        if "\x00" in text:
+            # A BOM-less UTF-16 file of mostly-ASCII text puts a NUL in every
+            # other byte. Which byte holds it decides the endianness: decoding
+            # the wrong way round is also NUL-free (it just byte-swaps into
+            # CJK-looking garbage), so "first NUL-free decode" is not enough.
+            even_nul = data[0::2].count(0)
+            odd_nul = data[1::2].count(0)
+            if even_nul != odd_nul:
+                uenc = "utf-16-be" if even_nul > odd_nul else "utf-16-le"
+                try:
+                    cand = data.decode(uenc)
+                except UnicodeDecodeError:
+                    cand = None
+                if cand is not None and "\x00" not in cand:
+                    # Explicit le/be (not "utf-16") so a BOM-less file is
+                    # re-written BOM-less in the same byte order.
+                    return cand, uenc
+        return text, enc
     except UnicodeDecodeError:
         return data.decode("mbcs", errors="replace"), "mbcs"
 
