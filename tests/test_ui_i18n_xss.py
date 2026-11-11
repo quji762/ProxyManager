@@ -135,6 +135,14 @@ def test_autostart_failure_uses_msg_text():
     assert 't("setFail", { err: msgText(r || {})' in APP_JS
 
 
+def test_copy_proxy_url_wired_and_localized():
+    assert 'id="btnCopyProxy"' in HTML
+    assert 'api.call("get_proxy_url"' in APP_JS
+    assert 'case "get_proxy_url"' in APP_JS          # mock parity
+    for key in ("copyProxy", "tipCopyProxy", "copiedUrl"):
+        assert key + ":" in I18N_JS
+
+
 # ── i18n completeness ───────────────────────────────────────────────────────
 def test_zh_en_tables_have_identical_keys():
     tables = _i18n_tables()

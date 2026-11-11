@@ -131,6 +131,14 @@ const api = (() => {
       case "clear_background": mockState.bg_path = ""; return true;
       case "set_autostart": mockState.autostart = !!args[0]; return { ok: true };
       case "copy": return true;
+      case "get_proxy_url": {
+        const host = String(args[0] || mockState.host || "").trim();
+        const port = String(args[1] || mockState.port || "").trim();
+        if (!host || !/^\d+$/.test(port)) return { ok: false, error_key: "errBadAddr" };
+        const u = encodeURIComponent(args[3] || "");
+        const pw = encodeURIComponent(args[4] || "");
+        return { ok: true, url: `${args[2] || "http"}://${u ? `${u}${pw ? ":" + pw : ""}@` : ""}${host}:${port}` };
+      }
       case "check_update": return { status: "latest" };
       case "open_release_page": return true;
       case "list_presets": return mockState.presets.map(p => ({
@@ -1367,6 +1375,19 @@ document.addEventListener("keydown", (e) => {
     e.target.click();
   }
 });
+/* Copy the current FORM address as a canonical proxy URL. The backend builds
+   it with the same percent-encoding the writers use; credentials are included
+   on purpose (the user pastes it into another tool). */
+$("btnCopyProxy").onclick = async () => {
+  const a = snapshotAddr();
+  const r = await api.call("get_proxy_url", a.host, a.port, a.scheme, a.user, a.password);
+  if (!r || !r.ok) { toast(msgText(r || {}), "err"); return; }
+  try {
+    if (navigator.clipboard && location.protocol !== "file:") await navigator.clipboard.writeText(r.url);
+    else await api.call("copy", r.url);
+  } catch (_) { await api.call("copy", r.url); }
+  toast(t("copiedUrl"), "ok");
+};
 
 /* Optional proxy-auth disclosure under the hero config row */
 $("authToggle").onclick = () => {

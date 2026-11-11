@@ -2129,6 +2129,22 @@ class Api:
             pm.log_exception("open_release_page")
             return False
 
+    def get_proxy_url(self, host=None, port=None, scheme=None, user=None,
+                      password=None):
+        """Canonical proxy URL for the current form address (copy button).
+
+        Reuses the same builder as the endpoint writers, so userinfo is
+        percent-encoded exactly as it would be written. An invalid form
+        address returns a localized error instead of a half-built URL."""
+        addr = self._endpoint_addr(host, port)
+        if not addr:
+            return {"ok": False, "error": "代理地址或端口不合法，请先修正",
+                    "error_key": "errBadAddr"}
+        h, p = addr
+        return {"ok": True,
+                "url": pm.build_proxy_url(
+                    h, p, **self._proxy_kw(scheme, user, password))}
+
     def copy(self, text):
         """Clipboard fallback for pages where navigator.clipboard is
         unavailable. clip.exe takes the console codepage; every copyable value
