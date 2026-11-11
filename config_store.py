@@ -12,9 +12,11 @@ import ctypes.wintypes
 import json
 import msvcrt
 import os
+import re
 import shutil
 import sys
 import threading
+import time
 
 import proxy_manager as pm
 
@@ -128,6 +130,11 @@ AUTOSTART_NAME = "ProxyManager"
 
 DEFAULT_PORTS = [7890, 7892, 7897]
 MAX_BG_BYTES = 8 * 1024 * 1024
+# Named address presets and user config backups are bounded so a buggy or
+# malicious caller cannot grow config.json / the backups folder without limit.
+MAX_PRESETS = 24
+MAX_PRESET_NAME = 40
+MAX_BACKUPS = 30
 PROBE_URLS = (
     "http://www.msftconnecttest.com/connecttest.txt",
     "http://captive.apple.com/hotspot-detect.html",
@@ -203,6 +210,7 @@ _SAVE_KEYS = (
     "quit_clear", "wsl_all_distros", "close_hint_done", "restore",
     "applied",
     "wsl_written",
+    "presets",
     "win_rect", "win_max",
 )
 
@@ -258,6 +266,46 @@ def _load_applied(raw):
         password = ""
     return {"host": host, "port": port, "scheme": scheme,
             "user": user, "password": password}
+
+
+def _load_presets(raw):
+    """Sanitize the persisted named address presets.
+
+    Each preset is a saved FORM address (host/port/scheme/user/password), not
+    an applied record — applying one goes through switch_port, which owns the
+    applied/restore semantics. A non-list yields no presets; each entry must
+    carry a usable name and a valid host/port identity (the same fields that
+    make an address actionable), while scheme/user/password are sanitized to
+    safe defaults. Passwords are DPAPI-decrypted here exactly like the main
+    password field. Names are deduped (last wins) and the list is capped.
+    """
+    if not isinstance(raw, list):
+        return []
+    by_name = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or len(name) > MAX_PRESET_NAME:
+            continue
+        host = str(item.get("host") or "")
+        port = str(item.get("port") or "")
+        if not valid_host(host) or not pm.is_valid_port(port):
+            continue
+        scheme = str(item.get("scheme") or "http").strip().lower()
+        if not pm.is_valid_scheme(scheme):
+            scheme = "http"
+        user = str(item.get("user") or "")
+        if not pm.is_valid_userinfo(user):
+            user = ""
+        password = str(item.get("password") or "")
+        if password:
+            password = _dpapi_decrypt(password)
+        if not pm.is_valid_userinfo(password):
+            password = ""
+        by_name[name] = {"name": name, "host": host, "port": str(int(port)),
+                         "scheme": scheme, "user": user, "password": password}
+    return list(by_name.values())[-MAX_PRESETS:]
 
 
 def config_load_warning():
@@ -436,6 +484,7 @@ def load_config():
     # No fallback to the form address: a corrupt host/port yields None
     # ("never written"), never a repaired record (see _load_applied).
     out["applied"] = _load_applied(cfg.get("applied"))
+    out["presets"] = _load_presets(cfg.get("presets"))
     if migrated:
         try:
             save_config(out)
@@ -517,6 +566,17 @@ def save_config(cfg):
                 if pw and not str(pw).startswith(_DPAPI_PREFIX):
                     ap["password"] = _dpapi_encrypt(str(pw))
                 save_data["applied"] = ap
+            if "presets" in save_data and isinstance(save_data["presets"], list):
+                enc_presets = []
+                for p in save_data["presets"]:
+                    if not isinstance(p, dict):
+                        continue
+                    p = dict(p)
+                    pw = p.get("password")
+                    if pw and not str(pw).startswith(_DPAPI_PREFIX):
+                        p["password"] = _dpapi_encrypt(str(pw))
+                    enc_presets.append(p)
+                save_data["presets"] = enc_presets
             cur.update(save_data)
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(cur, f, indent=2, ensure_ascii=False)
@@ -537,6 +597,132 @@ def save_config(cfg):
             except OSError:
                 pass
             return False
+
+
+# ── user config backups ──────────────────────────────────────────────────────
+# A backup is a verbatim snapshot of config.json, so the DPAPI-encrypted
+# secrets stay encrypted — no plaintext is ever written to a backup file.
+# Backups live in a managed folder (no arbitrary caller paths) and restore is
+# confined to form fields + preferences by js_api, never the ownership records.
+_BACKUP_NAME_RE = re.compile(r"^config-\d{8}-\d{6}(?:-\d+)?\.json$")
+
+
+def backups_dir():
+    """Folder holding user config backups. Resolved from APP_DIR at call time
+    so tests can redirect it alongside CONFIG_FILE."""
+    return os.path.join(APP_DIR, "backups")
+
+
+def _safe_backup_path(name):
+    """Resolve a caller-supplied backup name to a path INSIDE backups_dir, or
+    None. The strict basename pattern rejects path separators and '..'
+    outright; the realpath containment check is defense in depth."""
+    name = os.path.basename(str(name or ""))
+    if not _BACKUP_NAME_RE.match(name):
+        return None
+    directory = os.path.realpath(backups_dir())
+    path = os.path.join(directory, name)
+    try:
+        if os.path.commonpath([os.path.realpath(path), directory]) != directory:
+            return None
+    except ValueError:
+        return None
+    return path
+
+
+def _prune_backups(directory):
+    entries = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for n in names:
+        if not _BACKUP_NAME_RE.match(n):
+            continue
+        p = os.path.join(directory, n)
+        try:
+            entries.append((os.stat(p).st_mtime, p))
+        except OSError:
+            continue
+    entries.sort()
+    for _, p in entries[:max(0, len(entries) - MAX_BACKUPS)]:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+def create_backup():
+    """Snapshot the current config.json into the backups folder, returning
+    {name, mtime, size}. Atomic tmp + os.replace so a crash cannot leave a
+    half-written backup; oldest backups beyond MAX_BACKUPS are pruned."""
+    directory = backups_dir()
+    os.makedirs(directory, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    name = f"config-{stamp}.json"
+    n = 1
+    while os.path.exists(os.path.join(directory, name)):
+        n += 1
+        name = f"config-{stamp}-{n}.json"
+    tmp = os.path.join(directory, f".{name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(CONFIG_FILE, tmp)
+        final = os.path.join(directory, name)
+        os.replace(tmp, final)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _prune_backups(directory)
+    st = os.stat(final)
+    return {"name": name, "mtime": st.st_mtime, "size": st.st_size}
+
+
+def list_backups():
+    """Available backups, newest first: [{name, mtime, size}]."""
+    directory = backups_dir()
+    out = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    for n in names:
+        if not _BACKUP_NAME_RE.match(n):
+            continue
+        try:
+            st = os.stat(os.path.join(directory, n))
+        except OSError:
+            continue
+        out.append({"name": n, "mtime": st.st_mtime, "size": st.st_size})
+    out.sort(key=lambda b: b["mtime"], reverse=True)
+    return out
+
+
+def read_backup(name):
+    """Parse a named backup as a JSON object, or None when missing/invalid.
+    The name is validated and confined to the backups folder, so a caller
+    cannot read an arbitrary file."""
+    path = _safe_backup_path(name)
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        return _load_json_object(path)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        pm.log_exception("read_backup: 备份无法读取")
+        return None
+
+
+def delete_backup(name):
+    path = _safe_backup_path(name)
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
 
 
 def autostart_command():

@@ -33,6 +33,8 @@ WSL endpoints can target all user distributions or only the default distro; narr
 - HTTP, SOCKS5 and SOCKS5H endpoints with optional credentials.
 - Independent Win/WSL switches plus page-level enable/disable actions.
 - Port presets and re-application of currently enabled endpoints; a partial failure rolls back what was changed and reports which endpoint failed and why.
+- Named address presets: save a whole address (host/port/scheme/credentials) under a name and switch between setups in one click. Applying a preset re-applies only the endpoints currently enabled and managed by ProxyManager, with the same ownership-safe migration as a port switch.
+- Config backup and one-click restore from Settings: snapshots live in a managed `backups/` folder. Restore brings back form fields and preferences only — it never restores endpoint ownership, so it cannot make quit-clear claim a proxy you set yourself; re-enable endpoints after restoring.
 - WSL2 NAT-aware host gateway rewriting; mirrored mode keeps loopback.
 - Automatic `NO_PROXY` preservation for local traffic.
 - Read-back of actual endpoint state so a failed write does not leave a misleading toggle.
@@ -65,7 +67,7 @@ Build the single-file executable with `build.bat`; build-only dependencies are k
 
 ## Configuration and secrets
 
-Settings are stored in `%APPDATA%\ProxyManager\config.json`. Proxy passwords are protected with Windows DPAPI; save is refused if encryption fails rather than falling back to plaintext. Treat the config and its backup as sensitive anyway.
+Settings are stored in `%APPDATA%\ProxyManager\config.json`. Proxy passwords — including those saved in named presets and in config backups under `%APPDATA%\ProxyManager\backups\` — are protected with Windows DPAPI; save is refused if encryption fails rather than falling back to plaintext. DPAPI ties the ciphertext to your Windows user/machine, so a backup restored on another machine cannot decrypt the old password (the previous password is kept). Treat the config, its `.bak` and the backups folder as sensitive anyway.
 
 ProxyManager tracks both the form values and the last values actually applied to endpoints. Do not collapse those concepts: typing a new host/port must not silently change what restoration logic believes was previously applied.
 

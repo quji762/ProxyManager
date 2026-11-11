@@ -9,10 +9,13 @@ import time
 import proxy_manager as pm
 from messages import LStr, parts_of
 from config_store import (
-    APP_VERSION, DEFAULT_PORTS, MAX_BG_BYTES, PROBE_URLS, _cfg_lock,
+    APP_VERSION, DEFAULT_PORTS, MAX_BG_BYTES, MAX_PRESETS, MAX_PRESET_NAME,
+    PROBE_URLS, _cfg_lock,
     _DPAPI_PREFIX, DpapiError, _dpapi_decrypt, _dpapi_encrypt,
     autostart_enabled, autostart_set, load_config, save_config, valid_host,
     config_load_warning,
+    create_backup, read_backup,
+    list_backups as _cfg_list_backups, delete_backup as _cfg_delete_backup,
 )
 from window_win32 import (
     _POINT, _RECT, _is_maximized, _our_hwnds, _work_area_for_hwnd,
@@ -455,6 +458,124 @@ class Api:
         if wsl_cleanup is not None:
             return {"ok": True, "wsl_cleanup": wsl_cleanup}
         return True
+
+    # ── named address presets ───────────────────────────────────────────────
+    # A preset stores a FORM address (host/port/scheme/user/password), not an
+    # applied record. Applying one reuses switch_port's full-address migration
+    # (the UI fills the form from get_preset then calls applyAddress), so the
+    # applied/restore ownership semantics are identical to a port switch.
+    def list_presets(self):
+        """Preset metadata for the UI — never the plaintext password."""
+        return [{"name": p["name"], "host": p["host"], "port": p["port"],
+                 "scheme": p["scheme"], "user": p["user"],
+                 "has_password": bool(p["password"])}
+                for p in load_config().get("presets", [])]
+
+    def get_preset(self, name):
+        """One preset's full address (password decrypted) for applying. Same
+        trust level as get_config, which already hands the UI its password."""
+        name = str(name or "").strip()
+        for p in load_config().get("presets", []):
+            if p["name"] == name:
+                return {"ok": True, **p}
+        return {"ok": False, "error": "预设不存在", "error_key": "presetMissing"}
+
+    def save_preset(self, name, host=None, port=None, scheme=None,
+                    user=None, password=None):
+        name = str(name or "").strip()
+        if not name or len(name) > MAX_PRESET_NAME:
+            return {"ok": False, "error": "方案名称须为 1-40 个字符",
+                    "error_key": "presetBadName"}
+        # Explicit JS-passed form values win over the cached self.*: the UI may
+        # save a preset right after typing, before persistSoon's 400ms debounce.
+        h = str(host).strip() if host else self.host
+        p = str(port).strip() if port else self.port
+        if not valid_host(h) or not pm.is_valid_port(p):
+            return {"ok": False, "error": "代理地址不合法，请先修正",
+                    "error_key": "errBadAddr"}
+        kw = self._proxy_kw(scheme, user, password)
+        if not pm.is_valid_scheme(kw["scheme"]) \
+                or not pm.is_valid_userinfo(kw["user"]) \
+                or not pm.is_valid_userinfo(kw["password"]):
+            return {"ok": False, "error": "协议或用户名/密码含非法字符",
+                    "error_key": "errBadAddr"}
+        with self._endpoint_mutation_lock, _cfg_lock:
+            cfg = load_config()
+            presets = [x for x in cfg.get("presets", []) if x["name"] != name]
+            presets.append({"name": name, "host": h, "port": str(int(p)),
+                            "scheme": kw["scheme"], "user": kw["user"],
+                            "password": kw["password"]})
+            cfg["presets"] = presets[-MAX_PRESETS:]
+            err = _persist_cfg(cfg)
+            if err:
+                return {"ok": False, **err}
+        return {"ok": True, "name": name}
+
+    def delete_preset(self, name):
+        name = str(name or "").strip()
+        with self._endpoint_mutation_lock, _cfg_lock:
+            cfg = load_config()
+            cfg["presets"] = [x for x in cfg.get("presets", [])
+                              if x["name"] != name]
+            err = _persist_cfg(cfg)
+            if err:
+                return {"ok": False, **err}
+        return {"ok": True}
+
+    # ── config backup / restore ─────────────────────────────────────────────
+    # Restore deliberately routes through save_config, which never accepts the
+    # ownership records (restore/applied/wsl_written) from caller data — so a
+    # backup can never resurrect stale ownership and make quit-clear claim the
+    # user's current proxy. Only form fields + preferences are restored; the
+    # endpoint enable prefs are restored as preferences, not applied to systems.
+    _RESTORE_KEYS = (
+        "host", "port", "scheme", "user", "password",
+        "powershell", "wsl", "git_win", "git_wsl", "npm", "pip",
+        "npmwsl", "pipwsl", "lang", "pin", "mode", "ports",
+        "bg_path", "bg_dim", "card_alpha", "speed_full",
+        "quit_clear", "wsl_all_distros", "close_hint_done",
+    )
+
+    def backup_config(self):
+        with self._endpoint_mutation_lock:
+            # Flush the current in-memory form + ownership state first so the
+            # snapshot is current (save_config encrypts the password on disk).
+            saved = self.save_config({})
+            if _save_failed(saved):
+                return {"ok": False, **(saved if isinstance(saved, dict)
+                        else {"error": "配置文件写入失败",
+                              "error_key": "saveFail"})}
+            try:
+                info = create_backup()
+            except Exception as e:
+                pm.log_exception("backup_config")
+                return {"ok": False, "error": str(e), "error_key": "backupFail"}
+        return {"ok": True, **info}
+
+    def list_backups(self):
+        return _cfg_list_backups()
+
+    def restore_backup(self, name):
+        data = read_backup(name)
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "备份不存在或已损坏",
+                    "error_key": "backupMissing"}
+        payload = {k: data[k] for k in self._RESTORE_KEYS if k in data}
+        # The on-disk password is DPAPI-encrypted; decrypt before handing it to
+        # save_config (which would otherwise treat the blob as plaintext and
+        # double-encrypt it). A failed decrypt yields the blob, which
+        # save_config's userinfo validation rejects — the old password is kept.
+        if "password" in payload:
+            payload["password"] = _dpapi_decrypt(str(payload["password"]))
+        saved = self.save_config(payload)
+        if _save_failed(saved):
+            return {"ok": False, **(saved if isinstance(saved, dict)
+                    else {"error": "配置文件写入失败",
+                          "error_key": "saveFail"})}
+        return {"ok": True}
+
+    def delete_backup(self, name):
+        return {"ok": _cfg_delete_backup(name)}
 
     # ── status refresh: one call per slice, fired in parallel by the UI ──
     def refresh_item(self, which):

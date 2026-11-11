@@ -239,6 +239,27 @@ const I18N = {
     updateRecheck: "重新检查",
     updateDownload: "打开下载页",
     pacActive: "检测到 PAC 脚本：{url} — 浏览器可能走 PAC，静态系统代理不一定生效",
+    presetManage: "方案预设管理",
+    presetNamePlaceholder: "方案名称，如 公司",
+    presetSave: "保存当前",
+    tipManagePresets: "管理方案预设（保存整套地址 / 协议 / 凭据）",
+    tipApplyPreset: "切换到方案 {name}（{addr}）",
+    presetSaved: "方案「{name}」已保存",
+    presetDeleted: "方案「{name}」已删除",
+    presetBadName: "方案名称须为 1-40 个字符",
+    presetMissing: "预设不存在",
+    backupTitle: "配置备份",
+    backupDesc: "备份当前配置到本机，随时一键恢复。恢复只还原表单与偏好，不改动端点归属，需自行重新启用。",
+    backupNow: "立即备份",
+    backupDone: "配置已备份",
+    backupFail: "备份失败",
+    backupDeleted: "备份已删除",
+    backupMissing: "备份不存在或已损坏",
+    noBackups: "暂无备份",
+    restore: "恢复",
+    delete: "删除",
+    confirmRestore: "将用该备份覆盖当前表单与偏好设置（不会改动已启用端点的归属）。确定恢复？",
+    restoreDone: "配置已恢复，请按需重新启用端点",
   },
   en: {
     appName: "Proxy Manager",
@@ -475,6 +496,27 @@ const I18N = {
     updateRecheck: "Re-check",
     updateDownload: "Open download page",
     pacActive: "PAC script detected: {url} — browsers may follow the PAC, so the static system proxy may not apply",
+    presetManage: "Address presets",
+    presetNamePlaceholder: "Preset name, e.g. Work",
+    presetSave: "Save current",
+    tipManagePresets: "Manage address presets (save a full address / scheme / credentials)",
+    tipApplyPreset: "Switch to preset {name} ({addr})",
+    presetSaved: "Preset \"{name}\" saved",
+    presetDeleted: "Preset \"{name}\" deleted",
+    presetBadName: "Preset name must be 1-40 characters",
+    presetMissing: "Preset not found",
+    backupTitle: "Config backup",
+    backupDesc: "Back up the current config locally and restore it anytime. Restore only resets the form and preferences — endpoint ownership is untouched, so re-enable endpoints yourself.",
+    backupNow: "Back up now",
+    backupDone: "Config backed up",
+    backupFail: "Backup failed",
+    backupDeleted: "Backup deleted",
+    backupMissing: "Backup not found or corrupted",
+    noBackups: "No backups yet",
+    restore: "Restore",
+    delete: "Delete",
+    confirmRestore: "This overwrites the current form and preferences with the backup (enabled endpoints' ownership is unchanged). Restore?",
+    restoreDone: "Config restored — re-enable endpoints as needed",
   },
 };
 
@@ -518,6 +560,7 @@ function applyI18n() {
   if (bg && typeof cfg !== "undefined" && !cfg.bg_path) bg.textContent = t("bgNone");
   if (typeof renderEndpoints === "function") renderEndpoints();
   if (typeof renderPorts === "function") renderPorts();
+  if (typeof renderProfiles === "function") renderProfiles();
   if (typeof updateHero === "function") updateHero();
 }
 

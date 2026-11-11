@@ -14,6 +14,7 @@ const api = (() => {
     ps: true, wsl: false, gitwin: false, gitwsl: false, npm: false, pip: false,
     npmwsl: false, pipwsl: false, sys: false,
     ports: [7890, 7892, 7897], autostart: false,
+    presets: [], backups: [],
     lip: "192.168.1.146", wip: "172.24.156.88", wmode: "Mirrored",
     psHttp: "http://127.0.0.1:7897",
     wslHttp: "未设置", wslGit: "未设置", gitWinVal: "未设置",
@@ -105,6 +106,48 @@ const api = (() => {
       case "copy": return true;
       case "check_update": return { status: "latest" };
       case "open_release_page": return true;
+      case "list_presets": return mockState.presets.map(p => ({
+        name: p.name, host: p.host, port: p.port, scheme: p.scheme,
+        user: p.user, has_password: !!p.password }));
+      case "get_preset": {
+        const p = mockState.presets.find(x => x.name === String(args[0]).trim());
+        return p ? { ok: true, ...p } : { ok: false, error_key: "presetMissing" };
+      }
+      case "save_preset": {
+        const name = String(args[0] || "").trim();
+        if (!name || name.length > 40) return { ok: false, error_key: "presetBadName" };
+        const a = snapshotAddr();
+        const host = args[1] != null ? String(args[1]) : a.host;
+        const port = args[2] != null ? String(args[2]) : a.port;
+        if (!host || !/^\d+$/.test(port)) return { ok: false, error_key: "errBadAddr" };
+        const rec = { name, host, port, scheme: args[3] || a.scheme || "http",
+          user: args[4] != null ? String(args[4]) : a.user,
+          password: args[5] != null ? String(args[5]) : a.password };
+        mockState.presets = mockState.presets.filter(x => x.name !== name);
+        mockState.presets.push(rec);
+        return { ok: true, name };
+      }
+      case "delete_preset":
+        mockState.presets = mockState.presets.filter(x => x.name !== String(args[0]).trim());
+        return { ok: true };
+      case "backup_config": {
+        const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15);
+        const name = `config-${stamp.slice(0, 8)}-${stamp.slice(8, 14)}.json`;
+        mockState.backups.unshift({ name, mtime: Date.now() / 1000,
+          size: 512, form: { host: mockState.host, port: mockState.port,
+            scheme: mockState.scheme, user: mockState.user, password: mockState.password } });
+        return { ok: true, name, mtime: Date.now() / 1000, size: 512 };
+      }
+      case "list_backups": return mockState.backups.map(b => ({ name: b.name, mtime: b.mtime, size: b.size }));
+      case "restore_backup": {
+        const b = mockState.backups.find(x => x.name === args[0]);
+        if (!b) return { ok: false, error_key: "backupMissing" };
+        Object.assign(mockState, b.form);
+        return { ok: true };
+      }
+      case "delete_backup":
+        mockState.backups = mockState.backups.filter(x => x.name !== args[0]);
+        return { ok: true };
       default: return null;
     }
   }
@@ -452,7 +495,7 @@ function renderPorts() {
   $("portChips").querySelectorAll(".pchip[data-port]").forEach((el) => {
     el.onclick = () => quickSwitchPort(el.dataset.port);
   });
-  $("portManage").onclick = (e) => { e.stopPropagation(); renderPortPop(); $("portPop").classList.toggle("show"); };
+  $("portManage").onclick = (e) => { e.stopPropagation(); $("profilePop").classList.remove("show"); renderPortPop(); $("portPop").classList.toggle("show"); };
 }
 
 function renderPortPop() {
@@ -608,6 +651,7 @@ async function applyAddress(next, prev) {
     toast(t("switchFail", { err: e }), "err");
   } finally { setBusyAll(false); }
   renderPorts();
+  renderProfiles();
   refreshAll();
 }
 
@@ -617,6 +661,87 @@ async function quickSwitchPort(p) {
   $("inPort").value = String(p);
   renderPorts();
   await applyAddress(snapshotAddr(), prev);
+}
+
+/* ═══════════════ Named address presets ═══════════════ */
+/* A preset is a saved FORM address (host/port/scheme/user/password). Applying
+   one fetches the decrypted address via get_preset then reuses applyAddress →
+   switch_port, so the applied/restore ownership semantics are identical to a
+   port switch: only currently-enabled managed endpoints are re-applied. */
+let presets = [];   // metadata from list_presets — never the plaintext password
+
+async function loadPresets() {
+  try { presets = (await api.call("list_presets")) || []; }
+  catch (_) { presets = []; }
+  renderProfiles();
+}
+
+function presetMatchesForm(p) {
+  const a = snapshotAddr();
+  return String(p.port) === a.port && p.host === a.host
+    && (p.scheme || "http") === a.scheme && (p.user || "") === a.user
+    && !!p.has_password === !!a.password;
+}
+
+function renderProfiles() {
+  const wrap = $("profileChips");
+  if (!wrap) return;
+  const chips = presets.map((p) => {
+    const addr = `${p.scheme}://${p.host}:${p.port}`;
+    return `<button class="pchip ${presetMatchesForm(p) ? "active" : ""}" data-preset="${esc_(p.name)}" data-tip="${esc_(t("tipApplyPreset", { name: p.name, addr }))}">${esc_(p.name)}</button>`;
+  }).join("");
+  wrap.innerHTML = chips + `<button class="pchip add" id="profileManage" data-tip="${t("tipManagePresets")}">＋</button>`;
+  wrap.querySelectorAll(".pchip[data-preset]").forEach((el) => {
+    el.onclick = () => applyPreset(el.dataset.preset);
+  });
+  $("profileManage").onclick = (e) => {
+    e.stopPropagation();
+    $("portPop").classList.remove("show");
+    renderProfilePop();
+    $("profilePop").classList.toggle("show");
+  };
+}
+
+function renderProfilePop() {
+  const list = $("profilePopList");
+  if (!list) return;
+  list.innerHTML = presets.map((p) =>
+    `<div class="row" data-apply="${esc_(p.name)}">
+       <span class="pv">${esc_(p.name)} <span class="paddr">${esc_(p.scheme)}://${esc_(p.host)}:${esc_(p.port)}</span>${presetMatchesForm(p) ? ' <span class="cur-tag">' + t("current") + '</span>' : ""}</span>
+       <button type="button" class="del" data-del="${esc_(p.name)}" data-tip="${t("removePreset")}">×</button>
+     </div>`).join("")
+    || `<div class="empty-note">${t("noPresets")}</div>`;
+  list.querySelectorAll("[data-apply]").forEach((el) => {
+    el.onclick = (e) => {
+      if (e.target.closest("[data-del]")) return;
+      $("profilePop").classList.remove("show");
+      applyPreset(el.dataset.apply);
+    };
+  });
+  list.querySelectorAll("[data-del]").forEach((el) => {
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      const name = el.dataset.del;
+      const r = await api.call("delete_preset", name);
+      if (r && r.ok) { await loadPresets(); renderProfilePop(); toast(t("presetDeleted", { name }), "ok"); }
+      else toast(msgText(r), "err");
+    };
+  });
+}
+
+async function applyPreset(name) {
+  const prev = snapshotAddr();
+  let p;
+  try { p = await api.call("get_preset", name); }
+  catch (e) { toast(t("switchFail", { err: e }), "err"); return; }
+  if (!p || !p.ok) {
+    toast(msgText(p || { error_key: "presetMissing" }), "err");
+    await loadPresets();
+    return;
+  }
+  const next = { host: p.host, port: String(p.port), scheme: p.scheme || "http",
+                 user: p.user || "", password: p.password || "" };
+  await applyAddress(next, prev);
 }
 
 function setBusyAll(b) {
@@ -1041,6 +1166,7 @@ async function openSettings() {
   setTgl($("tglQuitClear"), !!c.quit_clear);
   setTgl($("tglWslAll"), c.wsl_all_distros !== false);
   renderUpdateStatus();
+  renderBackupList();
   if (c.bg_path) {
     const bg = await api.call("get_background");
     if (bg && bg.error) toast(msgText(bg), "err");
@@ -1055,6 +1181,90 @@ function closeSettings() {
 $("settingsOv").addEventListener("mousedown", (e) => {
   if (e.target === $("settingsOv")) closeSettings();
 });
+
+/* ═══════════════ Config backup / one-click restore ═══════════════ */
+/* Backups live in a managed folder; the backend validates names. Restore
+   routes through save_config, which never accepts ownership records from
+   caller data — so a restore brings back the form + preferences but cannot
+   resurrect a stale applied/restore record. Endpoints are left as-is; the
+   user re-enables them, so syncFormAfterRestore must NOT call applyAddress. */
+function fmtBackupTime(mtime) {
+  const d = new Date(mtime * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+async function renderBackupList() {
+  const el = $("backupList");
+  if (!el) return;
+  let list = [];
+  try { list = (await api.call("list_backups")) || []; } catch (_) { list = []; }
+  if (!list.length) { el.innerHTML = `<div class="empty-note">${t("noBackups")}</div>`; return; }
+  el.innerHTML = list.map((b) =>
+    `<div class="backup-item">
+       <span class="bv">${esc_(fmtBackupTime(b.mtime))}<span class="bsz">${(b.size / 1024).toFixed(1)} KB</span></span>
+       <span class="bacts">
+         <button class="btn tiny outline" data-restore="${esc_(b.name)}">${t("restore")}</button>
+         <button class="btn tiny subtle" data-delbackup="${esc_(b.name)}" data-tip="${t("delete")}">×</button>
+       </span>
+     </div>`).join("");
+  el.querySelectorAll("[data-restore]").forEach((btn) => {
+    btn.onclick = () => restoreBackup(btn.dataset.restore);
+  });
+  el.querySelectorAll("[data-delbackup]").forEach((btn) => {
+    btn.onclick = async () => {
+      const r = await api.call("delete_backup", btn.dataset.delbackup);
+      if (r && r.ok) { renderBackupList(); toast(t("backupDeleted"), "ok"); }
+      else toast(t("backupFail"), "err");
+    };
+  });
+}
+
+async function restoreBackup(name) {
+  if (!(await confirmDlg(t("confirmRestore"), t("restore")))) return;
+  let r;
+  try { r = await api.call("restore_backup", name); }
+  catch (e) { toast(t("switchFail", { err: e }), "err"); return; }
+  if (!r || !r.ok) { toast(msgText(r || { error_key: "backupMissing" }), "err"); return; }
+  await syncFormAfterRestore();
+  toast(t("restoreDone"), "ok");
+}
+
+/* Refill the form + preferences from the restored config WITHOUT migrating
+   endpoints: lastApplied stays the live applied record, so the switches keep
+   reflecting what is really on the system. No applyAddress here. */
+async function syncFormAfterRestore() {
+  const c = await api.call("get_config");
+  $("inHost").value = c.host; $("inPort").value = c.port;
+  if ($("inScheme")) $("inScheme").value = c.scheme || "http";
+  if ($("inUser")) $("inUser").value = c.user || "";
+  if ($("inPass")) $("inPass").value = c.password || "";
+  lastApplied = {
+    host: String(c.applied_host || ""), port: String(c.applied_port || ""),
+    scheme: c.applied_scheme || "http",
+    user: c.applied_user || "", password: c.applied_password || "",
+  };
+  cfg.ports = (c.ports || []).map(String);
+  cfg.quit_clear = !!c.quit_clear;
+  cfg.wsl_all_distros = c.wsl_all_distros !== false;
+  cfg.wsl_written = c.wsl_written || {};
+  setTgl($("tglQuitClear"), cfg.quit_clear);
+  setTgl($("tglWslAll"), cfg.wsl_all_distros);
+  renderPorts(); renderProfiles(); renderEndpoints(); updateHero();
+  refreshAll();
+}
+
+$("btnBackup").onclick = async () => {
+  const btn = $("btnBackup");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const r = await api.call("backup_config");
+    if (r && r.ok) { toast(t("backupDone"), "ok"); renderBackupList(); }
+    else toast(msgText(r), "err");
+  } catch (_) { toast(t("backupFail"), "err"); }
+  finally { btn.disabled = false; }
+};
 
 /* ═══════════════ Copy on click (and keyboard: Enter/Space on the value) ═══════════════ */
 document.addEventListener("click", async (e) => {
@@ -1328,6 +1538,20 @@ $("portAddBtn").onclick = () => {
   renderPorts(); renderPortPop(); persistSoon();
 };
 $("portAddIn").addEventListener("keydown", (e) => { if (e.key === "Enter") $("portAddBtn").click(); });
+
+/* Address preset popover: save the current form as a named preset */
+$("profileAddBtn").onclick = async () => {
+  const name = $("profileAddIn").value.trim();
+  if (!name) { toast(t("presetBadName"), "err"); return; }
+  const a = snapshotAddr();
+  const r = await api.call("save_preset", name, a.host, a.port, a.scheme, a.user, a.password);
+  if (r && r.ok) {
+    $("profileAddIn").value = "";
+    await loadPresets(); renderProfilePop();
+    toast(t("presetSaved", { name }), "ok");
+  } else toast(msgText(r), "err");
+};
+$("profileAddIn").addEventListener("keydown", (e) => { if (e.key === "Enter") $("profileAddBtn").click(); });
 document.addEventListener("keydown", (e) => {
   if (!_dlgOpen) return;
   if (e.key === "Escape") $("dlgCancel").click();
@@ -1340,6 +1564,7 @@ document.addEventListener("keydown", (e) => {
 });
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".ports-wrap")) $("portPop").classList.remove("show");
+  if (!e.target.closest(".profiles-wrap")) $("profilePop").classList.remove("show");
 });
 
 /* Settings wiring */
@@ -1467,6 +1692,7 @@ async function boot() {
     if (w && w.maximized) applyMaximized(true);
   } catch (_) { /* cosmetic only */ }
   renderPorts();
+  loadPresets();
   renderEndpoints();
   renderHistory();
   // Form fields may have been persistSoon'd without switch_port. If they
