@@ -105,6 +105,26 @@ def test_apply_i18n_repaints_pac_hint_and_speed_cap():
     assert "renderSpeedCap();" in body
 
 
+def test_esc_covers_all_html_metacharacters():
+    line = next(ln for ln in APP_JS.splitlines() if ln.startswith("function esc_"))
+    assert '[&<>"\']' in line
+    for ent in ("&amp;", "&lt;", "&gt;", "&quot;", "&#39;"):
+        assert ent in line
+
+
+def test_history_render_escapes_dynamic_fields():
+    start = APP_JS.index("function renderHistory()")
+    block = APP_JS[start:APP_JS.index("async function testAllChannels", start)]
+    assert "esc_(h.error" in block
+    assert "esc_(testChannelName(" in block
+
+
+def test_endpoint_card_escapes_detected_value():
+    start = APP_JS.index("function epCard(")
+    block = APP_JS[start:APP_JS.index("function renderEndpoints", start)]
+    assert "esc_(val)" in block
+
+
 # ── i18n completeness ───────────────────────────────────────────────────────
 def test_zh_en_tables_have_identical_keys():
     tables = _i18n_tables()

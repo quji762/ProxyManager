@@ -57,6 +57,7 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 - Background images are confined to local files: `save_config` / `get_background` reject UNC and device paths so loading a background cannot trigger SMB authentication (an NTLM-relay surface) (`js_api.py`, `proxy_manager.py`).
 - Restore hardening: a PowerShell stash that fails to decrypt keeps its `DPAPI:` marker so restore falls back to surgical disable instead of treating every environment variable name as a user value to delete; the system-proxy restore validates the stashed URL and refuses to write a malformed `ProxyServer` (`js_api.py`).
 - `switch_port` no longer backfills a managed URL from the form when there is no valid applied record, so a hand-configured proxy at the same address is not misclaimed as ProxyManager's (`js_api.py`).
+- `esc_` now also escapes the single quote (`'` → `&#39;`), so an escaped value is safe in single-quoted attributes and inline handlers too, not only the double-quoted/text-node contexts used today. Contract tests assert the escape map covers all five HTML metacharacters and that the history rows and endpoint cards escape their dynamic fields (`ui/app.js`, `tests/test_ui_i18n_xss.py`).
 
 ## Current baseline
 
