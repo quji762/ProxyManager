@@ -5,6 +5,7 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 ## Unreleased
 
 ### Added
+- A **Copy diagnostics** button in Settings: assembles version, OS, Python, language, schema version, persisted endpoint switches, the applied/residual ownership summary (no host, userinfo, password or proxy URL) and WSL availability into copyable text, so a bug report doesn't have to be hand-crafted (`js_api.py`, `ui/app.js`, `ui/index.html`).
 - One-click **Copy URL** next to the proxy form: builds the current form address into a canonical proxy URL with the same percent-encoding the writers use (credentials included, since the point is pasting it into another tool) and copies it via the clipboard, falling back to the backend `clip.exe` helper. An invalid form address shows the localized error instead of copying a half-built URL (`js_api.py`, `ui/app.js`, `ui/index.html`).
 - Keyboard shortcuts: digits **1–9** switch to the matching port preset (the chip tooltip shows its number) and **Esc** closes the port/preset popovers. Both are ignored while typing or while a dialog/settings pane is open, so normal text entry is never hijacked (`ui/app.js`, `tests/test_ui_shortcuts.py`).
 - Tray menu now shows how many endpoints are currently enabled (derived from the applied record and persisted switches, never the form fields) and adds one-click **Enable all** / **Disable all**; both run on a background worker with balloon feedback so the tray never blocks (`tray_icon.py`).

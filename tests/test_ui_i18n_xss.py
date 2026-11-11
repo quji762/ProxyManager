@@ -143,6 +143,14 @@ def test_copy_proxy_url_wired_and_localized():
         assert key + ":" in I18N_JS
 
 
+def test_diagnostics_button_wired_and_localized():
+    assert 'id="btnCopyDiag"' in HTML
+    assert 'api.call("get_diagnostics"' in APP_JS
+    assert 'case "get_diagnostics"' in APP_JS        # mock parity
+    for key in ("diagTitle", "diagDesc", "diagCopy", "diagCopied"):
+        assert key + ":" in I18N_JS
+
+
 # ── i18n completeness ───────────────────────────────────────────────────────
 def test_zh_en_tables_have_identical_keys():
     tables = _i18n_tables()

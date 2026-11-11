@@ -2145,6 +2145,55 @@ class Api:
                 "url": pm.build_proxy_url(
                     h, p, **self._proxy_kw(scheme, user, password))}
 
+    def get_diagnostics(self):
+        """Non-sensitive, copyable diagnostics for bug reports.
+
+        Deliberately excludes the host, userinfo, passwords, proxy URLs and the
+        restore stash. Endpoint state comes from the persisted switches and the
+        applied/residual ownership records — never the form fields."""
+        import platform as _platform
+        cfg = load_config()
+        toggles = {k: bool(cfg.get(k, False)) for k in
+                   ("powershell", "wsl", "git_win", "git_wsl",
+                    "npm", "pip", "npmwsl", "pipwsl")}
+        applied = bool(self.applied_host and self.applied_port)
+        data = {
+            "version": APP_VERSION,
+            "os": _platform.platform(),
+            "python": _platform.python_version(),
+            "lang": cfg.get("lang", "zh"),
+            "schema": cfg.get("schema_version"),
+            "applied": applied,
+            "applied_scheme": self.applied_kw.get("scheme", "http") if applied else "",
+            "applied_port": str(self.applied_port) if applied else "",
+            "has_credentials": bool(applied and (
+                self.applied_kw.get("user") or self.applied_kw.get("password"))),
+            "residual_targets": sorted(self._residual),
+            "toggles": toggles,
+            "wsl_all_distros": bool(cfg.get("wsl_all_distros", True)),
+            "quit_clear": bool(cfg.get("quit_clear", False)),
+            "autostart": autostart_enabled(),
+            "wsl_available": pm.wsl_available(),
+        }
+        lines = [
+            f"ProxyManager {data['version']}",
+            f"OS: {data['os']}",
+            f"Python: {data['python']}",
+            f"lang={data['lang']} schema={data['schema']} "
+            f"wsl_all={data['wsl_all_distros']} quit_clear={data['quit_clear']} "
+            f"autostart={data['autostart']} wsl_available={data['wsl_available']}",
+            "applied=" + ("yes" if applied else "no"),
+        ]
+        if applied:
+            lines.append(
+                f"applied scheme={data['applied_scheme']} "
+                f"port={data['applied_port']} "
+                f"creds={'yes' if data['has_credentials'] else 'no'}")
+        lines.append("toggles: " + ", ".join(
+            f"{k}={'on' if v else 'off'}" for k, v in toggles.items()))
+        lines.append("residual: " + (", ".join(data["residual_targets"]) or "(none)"))
+        return {"ok": True, "text": "\n".join(lines), "data": data}
+
     def copy(self, text):
         """Clipboard fallback for pages where navigator.clipboard is
         unavailable. clip.exe takes the console codepage; every copyable value

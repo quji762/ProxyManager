@@ -131,6 +131,7 @@ const api = (() => {
       case "clear_background": mockState.bg_path = ""; return true;
       case "set_autostart": mockState.autostart = !!args[0]; return { ok: true };
       case "copy": return true;
+      case "get_diagnostics": return { ok: true, text: "ProxyManager mock diagnostics", data: {} };
       case "get_proxy_url": {
         const host = String(args[0] || mockState.host || "").trim();
         const port = String(args[1] || mockState.port || "").trim();
@@ -1389,6 +1390,15 @@ $("btnCopyProxy").onclick = async () => {
     else await api.call("copy", r.url);
   } catch (_) { await api.call("copy", r.url); }
   toast(t("copiedUrl"), "ok");
+};
+$("btnCopyDiag").onclick = async () => {
+  const r = await api.call("get_diagnostics");
+  if (!r || !r.ok) { toast(msgText(r || {}), "err"); return; }
+  try {
+    if (navigator.clipboard && location.protocol !== "file:") await navigator.clipboard.writeText(r.text);
+    else await api.call("copy", r.text);
+  } catch (_) { await api.call("copy", r.text); }
+  toast(t("diagCopied"), "ok");
 };
 
 /* Optional proxy-auth disclosure under the hero config row */
