@@ -527,6 +527,89 @@ def test_switch_port_reports_rollback_failures_and_still_on(tmp_path,
     assert api.port == "7897"
 
 
+def test_switch_port_residual_claimed_after_rollback_failure(tmp_path,
+                                                             monkeypatch):
+    """回滚失败把 pip 留在新地址、applied_* 停在旧地址时，新地址必须记为残留
+    归属：重启后仍能认领、quit-clear 视其为本工具所有、后续 disable 卸载的正是
+    残留地址，成功后记录清除。"""
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "c.json"))
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api = Api()
+    api.host, api.port = "127.0.0.1", "7897"
+    api.applied_host, api.applied_port = "127.0.0.1", "7897"
+    api.applied_kw = {"scheme": "http", "user": "", "password": ""}
+    managed = "http://127.0.0.1:7897"
+
+    def rec(name, fail):
+        def _fn(*args, **kwargs):
+            if fail(args, kwargs):
+                return "boom"
+            return True
+        return _fn
+
+    with patch("js_api.pm.get_ps_status", return_value=pm.UNSET), \
+         patch("js_api.pm.get_sys_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_git_proxy_win", return_value=pm.UNSET), \
+         patch("js_api.pm.get_npm_proxy", return_value=managed), \
+         patch("js_api.pm.get_pip_proxy", return_value=managed), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value=pm.UNSET), \
+         patch.object(api, "refresh_item",
+                      return_value={"on": False, "git": pm.UNSET}), \
+         patch("js_api.pm.set_ps_proxy", return_value=True), \
+         patch("js_api.pm.set_sys_proxy", return_value=True), \
+         patch("js_api.pm.set_git_proxy", return_value=True), \
+         patch("js_api.pm.set_wsl_proxy", return_value=True), \
+         patch("js_api.pm.set_npm_proxy",
+               side_effect=rec("npm", lambda a, k: a[2] and str(a[1]) == "7890")), \
+         patch("js_api.pm.set_npm_proxy_wsl", return_value=True), \
+         patch("js_api.pm.set_pip_proxy_wsl", return_value=True), \
+         patch("js_api.pm.set_pip_proxy",
+               side_effect=rec("pip", lambda a, k: (not a[2])
+                               and str(a[1]) == "7890")):
+        r = api.switch_port("7890", "127.0.0.1")
+
+    assert r["ok"] is False
+    assert r["applied"] == ["pip"]             # pip 仍持新地址
+    assert api._residual["pip"]["host"] == "127.0.0.1"
+    assert api._residual["pip"]["port"] == "7890"
+    disk = _disk_cfg(tmp_path)
+    assert disk["residual"]["pip"]["port"] == "7890"
+
+    # 重启后记录仍在（否则退出清理会把它当成用户状态跳过）。
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api2 = Api()
+    assert api2._residual["pip"]["port"] == "7890"
+
+    # quit-clear 认领残留地址。
+    residual_url = "http://127.0.0.1:7890"
+    with patch("js_api.pm.get_pip_proxy", return_value=residual_url):
+        assert api._quit_clear_owns("pip") is True
+
+    # disable 卸载的是残留地址（不是陈旧的 applied 地址），成功后记录清除。
+    with patch("js_api.pm.get_pip_proxy", return_value=residual_url), \
+         patch("js_api.pm.set_pip_proxy", return_value=True) as sp:
+        r2 = api.do_toggle("pip", False)
+    assert r2["ok"] is True
+    sp.assert_called_once()
+    assert sp.call_args[0][:3] == ("127.0.0.1", "7890", False)
+    assert "pip" not in api._residual
+    assert "pip" not in _disk_cfg(tmp_path).get("residual", {})
+
+
+def test_load_residual_drops_invalid_and_unknown():
+    """残留记录按 applied 同口径校验：非法 host/port、未知端点键一律丢弃。"""
+    from config_store import _load_residual
+    assert _load_residual({
+        "pip": {"host": "127.0.0.1", "port": "7890"},
+        "bogus": {"host": "127.0.0.1", "port": "1"},
+        "npm": {"host": "bad host", "port": "2"},
+    }) == {"pip": {"host": "127.0.0.1", "port": "7890", "scheme": "http",
+                   "user": "", "password": ""}}
+    assert _load_residual(None) == {}
+    assert _load_residual([]) == {}
+
+
 def test_switch_port_phase1_rollback_failure_is_reported(tmp_path, monkeypatch):
     """第一阶段 sys 关闭失败 + ps 的回滚重新启用也失败：两条都要报出来。"""
     monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "c.json"))

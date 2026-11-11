@@ -56,6 +56,7 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 
 - 用户当前编辑的 host/port/scheme/user/password；
 - `applied`：真正写到端点的最后一组值；没有 `applied` 记录表示本工具从未写入过端点，不得用表单地址回填。
+- `residual`：回滚失败后本工具仍写入、但不属于 `applied` 的地址（逐端点记录）。退出清理/禁用凭它认领该端点，避免把本工具开启的代理遗留成孤儿；成功切换或开关后清除。绝不用表单或当前检测值回填。
 - `restore`：覆盖其他代理前保存的值。
 
 端口 quick-switch 只能重新应用“当前确实由 ProxyManager 管理并开启”的端点。

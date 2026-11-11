@@ -209,6 +209,7 @@ _SAVE_KEYS = (
     "autostart", "bg_path", "bg_dim", "card_alpha", "speed_full",
     "quit_clear", "wsl_all_distros", "close_hint_done", "restore",
     "applied",
+    "residual",
     "wsl_written",
     "presets",
     "win_rect", "win_max",
@@ -266,6 +267,32 @@ def _load_applied(raw):
         password = ""
     return {"host": host, "port": port, "scheme": scheme,
             "user": user, "password": password}
+
+
+# Every endpoint a residual record may name. Unknown keys are dropped so a
+# corrupt config cannot inject arbitrary "targets" into the ownership checks.
+_RESIDUAL_TARGETS = ("ps", "sys", "wsl", "gitwin", "gitwsl",
+                     "npm", "pip", "npmwsl", "pipwsl")
+
+
+def _load_residual(raw):
+    """Sanitize persisted residual-ownership records.
+
+    A residual record names an address this tool wrote to a target but that
+    is NOT the applied record — only produced when a port-switch rollback
+    fails and leaves the endpoint on the new address. It exists so quit-clear
+    and disable still recognize that endpoint as ours instead of orphaning a
+    proxy this tool turned on. Each entry is validated exactly like `applied`
+    (invalid host/port → dropped), and unknown target keys are discarded.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for t in _RESIDUAL_TARGETS:
+        rec = _load_applied(raw.get(t))
+        if rec is not None:
+            out[t] = rec
+    return out
 
 
 def _load_presets(raw):
@@ -484,6 +511,7 @@ def load_config():
     # No fallback to the form address: a corrupt host/port yields None
     # ("never written"), never a repaired record (see _load_applied).
     out["applied"] = _load_applied(cfg.get("applied"))
+    out["residual"] = _load_residual(cfg.get("residual"))
     out["presets"] = _load_presets(cfg.get("presets"))
     if migrated:
         try:
@@ -566,6 +594,17 @@ def save_config(cfg):
                 if pw and not str(pw).startswith(_DPAPI_PREFIX):
                     ap["password"] = _dpapi_encrypt(str(pw))
                 save_data["applied"] = ap
+            if "residual" in save_data and isinstance(save_data["residual"], dict):
+                enc_res = {}
+                for t, r in save_data["residual"].items():
+                    if not isinstance(r, dict):
+                        continue
+                    r = dict(r)
+                    pw = r.get("password")
+                    if pw and not str(pw).startswith(_DPAPI_PREFIX):
+                        r["password"] = _dpapi_encrypt(str(pw))
+                    enc_res[t] = r
+                save_data["residual"] = enc_res
             if "presets" in save_data and isinstance(save_data["presets"], list):
                 enc_presets = []
                 for p in save_data["presets"]:

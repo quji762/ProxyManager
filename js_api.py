@@ -253,6 +253,13 @@ class Api:
             self.applied_host = ""
             self.applied_port = ""
             self.applied_kw = {"scheme": "http", "user": "", "password": ""}
+        # Residual ownership: addresses this tool wrote that are NOT the
+        # applied record. Only a failed port-switch rollback produces one —
+        # the endpoint is left on the new address while applied_* stays on
+        # the old. Persisting it lets quit-clear/disable still recognize that
+        # endpoint as ours instead of orphaning a proxy we turned on. Shape
+        # and encryption mirror `applied` (sanitized by _load_residual).
+        self._residual = dict(cfg.get("residual") or {})
         self._speed_lock = threading.Lock()
         # Serializes endpoint mutations (toggles, port switch, tray-quit
         # clear on the pystray thread): _restore / applied_* / _git_managed /
@@ -478,6 +485,8 @@ class Api:
                     if ap is not None:
                         cfg["applied"] = ap
                     cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
+                    # 残留归属同上：内存态为准，密码由 save_config 加密。
+                    cfg["residual"] = dict(self._residual)
                 except DpapiError:
                     return {
                         "error": "DPAPI 加密失败，密码未保存（不会以明文落盘）",
@@ -772,20 +781,34 @@ class Api:
         credentials-configured user quitting with quit_clear would leave the
         system proxy stuck ON, pointing at a dead port.
         With no applied record at all there is nothing to claim: an empty set
-        makes every detected value count as user state."""
-        h = self.applied_host
-        p = str(self.applied_port)
-        if not h or not p:
-            return set()
-        kw = dict(self.applied_kw)
-        urls = {pm.build_proxy_url(h, p, **kw)}
-        if target == "sys":
-            urls.add(pm.wininet_url(h, p, kw.get("scheme", "http")))
-        if target in ("gitwsl", "npmwsl", "pipwsl") \
-                and str(h).lower() in pm.LOOPBACK_HOSTS:
-            gw = pm.get_wsl_gateway_ip()
-            if gw:
-                urls.add(pm.build_proxy_url(gw, p, **kw))
+        makes every detected value count as user state.
+
+        A residual record (failed port-switch rollback) is claimed the same
+        way: that endpoint holds an address this tool wrote, so leaving it
+        out would orphan the proxy at quit-clear and let a later enable
+        stash our own URL as if it were user state."""
+        urls = set()
+
+        def add(h, p, kw, tgt):
+            if not h or not p:
+                return
+            urls.add(pm.build_proxy_url(h, p, **kw))
+            if tgt == "sys":
+                urls.add(pm.wininet_url(h, p, kw.get("scheme", "http")))
+            if tgt in ("gitwsl", "npmwsl", "pipwsl") \
+                    and str(h).lower() in pm.LOOPBACK_HOSTS:
+                gw = pm.get_wsl_gateway_ip()
+                if gw:
+                    urls.add(pm.build_proxy_url(gw, p, **kw))
+
+        add(self.applied_host, str(self.applied_port),
+            dict(self.applied_kw), target)
+        rec = (self._residual or {}).get(target) if target else None
+        if rec:
+            add(rec.get("host"), str(rec.get("port") or ""),
+                {"scheme": rec.get("scheme") or "http",
+                 "user": rec.get("user") or "",
+                 "password": rec.get("password") or ""}, target)
         return urls
 
     def _persist_restore(self):
@@ -801,6 +824,9 @@ class Api:
                     cfg["applied"] = ap
                 # WSL 侧"最后写入 URL"记录可能带 applied 凭据，同机制加密落盘
                 cfg["wsl_written"] = _stash_encrypt(dict(self._wsl_written))
+                # 残留归属记录（回滚失败后仍由本工具写入的地址）；密码由
+                # save_config 按 applied 同口径 DPAPI 加密。
+                cfg["residual"] = dict(self._residual)
             except DpapiError as exc:
                 pm.log_exception("persist_restore: " + str(exc))
                 # 暂存加密失败绝不能静默 return：调用方（_stash_previous）
@@ -1193,7 +1219,8 @@ class Api:
         if target == "wsl":
             return True
         if target in ("gitwsl", "npmwsl", "pipwsl") \
-                and not self._wsl_written.get(target):
+                and not self._wsl_written.get(target) \
+                and not self._residual.get(target):
             return False
         cur = self._detected_url(target)
         if not cur:
@@ -1368,7 +1395,31 @@ class Api:
             setter_name, label, detected_name, on_note = self._ENDPOINT_INFO[target]
             setter = getattr(pm, setter_name)
             if not on:
-                if target in ("ps", "npm", "pip") and self.applied_host:
+                res = self._residual.get(target)
+                # A residual address means this endpoint sits on a URL we
+                # wrote that is NOT `applied` (a rollback failure left it
+                # there). Unset THAT address only when the detected value
+                # really is the residual URL; else keep the applied-address
+                # behavior. Without this, disable would unset the applied
+                # address while the residual stayed behind.
+                if target in ("ps", "npm", "pip") and res:
+                    det = getattr(pm, detected_name)()
+                    res_url = pm.build_proxy_url(
+                        res["host"], res["port"],
+                        scheme=res.get("scheme") or "http",
+                        user=res.get("user") or "",
+                        password=res.get("password") or "")
+                    if det and det == res_url:
+                        h, p = res["host"], str(res["port"])
+                        kw = {"scheme": res.get("scheme") or "http",
+                              "user": res.get("user") or "",
+                              "password": res.get("password") or ""}
+                    elif self.applied_host:
+                        h, p = self.applied_host, str(self.applied_port)
+                        kw = dict(self.applied_kw)
+                    else:
+                        h, p, kw = self._detected_hpk(det, h, p, kw)
+                elif target in ("ps", "npm", "pip") and self.applied_host:
                     # 这些 setter 是外科式的（set_ps_proxy 只删 cur==url 的
                     # 键；_ini_edit 只删值等于 equals 的行）。卸载 URL 必须用
                     # 本工具最后写入的 applied 地址，而不是当前检测值：用检测
@@ -1415,6 +1466,12 @@ class Api:
                 self._persist_restore()
         else:
             return _fail(LStr("errUnknownEndpoint", {"target": target}))
+        # The endpoint write succeeded: it now sits on the (new) applied
+        # address or is OFF, so any residual record for it is stale. Persist
+        # the clear so a restart cannot resurrect ownership of an address we
+        # no longer own.
+        if self._residual.pop(target, None) is not None:
+            self._persist_restore()
         if on and not _restoring:
             # Commit only after the endpoint write succeeded: a failed enable
             # must not make switch_port treat the still-old endpoints as ours,
@@ -1653,13 +1710,18 @@ class Api:
                 err = self._switch_enable_endpoint(tgt, old_h, old_p, old_kw)[0]
                 if err is not None:
                     rb_errs[tgt] = err
+            # still_on endpoints hold the NEW address (their rollback disable
+            # failed) while applied_* deliberately stays on the old one. Record
+            # the actually-written new address as a residual so quit-clear and
+            # a later disable still recognize it as ours — otherwise the proxy
+            # this tool turned on is orphaned at exit. The record is the exact
+            # URL we wrote, so it can never claim unrelated user state.
+            res_kw = {"scheme": new_kw["scheme"], "user": new_kw["user"],
+                      "password": new_kw["password"]}
+            for tgt in still_on:
+                self._residual[tgt] = {"host": new_host,
+                                       "port": str(new_port), **res_kw}
             self._persist_restore()
-            # TODO(残留状态): still_on 里的端点实际持新 URL，而 applied_* 故意
-            # 停在旧地址。gitwsl/npmwsl/pipwsl/gitwin 无损失：_git_managed/
-            # _wsl_written 只在卸载成功时清空，失败即保留，_is_managed_wsl_url
-            # 仍判 True，quit-clear 仍能清掉它们。ps/sys/wsl/npm/pip 有已知
-            # 缺口：_ours_proxy_urls 由 applied_* 推导，quit-clear 会跳过它们
-            # ——失败方向是"端点残留开启"，绝不是"误删用户配置"。
             return {"ok": False, "applied": still_on,
                     "error": "；".join(
                         list(errs.values())
@@ -1685,6 +1747,8 @@ class Api:
                 "error_key": "saveFail",
                 "note": "；".join(notes) if notes else None,
             }
+        for tgt in applied:
+            self._residual.pop(tgt, None)
         self._persist_restore()
         # note_key "switched" 已删除：ui/i18n.js 里该键曾被重复定义覆盖成无参数
         # 文案，而前端本就用 t("switched", {addr, n}) 自己渲染这条提示。
