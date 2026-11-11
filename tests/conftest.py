@@ -34,6 +34,19 @@ def isolated_config_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config_store, "_load_warning", None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_wsl_available_cache(monkeypatch):
+    """Clear the wsl_available TTL cache around every test.
+
+    A hot positive cached by one test would otherwise leak into the next
+    (and into alphabetically later files), masking a patched subprocess.run
+    that expects a fresh probe — the same cross-file leak the distro cache
+    guards against in tests/test_wsl_distro_cache.py.
+    """
+    monkeypatch.setattr(pm, "_wsl_available_cache", None)
+    yield
+
+
 @pytest.fixture(autouse=True, scope="session")
 def no_real_proxy_probe():
     """Kill the background speed loop's TCP probe for the whole session.

@@ -1207,17 +1207,44 @@ def set_sys_proxy_server(server):
         return str(e)
 
 
+_wsl_available_cache = None  # (time.monotonic(), True) — TTL cache, see below
+_WSL_AVAILABLE_TTL = 5.0
+
+
+def _invalidate_wsl_available_cache():
+    """Drop the cached WSL-availability probe so the next read re-runs it.
+    Called after a WSL restart, which can change whether WSL is usable."""
+    global _wsl_available_cache
+    _wsl_available_cache = None
+
+
+invalidate_wsl_available_cache = _invalidate_wsl_available_cache
+
+
 def wsl_available():
     """True iff `wsl -e` can actually run bash (feature enabled + a distro
     installed). wsl.exe itself always exists in System32 on Win10/11, so its
-    mere presence proves nothing."""
+    mere presence proves nothing.
+
+    A batch "enable all" runs the pre-flight once per WSL-side endpoint, each
+    a separate wsl.exe cold start, so a positive result is cached briefly.
+    Only True is cached: a failure/timeout must not freeze "WSL unusable" for
+    the next caller (WSL may come back a second later), and the batch aborts
+    on the first unavailable endpoint anyway."""
+    import time
+    global _wsl_available_cache
+    cached = _wsl_available_cache  # snapshot: another thread may clear it
+    if cached is not None and time.monotonic() - cached[0] < _WSL_AVAILABLE_TTL:
+        return cached[1]
     try:
         r = subprocess.run(["wsl", "-e", "echo", "ok"],
                            capture_output=True, timeout=15,
                            creationflags=subprocess.CREATE_NO_WINDOW)
-        return r.returncode == 0
+        ok = r.returncode == 0
     except Exception:
-        return False
+        ok = False
+    _wsl_available_cache = (time.monotonic(), True) if ok else None
+    return ok
 
 
 def _get_wsl_gateway_ip():
@@ -2509,6 +2536,9 @@ def restart_wsl():
         # The distro list can change with a restart (installs/removals while
         # down), and every caller caches the enumeration for a short TTL.
         invalidate_wsl_distros_cache()
+        # Availability is transiently false right after --shutdown; drop the
+        # cached positive so the next wsl_available() re-probes the fresh VM.
+        invalidate_wsl_available_cache()
         # A cold start after --shutdown can easily exceed 15s on slow disks
         # (vhdx compaction, AV scans) — a timeout here would misreport the
         # restart as failed, so probe with retries.
