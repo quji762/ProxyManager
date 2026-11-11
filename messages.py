@@ -111,6 +111,17 @@ TEMPLATES = {
         "zh": "未知端点 {target}",
         "en": "Unknown endpoint {target}",
     },
+    # Generic subprocess failures. The raw exception text is deliberately NOT
+    # used: TimeoutExpired/CalledProcessError embed the full argv, which
+    # carries the proxy URL incl. credentials (see proxy_manager.safe_error).
+    "errTimeout": {
+        "zh": "操作超时（命令未在规定时间内完成）",
+        "en": "Operation timed out (the command did not finish in time)",
+    },
+    "errOpFail": {
+        "zh": "操作失败",
+        "en": "Operation failed",
+    },
 
     # ── errors: connectivity test ─────────────────────────────────────────
     "errNoProxyToTest": {

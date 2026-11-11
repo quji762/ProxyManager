@@ -295,6 +295,54 @@ def test_switch_port_without_applied_record_claims_nothing(tmp_path, monkeypatch
     assert api.applied_host == ""
 
 
+def test_switch_port_no_applied_keeps_user_proxy_at_form_address(tmp_path,
+                                                                 monkeypatch):
+    """契约A2 回归：没有 applied 记录时，绝不能拿表单地址回填 managed_url。
+    用户手工配置了一个恰好等于表单地址的代理（127.0.0.1:7890），端口切换
+    必须只同步表单，不 disable/re-enable 该端点、不升格 applied_*——否则
+    退出清理会把用户自己的代理删掉。修复前 old_h 回退到 new_host，
+    get_ps_status()==managed_url 成立，ps 会被误判为本工具所有。"""
+    monkeypatch.setattr(config_store, "CONFIG_FILE", str(tmp_path / "c.json"))
+    with patch("proxy_manager.get_net_counters", return_value=None):
+        api = Api()
+    assert api.applied_host == ""
+    api.host, api.port = "127.0.0.1", "7890"
+    calls = []
+
+    def record(name):
+        def _fn(*args, **kwargs):
+            calls.append(name)
+            return True
+        return _fn
+
+    user_url = "http://127.0.0.1:7890"
+    with patch("js_api.pm.get_ps_status", return_value=user_url), \
+         patch("js_api.pm.get_sys_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_git_proxy_win", return_value=pm.UNSET), \
+         patch("js_api.pm.get_npm_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy", return_value=pm.UNSET), \
+         patch("js_api.pm.get_npm_proxy_wsl", return_value=pm.UNSET), \
+         patch("js_api.pm.get_pip_proxy_wsl", return_value=pm.UNSET), \
+         patch.object(api, "refresh_item",
+                      return_value={"on": False, "git": pm.UNSET}), \
+         patch("js_api.pm.set_ps_proxy", side_effect=record("ps")), \
+         patch("js_api.pm.set_sys_proxy", side_effect=record("sys")), \
+         patch("js_api.pm.set_git_proxy", side_effect=record("git")), \
+         patch("js_api.pm.set_wsl_proxy", side_effect=record("wsl")), \
+         patch("js_api.pm.set_npm_proxy", side_effect=record("npm")), \
+         patch("js_api.pm.set_pip_proxy", side_effect=record("pip")), \
+         patch("js_api.pm.set_npm_proxy_wsl", side_effect=record("npmwsl")), \
+         patch("js_api.pm.set_pip_proxy_wsl", side_effect=record("pipwsl")):
+        r = api.switch_port("7890", "127.0.0.1")
+
+    assert r == {"ok": True, "applied": []}
+    assert calls == []                       # 没有端点被 disable/re-enable
+    assert api.applied_host == ""            # 没有伪造 applied 记录
+    assert api.applied_port == ""
+    assert _disk_cfg(tmp_path).get("applied") is None
+    assert api.port == "7890"                # 表单地址照常同步
+
+
 # ── rollback integrity: undo by the URL that is really in the file ───────────
 def _rollback_api(tmp_path, monkeypatch, wsl_git):
     """Api wired for a NAT/mirrored WSL switch with gitwsl + pip on.

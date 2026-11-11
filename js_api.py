@@ -49,6 +49,13 @@ from window_win32 import (
 # accepts and get_background can serve.
 _BG_FILTER = "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif"
 
+
+def _is_network_path(path):
+    """UNC / device paths (\\\\host\\share, \\\\.\\, \\\\?\\, //host). Reading
+    one (os.path.isfile / open) triggers SMB authentication — an NTLM-relay
+    surface — so a background image must be a local file the user picked."""
+    return path.startswith(("\\\\", "//"))
+
 # 恢复暂存中的凭据保护：ps 的 env 值与其余端点的完整 URL 可能携带
 # user:pass@ 明文凭据，落盘 config.json 前逐值 DPAPI 加密（与 password
 # 字段同机制）；读回时按 DPAPI: 前缀解密，旧版明文暂存原样兼容。
@@ -191,8 +198,11 @@ def _stash_decrypt(restore):
         p = dict(payload)
         env = p.get("env")
         if isinstance(env, dict):
+            # 解密失败的 env 值保留 DPAPI: 前缀（不置 None）：_restore_stashed
+            # 据此区分"用户原本未设置"(None) 与"无法解密"(DPAPI:)。后者必须
+            # 丢弃暂存走外科关闭，绝不能把全部环境变量名当用户原值删光。
             p["env"] = {
-                k: _plain(v)
+                k: (_dpapi_decrypt(v) if v else v)
                 for k, v in env.items()
             }
         url = p.get("url")
@@ -410,7 +420,8 @@ class Api:
                     ext = os.path.splitext(bp)[1].lower()
                     if not bp:
                         cfg["bg_path"] = ""
-                    elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif") \
+                    elif not _is_network_path(bp) \
+                            and ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif") \
                             and os.path.isfile(bp):
                         cfg["bg_path"] = bp
                     # else: keep the previous value instead of persisting a
@@ -963,6 +974,17 @@ class Api:
                 # would silently drop the user's original values.
                 return {"error": str(LStr("errStashIncomplete")),
                         "error_key": "errStashIncomplete"}
+            # 任一 env 值仍带 DPAPI: 前缀 ⇒ 解密失败、用户原值不可恢复。
+            # set_ps_env_vars 会把 None/空值的环境变量名删光——绝不能把密文
+            # 或 None 当原值写回。与字符串暂存同口径：丢弃暂存并置
+            # stash_dropped，让调用方继续外科关闭（只移除本工具自己的值）。
+            if any(isinstance(v, str) and v.startswith(_DPAPI_PREFIX)
+                   for v in env.values()):
+                self._restore.pop(target, None)
+                self._persist_restore()
+                return {"error": str(LStr("errStashDroppedDpapi")),
+                        "error_key": "errStashDroppedDpapi",
+                        "stash_dropped": True}
             ret = pm.set_ps_env_vars(env)
             if ret is not True:
                 return _endpoint_err("ps", ret)
@@ -970,6 +992,16 @@ class Api:
         if target == "sys":
             pac_note = None
             parsed = self._adopt_parsed(prev.get("url"))
+            # 恢复路径也要校验：parse_proxy_url 比 valid_host 宽松（接受
+            # ho'st / a b 之类主机名）。ProxyServer 是纯注册表字符串、无执行
+            # 风险，但写畸形值与所有其他启用路径不一致。校验不过就当作"没有
+            # 可恢复的 URL"，走下方外科关闭 + 还原 bypass，绝不写畸形地址。
+            if parsed and not (valid_host(parsed["host"])
+                               and pm.is_valid_port(parsed["port"])
+                               and pm.is_valid_scheme(parsed["scheme"])
+                               and pm.is_valid_userinfo(parsed["user"])
+                               and pm.is_valid_userinfo(parsed["password"])):
+                parsed = None
             if parsed:
                 ret = pm.set_sys_proxy(
                     parsed["host"], parsed["port"], True,
@@ -1477,28 +1509,34 @@ class Api:
         # not the (possibly just-edited, possibly only saved) field host.
         # Re-enable uses new_host.
         old_h, old_p = self.applied_host, str(self.applied_port)
+        # 无有效 applied 记录 ⇒ 本工具从未写入端点（契约A2）。绝不能用表单
+        # 地址回填 managed_url：那会把用户手工配置的同地址代理误判为本工具
+        # 所有，切换时 disable+re-enable 并升格 applied_*，退出清理随之删掉
+        # 用户自己的代理。与 _ours_proxy_urls 同口径：没有有效 applied 就视为
+        # "没有任何端点属于本工具"，走下方仅同步表单分支（也省掉一次 WSL 探测）。
         if not valid_host(old_h) or not pm.is_valid_port(old_p):
-            old_h, old_p = new_host, old_p if pm.is_valid_port(old_p) else new_port
-        managed_url = pm.build_proxy_url(old_h, old_p, **old_kw)
-        sys_url = pm.wininet_url(old_h, old_p, old_kw["scheme"])
-        # Detect what is currently on. Only values equal to this tool's
-        # managed URL count as "ours" — a proxy the user configured by hand
-        # must survive the switch untouched (one wsl.exe call for the WSL side).
-        # WSL 侧端点：与"最后写入 URL"持久化记录精确相等才算本工具的
-        # （陈旧网关形态等于记录，因为工具写入后文件未变）；用户手工配置的
-        # 同端口 LAN 代理不等于记录，端口切换绝不改写。
-        wsl_state = self.refresh_item("wsl")
-        enabled = {
-            "ps": pm.get_ps_status() == managed_url,
-            "sys": pm.get_sys_proxy() == sys_url,
-            "wsl": bool((wsl_state or {}).get("on")),
-            "gitwin": pm.get_git_proxy_win() == managed_url,
-            "gitwsl": self._is_managed_wsl_url((wsl_state or {}).get("git"), "gitwsl"),
-            "npm": pm.get_npm_proxy() == managed_url,
-            "pip": pm.get_pip_proxy() == managed_url,
-            "npmwsl": self._is_managed_wsl_url(pm.get_npm_proxy_wsl(), "npmwsl"),
-            "pipwsl": self._is_managed_wsl_url(pm.get_pip_proxy_wsl(), "pipwsl"),
-        }
+            enabled = {}
+        else:
+            managed_url = pm.build_proxy_url(old_h, old_p, **old_kw)
+            sys_url = pm.wininet_url(old_h, old_p, old_kw["scheme"])
+            # Detect what is currently on. Only values equal to this tool's
+            # managed URL count as "ours" — a proxy the user configured by hand
+            # must survive the switch untouched (one wsl.exe call for the WSL side).
+            # WSL 侧端点：与"最后写入 URL"持久化记录精确相等才算本工具的
+            # （陈旧网关形态等于记录，因为工具写入后文件未变）；用户手工配置的
+            # 同端口 LAN 代理不等于记录，端口切换绝不改写。
+            wsl_state = self.refresh_item("wsl")
+            enabled = {
+                "ps": pm.get_ps_status() == managed_url,
+                "sys": pm.get_sys_proxy() == sys_url,
+                "wsl": bool((wsl_state or {}).get("on")),
+                "gitwin": pm.get_git_proxy_win() == managed_url,
+                "gitwsl": self._is_managed_wsl_url((wsl_state or {}).get("git"), "gitwsl"),
+                "npm": pm.get_npm_proxy() == managed_url,
+                "pip": pm.get_pip_proxy() == managed_url,
+                "npmwsl": self._is_managed_wsl_url(pm.get_npm_proxy_wsl(), "npmwsl"),
+                "pipwsl": self._is_managed_wsl_url(pm.get_pip_proxy_wsl(), "pipwsl"),
+            }
         if not any(enabled.values()):
             # 没有任何端点开启：只把表单地址同步为 host/port 并落盘，绝不移动
             # applied_*——此分支没有一个端点被写入，把表单地址提升为"已应用"
@@ -2286,7 +2324,7 @@ class Api:
         mtime+size so an edited image at the same path is re-read."""
         cfg = load_config()
         path = cfg.get("bg_path", "")
-        if not path or not os.path.isfile(path):
+        if not path or _is_network_path(path) or not os.path.isfile(path):
             return None
         try:
             stat = os.stat(path)

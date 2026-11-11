@@ -100,6 +100,20 @@ def log_exception_once(key: str, prefix: str = "") -> None:
     log_exception(prefix or key)
 
 
+def safe_error(e):
+    """User-facing rendering of an exception that never leaks a subprocess
+    argv. TimeoutExpired / CalledProcessError str() embeds the full command
+    line, which carries the proxy URL incl. credentials — toasting that
+    would expose the secret in the UI (and any screenshot/log). Map those to
+    a fixed localized message; other exceptions (winreg/OSError) carry no
+    argv and stringify safely."""
+    if isinstance(e, subprocess.TimeoutExpired):
+        return LStr("errTimeout")
+    if isinstance(e, subprocess.SubprocessError):
+        return LStr("errOpFail")
+    return str(e)
+
+
 user32 = ctypes.WinDLL("user32")
 
 # Explicit prototype for SendMessageTimeoutW — without this, 64-bit Python
@@ -1604,7 +1618,7 @@ unset _pm_np _pm_e
                     done.append(d)
             except Exception as e:
                 if enable:
-                    errs.append(f"WSL({d or ''}): {e}")
+                    errs.append(f"WSL({d or ''}): {safe_error(e)}")
         if enable and errs:
             # 任一日标失败就对已成功写入的发行版执行反向清理：js_api 只在
             # 全部成功时记录 _wsl_written，漏回滚会让退出清理找不到这些
@@ -1626,7 +1640,7 @@ unset _pm_np _pm_e
         # to clean, and reporting it would block the whole disable flow.
         if not enable:
             return True
-        return str(e) or "WSL 操作失败"
+        return safe_error(e) or "WSL 操作失败"
 
 
 def _git_win_get(key: str):
@@ -1831,7 +1845,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
                         done.append(d)
                 except Exception as e:
                     if enable:
-                        errs.append(f"{where}{e}")
+                        errs.append(f"{where}{safe_error(e)}")
             if enable and errs:
                 # 任一日标失败就对已写入的发行版回滚到快照里的用户原值
                 # （启用前没有该键就 unset）：js_api 只在全部成功时记录
@@ -1893,7 +1907,7 @@ def set_git_proxy(host, port, enable=True, use_wsl=False,
     except Exception as e:
         if not enable:
             return True
-        return str(e)
+        return safe_error(e)
 
 
 def get_git_proxy_win():
@@ -2396,7 +2410,7 @@ def set_npm_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
                 # TimeoutExpired 不是 OSError：只捕 OSError 会让超时跳过
                 # 下面的回滚循环，已写入的发行版带着本工具 URL 却无记录。
                 if enable:
-                    errs.append(e)
+                    errs.append(safe_error(e))
         if errs:
             # 任一日标失败就对已成功写入的发行版回滚到快照里的用户原值：
             # js_api 只在全部成功时记录 _wsl_written，漏回滚、或只卸掉本工具
@@ -2452,7 +2466,7 @@ def set_pip_proxy_wsl(host, port, enable=True, scheme="http", user="", password=
             except Exception as e:
                 # 同 npm：TimeoutExpired 不是 OSError，必须进 errs 触发回滚。
                 if enable:
-                    errs.append(e)
+                    errs.append(safe_error(e))
         if errs:
             # 任一日标失败就对已成功写入的发行版回滚到快照里的用户原值（只回滚
             # 启用真正写过的 XDG 路径，legacy 路径启用时从未写过）。
