@@ -1319,6 +1319,23 @@ def _invalidate_wsl_distros_cache():
 invalidate_wsl_distros_cache = _invalidate_wsl_distros_cache
 
 
+def _decode_wsl_list_output(data: bytes) -> str:
+    """Decode `wsl -l -q` output without assuming one encoding.
+
+    Windows WSL has historically emitted UTF-16LE (BOM + NUL-interleaved); a
+    future or alternative build may emit UTF-8. Choose by BOM/NUL content so a
+    UTF-8 listing is not mangled into CJK-looking garbage (which would make
+    every distro name wrong, or the list look empty).
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = data.decode("utf-16", errors="ignore")
+    elif b"\x00" in data:
+        text = data.decode("utf-16-le", errors="ignore")
+    else:
+        text = data.decode("utf-8", errors="ignore")
+    return text.replace("\x00", "").lstrip("\ufeff")
+
+
 def _wsl_distros():
     """Names of installed user distros (wsl -l -q emits UTF-16LE). Docker's
     infra distros are skipped. Empty list -> WSL unusable or unparseable;
@@ -1342,8 +1359,7 @@ def _wsl_distros():
                            creationflags=subprocess.CREATE_NO_WINDOW)
         if r.returncode != 0:
             return []
-        raw = (r.stdout.decode("utf-16-le", errors="ignore")
-               .replace("\x00", "").lstrip("\ufeff"))
+        raw = _decode_wsl_list_output(r.stdout)
         names = [n.strip() for n in raw.replace("\r\n", "\n").split("\n") if n.strip()]
         names = [n for n in names if n and not n.startswith("docker-desktop")]
         if names:
