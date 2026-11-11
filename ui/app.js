@@ -525,7 +525,7 @@ function validateFields(mark) {
 function renderPorts() {
   const cur = $("inPort").value.trim();
   const chips = cfg.ports.map((p) =>
-    `<button class="pchip ${String(p) === cur ? "active" : ""}" data-port="${p}" data-tip="${t("tipSwitchPort", { port: p })}">${p}</button>`).join("");
+    `<button class="pchip ${String(p) === cur ? "active" : ""}" data-port="${esc_(p)}" data-tip="${esc_(t("tipSwitchPort", { port: p }))}">${esc_(p)}</button>`).join("");
   $("portChips").innerHTML = chips + `<button class="pchip add" id="portManage" data-tip="${t("tipManagePorts")}">＋</button>`;
   $("portChips").querySelectorAll(".pchip[data-port]").forEach((el) => {
     el.onclick = () => quickSwitchPort(el.dataset.port);
@@ -536,8 +536,8 @@ function renderPorts() {
 function renderPortPop() {
   const cur = $("inPort").value.trim();
   $("portPopList").innerHTML = cfg.ports.map((p) =>
-    `<div class="row"><span class="pv">${p}${String(p) === cur ? ' <span class="cur-tag">' + t("current") + '</span>' : ""}</span>
-     <button type="button" class="del" data-del="${p}" data-tip="${t("removePreset")}">×</button></div>`).join("")
+    `<div class="row"><span class="pv">${esc_(p)}${String(p) === cur ? ' <span class="cur-tag">' + t("current") + '</span>' : ""}</span>
+     <button type="button" class="del" data-del="${esc_(p)}" data-tip="${t("removePreset")}">×</button></div>`).join("")
     || `<div class="empty-note">${t("noPresets")}</div>`;
   $("portPopList").querySelectorAll("[data-del]").forEach((el) => {
     el.onclick = () => {

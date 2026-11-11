@@ -571,6 +571,13 @@ function applyI18n() {
   if (typeof renderPorts === "function") renderPorts();
   if (typeof renderProfiles === "function") renderProfiles();
   if (typeof updateHero === "function") updateHero();
+  // History rows carry localized channel names; the backup list's action
+  // buttons are generated (not data-i18n), so both must repaint on a language
+  // switch. Backups only re-fetch while settings is open to avoid a backend
+  // round-trip on the boot-time setLang.
+  if (typeof renderHistory === "function") renderHistory();
+  const sov = document.getElementById("settingsOv");
+  if (sov && sov.classList.contains("show") && typeof renderBackupList === "function") renderBackupList();
 }
 
 function displayStatus(v) {
