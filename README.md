@@ -39,7 +39,8 @@ WSL endpoints can target all user distributions or only the default distro; narr
 - Automatic `NO_PROXY` preservation for local traffic.
 - Read-back of actual endpoint state so a failed write does not leave a misleading toggle.
 - PAC awareness: when an `AutoConfigURL` is registered, a hint under the system-proxy row warns that browsers may follow the PAC script instead of the static proxy.
-- Connectivity tests through the configured proxy source, plus a one-click **Test all** that probes every channel of the current page at once.
+- Connectivity tests through the configured proxy source, plus a one-click **Test all** that probes every channel of the current page at once and reports an overall `{ok}/{total} passed` verdict (counting timeouts as failures). Recent results are kept in memory only and can be cleared with one click.
+- Keyboard-accessible UI: modal dialogs trap focus and close on Escape, the Win/WSL tabs support arrow-key navigation, and controls carry accessible names in both languages.
 - Restore-before-overwrite semantics: an existing different proxy is stashed and restored when ProxyManager disables its own setting.
 - Tray with a live enabled-endpoint count and one-click enable/disable all, autostart, always-on-top, theme/background settings and optional clear-on-quit behavior.
 - Update check with a persistent status row in Settings, a re-check button and a one-click link to the releases download page.
@@ -68,6 +69,8 @@ Build the single-file executable with `build.bat`; build-only dependencies are k
 ## Configuration and secrets
 
 Settings are stored in `%APPDATA%\ProxyManager\config.json`. Proxy passwords — including those saved in named presets and in config backups under `%APPDATA%\ProxyManager\backups\` — are protected with Windows DPAPI; save is refused if encryption fails rather than falling back to plaintext. DPAPI ties the ciphertext to your Windows user/machine, so a backup restored on another machine cannot decrypt the old password (the previous password is kept). Treat the config, its `.bak` and the backups folder as sensitive anyway.
+
+Credentials are also kept out of error output: subprocess failures are reported as fixed localized messages rather than the raw command line (which can embed a credentialed proxy URL). Custom background images are restricted to local files — UNC and device paths are rejected so loading a background cannot trigger SMB authentication.
 
 ProxyManager tracks both the form values and the last values actually applied to endpoints. Do not collapse those concepts: typing a new host/port must not silently change what restoration logic believes was previously applied.
 

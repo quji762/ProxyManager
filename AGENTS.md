@@ -14,6 +14,8 @@ ProxyManager 会修改用户级环境变量、WinINET、WSL shell rc、Git、npm
 
 任何会直接清空用户配置而不区分来源的实现都视为回归。
 
+关闭路径的外科式守卫必须比对“本工具最后写入的 applied 地址”，而不是“当前检测值”——否则用户启用后手工改成的代理会在关闭时被误删。恢复保存值必须逐字写回原始字符串（`raw_url`），不得经 `build_proxy_url` 归一化（会降级 `https`→`http` / `socks4`→`socks5` 并丢 path）。
+
 ## Endpoint model
 
 Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点。不要为了减少 UI 项而把它们合并成一个开关。
@@ -34,6 +36,7 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 - 设置可选择 all user distros 或 default distro；读写和恢复路径遵守相同 scope。由 all 收窄到 default 时，会按标记/记录的 URL 外科式清掉离开 scope 的发行版里本工具自己写入的配置（默认发行版不动）。
 - shell block 只管理本工具自己的标记区域，禁止覆盖整个 `.bashrc`/`.zshrc`。
 - `Restart WSL` 是破坏性较强的操作：会终止 distro 内进程，UI 文案/确认不能弱化。
+- 短 TTL 缓存（distro 枚举、可用性探活、网络模式）只缓存成功/非空结果，绝不缓存失败或空结果（WSL 可能稍后恢复，不能被冻结为“不可用”）；`Restart WSL` 必须作废这些缓存。
 
 ## Proxy URL and secrets
 
@@ -42,6 +45,9 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 - `NO_PROXY` 合并时保留用户已有条目，并加入必要 loopback bypass。
 - 密码写入本地 config 时必须经过 Windows DPAPI；DPAPI 失败要拒绝保存，不得静默写明文。
 - `config.json` 和 `.bak` 仍按敏感文件处理，不应提交。
+- 错误输出不得泄露凭据：子进程异常（`TimeoutExpired`/`CalledProcessError`）的 `str()` 内嵌完整 argv（含带凭据的代理 URL），必须渲染为固定本地化消息，不得直传 UI/日志/截图。
+- 自定义背景图仅限本地文件：拒绝 UNC/设备路径，避免加载背景触发 SMB 认证（NTLM-relay 面）。
+- 渲染 config/备份提供的动态值（端口、方案名、历史、备份列表等）必须在渲染边界 HTML 转义，杜绝注入。
 
 ## Configuration state
 
