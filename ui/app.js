@@ -17,9 +17,15 @@ const api = (() => {
     presets: [], backups: [],
     lip: "192.168.1.146", wip: "172.24.156.88", wmode: "Mirrored",
     psHttp: "http://127.0.0.1:7897",
+    sysVal: "未设置",
     wslHttp: "未设置", wslGit: "未设置", gitWinVal: "未设置",
     npmVal: "未设置", pipVal: "未设置", npmWslVal: "未设置", pipWslVal: "未设置",
     alive: true, iface: "以太网",
+    bg_path: "", bg_dim: 0.45, card_alpha: 0.92,
+    // Mirrors the backend applied record (last values actually written) and
+    // the WSL "last written URL" map, so boot()/badges behave like the real UI.
+    appliedHost: "127.0.0.1", appliedPort: "7897", appliedScheme: "http",
+    appliedUser: "", appliedPassword: "", wslWritten: {},
   };
   const delay = (ms) => new Promise(res => setTimeout(res, ms));
   async function mock(name, ...args) {
@@ -29,8 +35,12 @@ const api = (() => {
         scheme: mockState.scheme || "http", user: mockState.user || "",
         password: mockState.password || "", lang: mockState.lang || "zh",
         mode: mockState.mode, pin: mockState.pin, ports: mockState.ports,
-        autostart: mockState.autostart, bg_path: "", bg_dim: 0.45, card_alpha: 0.92,
-        speed_full: 5, quit_clear: false, wsl_all_distros: true, close_hint_done: false };
+        autostart: mockState.autostart, bg_path: mockState.bg_path, bg_dim: mockState.bg_dim, card_alpha: mockState.card_alpha,
+        speed_full: 5, quit_clear: false, wsl_all_distros: true, close_hint_done: false,
+        version: "1.4.0", config_load: "ok",
+        applied_host: mockState.appliedHost, applied_port: mockState.appliedPort,
+        applied_scheme: mockState.appliedScheme, applied_user: mockState.appliedUser,
+        applied_password: mockState.appliedPassword, wsl_written: mockState.wslWritten };
       case "save_config": Object.assign(mockState, args[0]); return true;
       case "refresh_item": {
         const w = args[0];
@@ -42,7 +52,7 @@ const api = (() => {
         if (w === "gitwin") return mockState.gitWinVal;
         if (w === "npm") return mockState.npmVal;
         if (w === "pip") return mockState.pipVal;
-        if (w === "sys") return mockState.ps ? mockState.psHttp : "未设置";
+        if (w === "sys") return mockState.sysVal;
         if (w === "npmwsl") return mockState.npmWslVal;
         if (w === "pipwsl") return mockState.pipWslVal;
         if (w === "ip") return mockState.lip;
@@ -60,8 +70,9 @@ const api = (() => {
       case "do_toggle": {
         const [target, on] = args;
         const mockUrl = () => `${mockState.scheme || "http"}://${mockState.host}:${mockState.port}`;
+        const wslSide = ["wsl", "gitwsl", "npmwsl", "pipwsl"];
         if (target === "ps") { mockState.ps = on; mockState.psHttp = on ? mockUrl() : "未设置"; }
-        if (target === "sys") { mockState.sys = on; }
+        if (target === "sys") { mockState.sys = on; mockState.sysVal = on ? mockUrl() : "未设置"; }
         if (target === "wsl") { mockState.wsl = on; mockState.wslHttp = on ? mockUrl() : "未设置"; }
         if (target === "gitwin") { mockState.gitwin = on; mockState.gitWinVal = on ? mockUrl() : "未设置"; }
         if (target === "gitwsl") { mockState.gitwsl = on; mockState.wslGit = on ? mockUrl() : "未设置"; }
@@ -69,6 +80,15 @@ const api = (() => {
         if (target === "pip") { mockState.pip = on; mockState.pipVal = on ? mockUrl() : "未设置"; }
         if (target === "npmwsl") { mockState.npmwsl = on; mockState.npmWslVal = on ? mockUrl() : "未设置"; }
         if (target === "pipwsl") { mockState.pipwsl = on; mockState.pipWslVal = on ? mockUrl() : "未设置"; }
+        if (on) {
+          // Record the applied address (last values written) like the backend.
+          mockState.appliedHost = mockState.host; mockState.appliedPort = String(mockState.port);
+          mockState.appliedScheme = mockState.scheme || "http";
+          mockState.appliedUser = mockState.user || ""; mockState.appliedPassword = mockState.password || "";
+          if (wslSide.includes(target)) mockState.wslWritten[target] = mockUrl();
+        } else if (wslSide.includes(target)) {
+          delete mockState.wslWritten[target];
+        }
         return { ok: true };
       }
       case "switch_port": {
@@ -87,21 +107,28 @@ const api = (() => {
         if (mockState.pip) mockState.pipVal = u;
         if (mockState.npmwsl) mockState.npmWslVal = u;
         if (mockState.pipwsl) mockState.pipWslVal = u;
+        if (mockState.sys) mockState.sysVal = u;
+        mockState.appliedHost = mockState.host; mockState.appliedPort = p;
+        mockState.appliedScheme = mockState.scheme || "http";
+        mockState.appliedUser = mockState.user || ""; mockState.appliedPassword = mockState.password || "";
+        ["wsl", "gitwsl", "npmwsl", "pipwsl"].forEach((k) => { if (mockState[k]) mockState.wslWritten[k] = u; });
         return { ok: true, applied: ["ps", "sys", "wsl", "gitwin", "gitwsl", "npm", "pip", "npmwsl", "pipwsl"].filter(t => mockState[t]) };
       }
       case "get_speed": {
         const n = Math.random() * 3;
         return { up: `${(n * 0.3).toFixed(1)} MB/s`, dn: `${n.toFixed(1)} MB/s`,
-                 dn_num: n * 1024 * 1024, iface: mockState.iface, alive: mockState.alive };
+                 dn_num: n * 1024 * 1024, iface: mockState.iface, alive: mockState.alive,
+                 port: String(mockState.appliedPort || mockState.port) };
       }
       case "restart_wsl": await delay(1500); return { ok: true };
+      case "apply_form_back": return true;
       case "window_control": {
         if (args[0] === "maximize") mockState._max = !mockState._max;
         return { ok: true, maximized: !!mockState._max, pinned: args[0] === "pin" ? !!args[1] : false };
       }
-      case "pick_background": await delay(600); return { ok: true, name: "wallpaper.png" };
+      case "pick_background": await delay(600); mockState.bg_path = "C:/mock/wallpaper.png"; return { ok: true, path: mockState.bg_path, name: "wallpaper.png" };
       case "get_background": return { data: "mock-bg" };
-      case "clear_background": return true;
+      case "clear_background": mockState.bg_path = ""; return true;
       case "set_autostart": mockState.autostart = !!args[0]; return { ok: true };
       case "copy": return true;
       case "check_update": return { status: "latest" };
