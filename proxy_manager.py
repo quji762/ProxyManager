@@ -40,6 +40,20 @@ _CRASH_LOG = os.path.join(_APPDATA, "ProxyManager", "crash.log")
 SIGNAL_FILE = os.path.join(_APPDATA, "ProxyManager", "wake.signal")
 
 
+def _exc_log_text(exc_type, exc_val):
+    """Exception text that is safe for crash.log.
+
+    subprocess exceptions (TimeoutExpired / CalledProcessError) stringify to
+    the full argv, which embeds the proxy URL including user:pass@ — AGENTS.md
+    forbids writing that to a log. Those reduce to the type name alone (still
+    diagnosable, never a secret). Other exceptions (winreg/OSError/DPAPI)
+    carry no argv and stringify safely.
+    """
+    if isinstance(exc_val, subprocess.SubprocessError):
+        return exc_type.__name__
+    return f"{exc_type.__name__}: {exc_val}"
+
+
 def _log_crash(exc_type, exc_val, exc_tb):
     """Append a timestamped traceback to crash.log. Best-effort: never raises."""
     import datetime
@@ -47,7 +61,7 @@ def _log_crash(exc_type, exc_val, exc_tb):
     try:
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now()}] {exc_type.__name__}: {exc_val}\n")
+            f.write(f"[{datetime.datetime.now()}] {_exc_log_text(exc_type, exc_val)}\n")
             traceback.print_tb(exc_tb, file=f)
             f.write("\n")
     except Exception:
@@ -77,7 +91,7 @@ def log_exception(prefix: str = "") -> None:
         with open(_CRASH_LOG, "a", encoding="utf-8") as f:
             label = f" {prefix}" if prefix else ""
             f.write(f"[{datetime.datetime.now()}] WARN{label}: "
-                    f"{exc_type.__name__}: {exc_val}\n")
+                    f"{_exc_log_text(exc_type, exc_val)}\n")
             traceback.print_tb(exc_tb, file=f)
             f.write("\n")
     except Exception:

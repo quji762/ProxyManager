@@ -80,3 +80,40 @@ def test_set_pip_proxy_wsl_timeout_does_not_leak():
     assert r is not True
     assert SECRET not in str(r)
     assert CRED_URL not in str(r)
+
+
+def test_log_exception_redacts_subprocess_argv(tmp_path, monkeypatch):
+    """crash.log must never receive the subprocess argv (it embeds the URL)."""
+    log = tmp_path / "crash.log"
+    monkeypatch.setattr(pm, "_CRASH_LOG", str(log))
+    try:
+        raise subprocess.TimeoutExpired(
+            ["git", "config", "--replace-all", "http.proxy", CRED_URL], 15)
+    except subprocess.TimeoutExpired:
+        pm.log_exception("unit")
+    text = log.read_text(encoding="utf-8")
+    assert SECRET not in text
+    assert CRED_URL not in text
+    assert "TimeoutExpired" in text          # still diagnosable
+
+
+def test_log_crash_redacts_subprocess_argv(tmp_path, monkeypatch):
+    log = tmp_path / "crash.log"
+    monkeypatch.setattr(pm, "_CRASH_LOG", str(log))
+    e = subprocess.CalledProcessError(1, ["git", "config", CRED_URL])
+    pm.log_crash(type(e), e, e.__traceback__)
+    text = log.read_text(encoding="utf-8")
+    assert SECRET not in text
+    assert CRED_URL not in text
+    assert "CalledProcessError" in text
+
+
+def test_log_exception_keeps_non_subprocess_message(tmp_path, monkeypatch):
+    log = tmp_path / "crash.log"
+    monkeypatch.setattr(pm, "_CRASH_LOG", str(log))
+    try:
+        raise OSError("disk full")
+    except OSError:
+        pm.log_exception("unit")
+    text = log.read_text(encoding="utf-8")
+    assert "OSError: disk full" in text
