@@ -61,6 +61,20 @@ class TestWslPushAtomic:
         assert 'mkdir -p "$dir"' in script
         assert 'rm -f "$tmp"' in script
 
+    def test_script_resolves_symlink_before_rename(self):
+        # A stow/chezmoi dotfile is a symlink; `mv -f` onto the link would
+        # replace it with a regular file. Resolve to the real target first so
+        # the rename lands on the target and the link survives (same contract
+        # as the shell-block path, which writes THROUGH the file).
+        script = pm._wsl_push_script("$HOME/.npmrc")
+        assert '[ -L "$target" ]' in script
+        assert "readlink -f" in script
+        # the atomic rename must target the resolved variable, not the raw path
+        assert 'mv -f "$tmp" "$target"' in script
+        assert 'mv -f "$tmp" "$HOME/.npmrc"' not in script
+        # a failed resolution keeps the original path (never rename onto "")
+        assert '[ -n "$r" ]' in script
+
     def test_push_file_passes_atomic_script(self, monkeypatch):
         seen = {}
 

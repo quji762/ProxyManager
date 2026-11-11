@@ -39,6 +39,7 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 - `boot()` no longer promotes the form address into the applied record when no applied record exists, matching the restore path; a legacy config therefore cannot make quit-clear or quick-switch claim a proxy the user set themselves (`ui/app.js`).
 - An empty proxy value line is no longer mistaken for ProxyManager's and deleted: the INI disable guard matches only when the current value equals the written URL (`proxy_manager.py`).
 - Concurrent same-process writes to one config file no longer truncate each other (the atomic-write temp name carries a uuid), and the clipboard helper times out instead of blocking a worker thread when the clipboard is busy (`proxy_manager.py`, `js_api.py`).
+- WSL Git/npm/pip atomic writes now resolve a symlinked dotfile (stow/chezmoi/dotbot) to its real target before the `mktemp` + `mv -f`, so the rename lands on the target and the user's symlink survives. Previously `mv -f` onto the link replaced `~/.npmrc` / `pip.conf` with a regular file and stranded the dotfile layout — the same reason the shell-block path writes THROUGH the file (`proxy_manager.py`).
 
 ### Security
 - Subprocess errors no longer leak credentials: `TimeoutExpired`/`CalledProcessError` embed the full argv (including credentialed proxy URLs) in their `str()`. These are now rendered as fixed localized messages across the WSL/Git/npm/pip error paths, so passwords cannot reach the UI, screenshots or logs (`js_api.py`, `messages.py`).

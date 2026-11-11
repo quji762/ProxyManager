@@ -35,6 +35,7 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 - Docker/基础设施类 distro 继续跳过，不把它们当普通用户发行版。
 - 设置可选择 all user distros 或 default distro；读写和恢复路径遵守相同 scope。由 all 收窄到 default 时，会按标记/记录的 URL 外科式清掉离开 scope 的发行版里本工具自己写入的配置（默认发行版不动）。
 - shell block 只管理本工具自己的标记区域，禁止覆盖整个 `.bashrc`/`.zshrc`。
+- WSL 文件写入必须保留用户的符号链接（stow/chezmoi/dotbot 把 dotfile 链到仓库）：shell block 写穿文件（`cat > "$f"`），git/npm/pip 的原子写先 `readlink -f` 解析到真实目标再 `mktemp`+`mv -f`，绝不能把链接本身替换成普通文件而破坏用户的 dotfile 布局。
 - `Restart WSL` 是破坏性较强的操作：会终止 distro 内进程，UI 文案/确认不能弱化。
 - 短 TTL 缓存（distro 枚举、可用性探活、网络模式）只缓存成功/非空结果，绝不缓存失败或空结果（WSL 可能稍后恢复，不能被冻结为“不可用”）；`Restart WSL` 必须作废这些缓存。
 

@@ -2283,13 +2283,22 @@ def _wsl_push_script(path: str) -> str:
     file. mktemp in the same directory + `mv -f` is atomic on the same fs
     (same contract as Windows `_atomic_write_text`). A cat-to-tmp failure
     deletes the temp file and never touches the original.
+
+    A symlinked dotfile (stow/chezmoi/dotbot) is resolved to its real target
+    first, so the atomic rename lands on the target and the link survives —
+    matching the shell-block path, which writes THROUGH the file for the same
+    reason. `mv -f` onto the link itself would replace it with a regular file
+    and strand the user's dotfile layout. If readlink cannot resolve (missing
+    parent), we keep the original path rather than rename onto an empty one.
     """
     return (
-        f'dir=$(dirname "{path}"); '
+        f'target="{path}"; '
+        f'if [ -L "$target" ]; then r=$(readlink -f "$target") && [ -n "$r" ] && target="$r"; fi; '
+        f'dir=$(dirname "$target"); '
         f'mkdir -p "$dir" || exit 1; '
         f'tmp=$(mktemp "$dir/.pmXXXXXX") || exit 1; '
         f'cat > "$tmp" || {{ rm -f "$tmp"; exit 1; }}; '
-        f'mv -f "$tmp" "{path}" || {{ rm -f "$tmp"; exit 1; }}'
+        f'mv -f "$tmp" "$target" || {{ rm -f "$tmp"; exit 1; }}'
     )
 
 
