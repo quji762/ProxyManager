@@ -244,10 +244,12 @@ def test_test_all_updates_chips_incrementally():
     assert "settle(" in callback, (
         "each channel's promise must record its own result when IT settles")
     funnel = _arrow_body(body, "const settle = ")
-    for call in ("paintTestChip(", "pushTestHistory(", "renderHistory("):
+    for call in ("paintTestChip(", "pushTestHistory("):
         assert call in funnel, (
             f"the per-channel result path never reaches {call} — results "
             f"would only appear after Promise.all")
+    assert "scheduleHistory(" in funnel or "renderHistory(" in funnel, (
+        "the per-channel result path never refreshes the history list")
     assert body.index("settle(") < body.index("Promise.all("), (
         "results are recorded only after Promise.all — they would arrive all "
         "at once instead of incrementally")
@@ -339,3 +341,25 @@ def test_history_clear_stays_memory_only():
     for banned in ("save_config", "persistSoon", "cfg."):
         assert banned not in handler, (
             f"clearing history reaches {banned} — results must stay memory-only")
+
+
+def test_batch_settle_coalesces_history_render():
+    body = _js_block(_read(UI_DIR / "app.js"),
+                     r"const settle = \(which, ok, ms, error\)")
+    assert "scheduleHistory();" in body
+    assert "renderHistory();" not in body, (
+        "settle must coalesce the history rebuild, not rebuild per channel")
+
+
+def test_history_scheduler_is_frame_coalesced():
+    body = _js_block(_read(UI_DIR / "app.js"), r"function scheduleHistory\s*\(")
+    assert "requestAnimationFrame" in body
+    assert "historyFrame" in body
+    assert "renderHistory();" in body
+
+
+def test_config_prefetch_is_wsl_lane_only():
+    body = _js_block(_read(UI_DIR / "app.js"), r"async function refreshAll\s*\(")
+    assert 'api.call("get_config")' in body
+    assert re.search(r'if \(lane === "wsl"\) \{', body), (
+        "the wsl_written config fetch must be guarded to the WSL lane")
