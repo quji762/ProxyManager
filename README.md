@@ -44,6 +44,8 @@ WSL endpoints can target all user distributions or only the default distro; narr
 - Restore-before-overwrite semantics: an existing different proxy is stashed and restored when ProxyManager disables its own setting.
 - Tray with a live enabled-endpoint count and one-click enable/disable all, autostart, always-on-top, theme/background settings and optional clear-on-quit behavior.
 - Update check with a persistent status row in Settings, a re-check button and a one-click link to the releases download page.
+- One-click **Copy URL** from the proxy form (canonical percent-encoding, credentials included) and **Copy diagnostics** in Settings (version, endpoint switches and environment summary — never the proxy address or password).
+- Keyboard shortcuts: digits **1–9** switch port presets and **Esc** closes popovers; the UI honours `prefers-reduced-motion` and Windows High Contrast.
 
 ## Requirements
 

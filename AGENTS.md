@@ -49,6 +49,10 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 - 错误输出不得泄露凭据：子进程异常（`TimeoutExpired`/`CalledProcessError`）的 `str()` 内嵌完整 argv（含带凭据的代理 URL），必须渲染为固定本地化消息，不得直传 UI/日志/截图。
 - 自定义背景图仅限本地文件：拒绝 UNC/设备路径，避免加载背景触发 SMB 认证（NTLM-relay 面）。
 - 渲染 config/备份提供的动态值（端口、方案名、历史、备份列表等）必须在渲染边界 HTML 转义，杜绝注入。
+- `esc_` 必须覆盖 `& < > " '` 五个字符：文本节点解析后语义不变，同时兼容未来的单引号属性/内联处理器。
+- `crash.log` 不是凭据通道：子进程异常只记类型；其他异常文本须遮蔽内嵌 `user:pass@` 并转义 CR/LF，不能让一条消息伪造出额外的日志行。
+- 诊断导出（`get_diagnostics`）不得包含主机、userinfo、密码或任何代理 URL，只允许 scheme/端口/是否含凭据等摘要。
+- WSL/INI 等外部文本按 BOM/NUL 判定编码（无 BOM UTF-16 按字节序识别），回写沿用同一编码，避免把键读成 NUL 交织的乱码后追加重复项。
 
 ## Configuration state
 
