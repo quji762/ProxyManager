@@ -551,8 +551,8 @@ function validateFields(mark) {
 /* ═══════════════ Port presets: chips + quick switch + manage ═══════════════ */
 function renderPorts() {
   const cur = $("inPort").value.trim();
-  const chips = cfg.ports.map((p) =>
-    `<button class="pchip ${String(p) === cur ? "active" : ""}" data-port="${esc_(p)}" data-tip="${esc_(t("tipSwitchPort", { port: p }))}">${esc_(p)}</button>`).join("");
+  const chips = cfg.ports.map((p, i) =>
+    `<button class="pchip ${String(p) === cur ? "active" : ""}" data-port="${esc_(p)}" data-tip="${esc_(t("tipSwitchPort", { port: p }))}${i < 9 ? " (" + (i + 1) + ")" : ""}">${esc_(p)}</button>`).join("");
   $("portChips").innerHTML = chips + `<button class="pchip add" id="portManage" data-tip="${t("tipManagePorts")}">＋</button>`;
   $("portChips").querySelectorAll(".pchip[data-port]").forEach((el) => {
     el.onclick = () => quickSwitchPort(el.dataset.port);
@@ -1640,6 +1640,29 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "Enter" && !$("settingsOv").classList.contains("show")) {
     e.preventDefault();
     $("dlgOk").click();
+  }
+});
+/* Global shortcuts: digits 1-9 pick the matching port preset (the chip
+   tooltip shows its number), Esc closes the port/preset popovers. Ignored
+   while typing or while a dialog/settings pane owns the keyboard, so it never
+   fights normal text entry. */
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const tgt = e.target;
+  if (tgt instanceof HTMLElement &&
+      tgt.closest("input, textarea, select, [contenteditable='true']")) return;
+  if (e.key === "Escape") {
+    $("portPop").classList.remove("show");
+    $("profilePop").classList.remove("show");
+    return;
+  }
+  if (_dlgOpen || $("settingsOv").classList.contains("show")) return;
+  if (!/^[1-9]$/.test(e.key)) return;
+  const ports = cfg.ports || [];
+  const idx = Number(e.key) - 1;
+  if (idx < ports.length) {
+    e.preventDefault();
+    quickSwitchPort(ports[idx]);
   }
 });
 document.addEventListener("click", (e) => {

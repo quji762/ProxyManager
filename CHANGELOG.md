@@ -5,6 +5,7 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 ## Unreleased
 
 ### Added
+- Keyboard shortcuts: digits **1–9** switch to the matching port preset (the chip tooltip shows its number) and **Esc** closes the port/preset popovers. Both are ignored while typing or while a dialog/settings pane is open, so normal text entry is never hijacked (`ui/app.js`, `tests/test_ui_shortcuts.py`).
 - Tray menu now shows how many endpoints are currently enabled (derived from the applied record and persisted switches, never the form fields) and adds one-click **Enable all** / **Disable all**; both run on a background worker with balloon feedback so the tray never blocks (`tray_icon.py`).
 - A one-click **Test all** button probes every channel of the visible lane concurrently, painting each result as it arrives, with a 45 s watchdog and a short in-page history of recent results (kept in memory only — never written to `config.json`) (`ui/app.js`).
 - The Windows lane now shows a PAC caveat under the system-proxy row when an `AutoConfigURL` is registered: browsers may follow the PAC script, so the static proxy shown is not necessarily in effect. The hint is read-only and rendered as plain text (`ui/app.js`, `js_api.py`).
