@@ -1497,12 +1497,13 @@ function pushTestHistory(which, ok, ms, error) {
 }
 
 function renderHistory() {
-  const ul = $("testHistory"), cap = $("testHistoryTitle");
+  const ul = $("testHistory"), cap = $("testHistoryTitle"), clr = $("btnHistoryClear");
   if (!ul) return;
   // Lane-scoped: the WSL page never shows Windows-lane results and vice versa.
   const inLane = TEST_CHANNELS[curLane] || [];
   const rows = testHistory.filter((h) => inLane.includes(h.which));
   if (cap) cap.hidden = !rows.length;
+  if (clr) clr.hidden = !rows.length;
   ul.hidden = !rows.length;
   const pad = (v) => String(v).padStart(2, "0");
   ul.innerHTML = rows.map((h) => {
@@ -1525,12 +1526,14 @@ async function testAllChannels() {
   btn.classList.add("testing");
   btn.textContent = t("testAllBusy");
   const done = new Set();
+  let okCount = 0;
   // Per-channel settle: paints the chip and the history row the moment THAT
   // probe answers — no waiting for the whole batch, and one channel's throw
   // or {ok:false} never blocks the others.
   const settle = (which, ok, ms, error) => {
     if (done.has(which)) return;   // first result wins; the watchdog fills the rest
     done.add(which);
+    if (ok) okCount++;
     paintTestChip(which, ok, ms, error);
     pushTestHistory(which, ok, ms, error);
     renderHistory();
@@ -1552,6 +1555,12 @@ async function testAllChannels() {
     for (const which of channels) {
       if (!done.has(which)) settle(which, false, 0, t("testAllTimeout"));
     }
+    // Overall verdict so the user need not scan every chip: counts reflect the
+    // final settled state, watchdog timeouts included as failures.
+    const total = channels.length, fail = total - okCount;
+    toast(fail ? t("testSummaryFail", { ok: okCount, total, fail })
+               : t("testSummaryOk", { ok: okCount, total }),
+          fail ? "err" : "ok");
   } finally {
     clearTimeout(timer);
     setBusyAll(false);
@@ -1569,6 +1578,9 @@ async function testAllChannels() {
   }
 }
 $("btnTestAll").onclick = () => testAllChannels();
+/* Clear the (memory-only) result history for both lanes. Ephemeral and local,
+   so no confirm: nothing persisted is lost. */
+$("btnHistoryClear").onclick = () => { testHistory = []; renderHistory(); };
 
 /* Title-bar drag + double-click: native-first. Python enables WebView2's
    IsNonClientRegionSupportEnabled and #dragRegion carries app-region: drag,

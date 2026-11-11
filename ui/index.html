@@ -190,7 +190,10 @@
         <div class="kv"><span class="k">npm（~/.npmrc）</span><span class="v copyable" id="vNpmWsl" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="npmwsl" data-i18n="test" data-i18n-tip="tipTestWsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
         <div class="kv"><span class="k">pip（~/.config/pip/pip.conf）</span><span class="v copyable" id="vPipWsl" data-copy tabindex="0" data-i18n-tip="tipCopy" data-tip="点击复制">—</span><button class="test-chip" data-test="pipwsl" data-i18n="test" data-i18n-tip="tipTestWsl" data-tip="在 WSL 内通过该代理发起连通性测试">测试</button></div>
       </div>
-      <div class="test-history-cap" id="testHistoryTitle" data-i18n="testHistoryTitle" hidden>最近测试结果</div>
+      <div class="test-history-head">
+        <div class="test-history-cap" id="testHistoryTitle" data-i18n="testHistoryTitle" hidden>最近测试结果</div>
+        <button type="button" class="dim-btn th-clear" id="btnHistoryClear" data-i18n="testHistoryClear" data-i18n-tip="tipHistoryClear" data-tip="清空全部测试历史" hidden>清空</button>
+      </div>
       <ul id="testHistory" class="test-history" hidden></ul>
     </div>
   </div>

@@ -282,3 +282,60 @@ def test_history_is_memory_only():
         assert "history" not in k and "test" not in k, (
             f"config_store._SAVE_KEYS persists {k!r} — test results must not "
             f"enter config.json")
+
+
+# ── batch pass/fail summary ─────────────────────────────────────────────────
+def test_test_all_emits_pass_fail_summary():
+    body = _test_all_body()
+    assert "okCount" in body, "the batch must tally passes for an overall verdict"
+    assert re.search(r"if\s*\(ok\)\s*okCount\+\+", body), (
+        "okCount must increment inside the per-channel settle path")
+    assert "testSummaryOk" in body and "testSummaryFail" in body, (
+        "both verdicts (all-pass / some-fail) must be emitted")
+    assert re.search(r"total\s*=\s*channels\.length", body), (
+        "the summary denominator must be the lane's channel count")
+    assert "toast(" in body, "the verdict must reach the user as a toast"
+
+
+def test_summary_counts_include_watchdog_timeouts():
+    body = _test_all_body()
+    # The timeout-fill loop must run before the summary so a hung channel is
+    # counted as a failure rather than vanishing from the denominator.
+    fill = body.index('t("testAllTimeout")')
+    summary = body.index("testSummaryFail")
+    assert fill < summary, (
+        "summary is computed before watchdog timeouts are settled — they would "
+        "not be counted as failures")
+
+
+# ── clear-history affordance ────────────────────────────────────────────────
+def _clear_handler():
+    app = _read(UI_DIR / "app.js")
+    m = re.search(r'\$\("btnHistoryClear"\)\.onclick\s*=\s*\(\)\s*=>\s*\{([^}]*)\}',
+                  app)
+    assert m, "btnHistoryClear has no arrow onclick handler"
+    return m.group(1)
+
+
+def test_history_clear_button_present_and_wired():
+    html = _read(UI_DIR / "index.html")
+    assert 'id="btnHistoryClear"' in html, "no clear-history button in the DOM"
+    assert 'data-i18n="testHistoryClear"' in html
+    assert 'data-i18n-tip="tipHistoryClear"' in html
+    handler = _clear_handler()
+    assert "testHistory = []" in handler, "clear must empty the history array"
+    assert "renderHistory()" in handler, "clear must repaint (hide) the history"
+
+
+def test_render_history_toggles_clear_button():
+    body = _js_block(_read(UI_DIR / "app.js"), r"function renderHistory\s*\(")
+    assert "btnHistoryClear" in body, "renderHistory must show/hide the clear button"
+    assert re.search(r"clr\.hidden\s*=\s*!rows\.length", body), (
+        "the clear button must hide exactly when the lane has no rows")
+
+
+def test_history_clear_stays_memory_only():
+    handler = _clear_handler()
+    for banned in ("save_config", "persistSoon", "cfg."):
+        assert banned not in handler, (
+            f"clearing history reaches {banned} — results must stay memory-only")

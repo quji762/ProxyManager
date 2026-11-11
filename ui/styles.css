@@ -402,6 +402,9 @@ body.has-bg .card { backdrop-filter: blur(24px) saturate(1.25); -webkit-backdrop
 .dim-btn:disabled { opacity: .55; pointer-events: none; }
 .dim-btn.testing { color: var(--text2); background: var(--chip-hover); }
 .test-history-cap { font-size: 11px; font-weight: 700; color: var(--text2); margin: 10px 0 4px; letter-spacing: .3px; }
+.test-history-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0 4px; }
+.test-history-head .test-history-cap { margin: 0; }
+.th-clear { font-size: 10px; padding: 1px 8px; }
 .test-history { list-style: none; margin: 0 0 2px; padding: 0; max-height: 110px; overflow-y: auto; }
 .test-history li { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 2px 0; }
 .test-history .th-ch { width: 190px; flex: none; color: var(--text2);
