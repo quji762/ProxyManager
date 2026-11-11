@@ -125,6 +125,16 @@ def test_endpoint_card_escapes_detected_value():
     assert "esc_(val)" in block
 
 
+def test_test_chip_and_history_localize_backend_error():
+    # test_channel returns an error_key; show the localized text, not r.error.
+    assert "const et = msgText(r || {})" in APP_JS
+    assert "settle(which, !!(r && r.ok), r && r.ms, msgText(r || {})" in APP_JS
+
+
+def test_autostart_failure_uses_msg_text():
+    assert 't("setFail", { err: msgText(r || {})' in APP_JS
+
+
 # ── i18n completeness ───────────────────────────────────────────────────────
 def test_zh_en_tables_have_identical_keys():
     tables = _i18n_tables()

@@ -1457,7 +1457,12 @@ document.addEventListener("click", async (e) => {
   chips.forEach((c) => {
     c.classList.remove("testing");
     if (r && r.ok) { c.classList.add("ok"); c.textContent = `✓ ${r.ms}ms`; c.title = ""; }
-    else { c.classList.add("fail"); c.textContent = r && r.error ? "✗ " + r.error.slice(0, 40) : "✗"; c.title = (r && r.error) || ""; }
+    else {
+      const et = msgText(r || {}) || t("unknown");
+      c.classList.add("fail");
+      c.textContent = "✗ " + et.slice(0, 40);
+      c.title = et;
+    }
     setTimeout(() => { c.classList.remove("ok", "fail"); c.textContent = t("test"); }, 3000);
   });
 });
@@ -1556,7 +1561,7 @@ async function testAllChannels() {
       c.textContent = t("testing");
     });
     return api.call("test_channel", which).then((r) => {
-      settle(which, !!(r && r.ok), r && r.ms, (r && r.error) || "");
+      settle(which, !!(r && r.ok), r && r.ms, msgText(r || {}) || "");
     }).catch((err) => settle(which, false, 0, String(err)));
   });
   let timer = null;
@@ -1714,7 +1719,7 @@ $("tglAuto").onclick = async () => {
   const on = !$("tglAuto").classList.contains("on");
   const r = await api.call("set_autostart", on);
   if (r && r.ok) { setTgl($("tglAuto"), on); toast(on ? t("autoOn") : t("autoOff"), "ok"); }
-  else toast(t("setFail", { err: (r && r.error) || t("unknown") }), "err");
+  else toast(t("setFail", { err: msgText(r || {}) || t("unknown") }), "err");
 };
 $("tglQuitClear").onclick = () => {
   const on = !$("tglQuitClear").classList.contains("on");
