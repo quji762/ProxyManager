@@ -148,3 +148,18 @@ def test_lane_tabs_label_key_in_both_languages():
         body = rest[:close.start()] if close else rest
         assert re.search(r"\blaneTabsLabel:\s*\"", body), \
             f"laneTabsLabel missing from {lang}"
+
+
+# ── motion / contrast preferences ───────────────────────────────────────────
+def test_reduced_motion_and_focus_visible_present():
+    css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    assert ":focus-visible" in css
+
+
+def test_high_contrast_keeps_focus_and_control_borders():
+    css = (ROOT / "ui" / "styles.css").read_text(encoding="utf-8")
+    assert "@media (forced-colors: active)" in css
+    block = css[css.index("@media (forced-colors: active)"):]
+    assert "outline: 2px solid Highlight" in block
+    assert "border: 1px solid ButtonText" in block

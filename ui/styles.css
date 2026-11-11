@@ -558,3 +558,17 @@ html.maximized .grip { display: none; }
   /* The refresh spinner is the only "still working" indicator — keep it. */
   .spin { animation-duration: 1s !important; animation-iteration-count: infinite !important; }
 }
+
+/* Windows High Contrast (forced-colors): the OS replaces our palette, which
+   can erase the custom borders that distinguish chips/buttons and the
+   border-only focus cue on text inputs. Re-assert a system-colored focus ring
+   and control borders so every control stays visible and operable. */
+@media (forced-colors: active) {
+  :focus-visible,
+  .field input:focus-visible, .field select:focus-visible,
+  .port-pop input:focus-visible, .speed-pop input:focus-visible,
+  #inLang:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+  .btn, .dim-btn, .pchip, .lane-tab, .test-chip, .tb-btn {
+    border: 1px solid ButtonText;
+  }
+}
