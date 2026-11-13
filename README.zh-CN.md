@@ -51,9 +51,18 @@ WSL 可作用于全部用户发行版，或只作用于默认发行版；收窄�
 
 - Windows 10/11
 - WebView2 Runtime
-- 源码开发：Python 3.9+
+- 源码开发：Python 3.11+
 - WSL 端点才需要 WSL
 - Git 端点才需要 Git；npm/pip 直接编辑配置文件，不要求对应 CLI 已安装
+
+## 下载
+
+GitHub Releases 提供同一版本的两份 Windows 构建：
+
+- `ProxyManager-setup.exe`：当前用户安装包。不请求管理员权限，安装到 `%LOCALAPPDATA%\Programs\ProxyManager`。不会打开开机启动，那仍是程序里的开关。
+- `ProxyManager-portable.exe`：同一程序的单文件便携版。设置仍保存在 `%APPDATA%\ProxyManager`。
+
+这两个文件没有代码签名。Windows SmartScreen 可能在首次打开时提示。运行前请对照该 Release 上的 `SHA256SUMS.txt`。
 
 ## 从源码运行
 
@@ -66,13 +75,13 @@ py -3.13 app.py
 
 也可以运行 `start.bat`。
 
-使用 `build.bat` 构建单文件 EXE；构建依赖与运行时依赖分开维护。
+使用 `build.bat` 构建单文件 EXE。`package.bat`（需要 Inno Setup 6）再生成 `dist\ProxyManager-portable.exe` 和 `dist\ProxyManager-setup.exe`。构建依赖与运行时依赖分开维护。
 
 ## 配置与秘密
 
 设置保存在 `%APPDATA%\ProxyManager\config.json`。代理密码——包括方案预设和 `%APPDATA%\ProxyManager\backups\` 下配置备份中的密码——都使用 Windows DPAPI 保护；如果加密失败则拒绝保存，而不是回退到明文。DPAPI 把密文绑定到你的 Windows 用户/机器，因此在另一台机器上恢复备份无法解密旧密码（会保留当前密码）。即使如此，配置文件、`.bak` 和 backups 目录仍应按敏感文件处理。
 
-凭据也不会进入错误输出：子进程失败以固定的本地化消息报告，而不是原始命令行（其中可能内嵌带凭据的代理 URL）。自定义背景图仅限本地文件——拒绝 UNC 与设备路径，避免加载背景时触发 SMB 认证。
+凭据也不会进入错误输出：子进程失败以固定的本地化消息报告，而不是原始命令行（其中可能内嵌带凭据的代理 URL）。自定义背景图仅限本地文件。UNC、设备路径，以及最终指向网络共享的 junction / 符号链接都会被拒绝；这项检查只读重解析数据、不跟随链接，因此加载背景不会触发 SMB 认证。
 
 ProxyManager 同时记录“表单里正在编辑的值”和“最后真正写入端点的值”。这两个概念不能合并：仅仅输入一个新地址，不能让恢复逻辑误以为该地址已经应用。
 
@@ -93,6 +102,10 @@ python -m pytest tests/ -q
 ```
 
 系统写入/恢复规则、WSL 行为、DPAPI 边界和验证要求统一维护在 [AGENTS.md](./AGENTS.md)；重要变化记录在 [CHANGELOG.md](./CHANGELOG.md)。
+
+## 安全
+
+不要把 `config.json`、它的 `.bak`、backups 目录，或含密码的代理 URL 贴到 issue 里。请用设置页的「复制诊断」；这份摘要不含主机、userinfo 或代理 URL。漏洞请通过仓库 Security 页的 Advisories 私下报告，不要发公开 issue。
 
 ## 许可证
 

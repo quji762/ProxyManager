@@ -56,6 +56,197 @@ def _is_network_path(path):
     surface — so a background image must be a local file the user picked."""
     return path.startswith(("\\\\", "//"))
 
+
+# GetFileAttributesW does not follow the final component, so a symlink or
+# junction is visible as FILE_ATTRIBUTE_REPARSE_POINT before any open can
+# authenticate to the target. A directory junction to a UNC share would
+# otherwise pass the string check above and still trigger NTLM.
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.GetFileAttributesW.argtypes = [ctypes.c_wchar_p]
+_kernel32.GetFileAttributesW.restype = ctypes.c_uint32
+
+
+def _get_file_attributes(path):
+    attrs = _kernel32.GetFileAttributesW(path)
+    if attrs == _INVALID_FILE_ATTRIBUTES:
+        return None
+    return int(attrs)
+
+
+# Open the reparse point itself. FILE_FLAG_BACKUP_SEMANTICS is required for
+# directories (junctions); without OPEN_REPARSE_POINT the call would follow
+# a UNC junction and authenticate.
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FSCTL_GET_REPARSE_POINT = 0x000900A8
+_REPARSE_MOUNT_POINT = 0xA0000003
+_REPARSE_SYMLINK = 0xA000000C
+# OneDrive placeholders. They are not SMB redirects; rejecting them would
+# block background images stored in a cloud-backed Desktop/Documents.
+_CLOUD_REPARSE_TAGS = frozenset(0x9000001A + (i << 12) for i in range(16))
+
+_CreateFileW = _kernel32.CreateFileW
+_CreateFileW.argtypes = [
+    ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+_CreateFileW.restype = ctypes.c_void_p
+_DeviceIoControl = _kernel32.DeviceIoControl
+_DeviceIoControl.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32),
+    ctypes.c_void_p]
+_DeviceIoControl.restype = ctypes.c_int
+_CloseHandle = _kernel32.CloseHandle
+_CloseHandle.argtypes = [ctypes.c_void_p]
+_CloseHandle.restype = ctypes.c_int
+
+
+def _read_reparse(path):
+    """Raw reparse buffer, or None. Does not follow the link."""
+    handle = _CreateFileW(
+        path, 0x80000000, 0x7, None, 3,
+        _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS, None)
+    invalid = ctypes.c_void_p(-1).value
+    if not handle or handle == invalid:
+        return None
+    try:
+        buf = ctypes.create_string_buffer(16 * 1024)
+        returned = ctypes.c_uint32(0)
+        ok = _DeviceIoControl(
+            handle, _FSCTL_GET_REPARSE_POINT, None, 0,
+            buf, len(buf), ctypes.byref(returned), None)
+        if not ok or not returned.value:
+            return None
+        return buf.raw[:returned.value]
+    finally:
+        _CloseHandle(handle)
+
+
+def _drive_absolute(text):
+    """`C:\\` or `C:\\foo`. Drive-relative `C:foo` is not absolute."""
+    if len(text) >= 3 and text[1] == ":" and text[2] == "\\":
+        return os.path.normpath(text)
+    return None
+
+
+def _reparse_destination(path):
+    """Where this reparse point sends the next lookup, without following it.
+
+    Returns `("cloud", "")` for an OneDrive placeholder (local hydration, not
+    SMB), `("local", absolute)` for a drive path, or `("remote", "")` when
+    the target is a share, unknown, or unreadable. Unreadable fails closed:
+    opening the path to "see" it is the NTLM trigger this check exists to avoid.
+    """
+    raw = _read_reparse(path)
+    if not raw or len(raw) < 8:
+        return "remote", ""
+    tag = int.from_bytes(raw[:4], "little")
+    if tag in _CLOUD_REPARSE_TAGS:
+        return "cloud", ""
+    if tag == _REPARSE_MOUNT_POINT:
+        base = 16
+    elif tag == _REPARSE_SYMLINK:
+        base = 20
+    else:
+        return "remote", ""
+    if len(raw) < base:
+        return "remote", ""
+    sub_off = int.from_bytes(raw[8:10], "little")
+    sub_len = int.from_bytes(raw[10:12], "little")
+    start = base + sub_off
+    end = start + sub_len
+    if sub_len <= 0 or end > len(raw) or sub_len % 2:
+        return "remote", ""
+    try:
+        target = raw[start:end].decode("utf-16le", errors="strict")
+    except UnicodeError:
+        return "remote", ""
+    if "\x00" in target:
+        return "remote", ""
+    text = target.replace("/", "\\")
+    if text.startswith(("\\??\\", "\\\\?\\")):
+        text = text[4:]
+    if text.startswith("UNC\\"):
+        return "remote", ""
+    if text.startswith(("\\\\", "//")):
+        return "remote", ""
+    absolute = _drive_absolute(text)
+    if absolute is None:
+        # Relative substitute. Resolve against the link's parent in the
+        # string only — normpath does not open the path — then walk that
+        # absolute path. A relative link to a UNC junction must be caught
+        # before any child lookup follows it.
+        parent = os.path.dirname(path.rstrip("\\")) or path
+        absolute = _drive_absolute(os.path.normpath(os.path.join(parent, text)))
+    if absolute is None or _is_network_path(absolute):
+        return "remote", ""
+    return "local", absolute
+
+
+def _path_crosses_reparse(path):
+    """True when following `path` could leave the local machine.
+
+    GetFileAttributesW does not follow the final component, so a junction is
+    visible before any open can authenticate to its target. A *local* reparse
+    point is not opened either: its substitute name is resolved from the
+    reparse buffer and the walk restarts on that absolute path. Otherwise a
+    relative symlink to a UNC junction would be classified as local, and the
+    next component lookup would follow it onto the share."""
+    try:
+        current = os.path.abspath(path)
+    except (OSError, ValueError):
+        return True
+    for _hop in range(16):
+        if _is_network_path(current):
+            return True
+        drive, rest = os.path.splitdrive(current)
+        if len(drive) < 2 or drive[1] != ":":
+            return True
+        acc = drive + "\\"
+        parts = [p for p in rest.split("\\") if p]
+        redirected = None
+        for index, part in enumerate(parts):
+            acc = os.path.join(acc, part)
+            if _is_network_path(acc):
+                return True
+            attrs = _get_file_attributes(acc)
+            if attrs is None:
+                return False
+            if not attrs & _FILE_ATTRIBUTE_REPARSE_POINT:
+                continue
+            kind, dest = _reparse_destination(acc)
+            if kind == "cloud":
+                continue
+            if kind != "local":
+                return True
+            tail = parts[index + 1:]
+            nxt = dest if not tail else os.path.join(dest, *tail)
+            redirected = os.path.normpath(nxt)
+            break
+        if redirected is None:
+            return False
+        if os.path.normcase(redirected) == os.path.normcase(current):
+            return True
+        current = redirected
+    return True
+
+
+_BG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+
+
+def _bg_path_acceptable(path):
+    """Local, non-reparse image file. Network and reparse checks run before
+    any follow (isfile/open), which is what would contact a remote share."""
+    if not path or _is_network_path(path):
+        return False
+    if os.path.splitext(path)[1].lower() not in _BG_EXTS:
+        return False
+    if _path_crosses_reparse(path):
+        return False
+    return os.path.isfile(path)
+
 # 恢复暂存中的凭据保护：ps 的 env 值与其余端点的完整 URL 可能携带
 # user:pass@ 明文凭据，落盘 config.json 前逐值 DPAPI 加密（与 password
 # 字段同机制）；读回时按 DPAPI: 前缀解密，旧版明文暂存原样兼容。
@@ -111,6 +302,20 @@ def _mark_restored(r):
 
 def _save_failed(result):
     return result is False or (isinstance(result, dict) and result.get("error"))
+
+
+def _probe_exc(e):
+    """Connectivity-probe failure that is safe to show in the UI.
+
+    Subprocess timeouts stringify to the full argv (proxy URL included).
+    safe_error maps those to a fixed message and redacts any
+    ``scheme://user:pass@`` left in other exception text. Non-localized
+    text is clipped so a long URLError cannot flood the test chip."""
+    msg = pm.safe_error(e) or LStr("errConnFail")
+    if isinstance(msg, LStr):
+        return msg
+    text = str(msg).replace("\r", " ").replace("\n", " ").strip()
+    return text[:160] or LStr("errConnFail")
 
 
 def _mask_userinfo(url):
@@ -210,6 +415,30 @@ def _stash_decrypt(restore):
             p["url"] = _plain(str(url))
         out[target] = p
     return out
+
+
+def _trusted_release_url(candidate):
+    """True only for https://github.com/quji762/ProxyManager/... 
+
+    The cached html_url comes from the GitHub API response. Reject userinfo,
+    a non-https scheme, a different host, and any `.` / `..` path segment so
+    a tampered payload cannot walk the browser off this repository.
+    """
+    from urllib.parse import urlparse
+    if not candidate or any(c in candidate for c in "\\\r\n\t "):
+        return False
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
+        return False
+    if parsed.username or parsed.password:
+        return False
+    parts = [p for p in (parsed.path or "").split("/") if p]
+    if any(p in (".", "..") for p in parts):
+        return False
+    return parts[:2] == ["quji762", "ProxyManager"]
 
 
 class Api:
@@ -424,12 +653,9 @@ class Api:
                     cfg["autostart"] = bool(data["autostart"])
                 if "bg_path" in data:
                     bp = str(data["bg_path"])
-                    ext = os.path.splitext(bp)[1].lower()
                     if not bp:
                         cfg["bg_path"] = ""
-                    elif not _is_network_path(bp) \
-                            and ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif") \
-                            and os.path.isfile(bp):
+                    elif _bg_path_acceptable(bp):
                         cfg["bg_path"] = bp
                     # else: keep the previous value instead of persisting a
                     # bogus/missing path that get_background would choke on.
@@ -2107,7 +2333,7 @@ class Api:
                                        "https://github.com/quji762/ProxyManager/releases"))
             return _result("latest")
         except Exception as e:
-            return _result("error", error=str(e)[:120])
+            return _result("error", error=str(pm.safe_error(e))[:120])
 
     def open_release_page(self):
         """Open the GitHub releases page in the system browser.
@@ -2121,7 +2347,7 @@ class Api:
         cached = type(self)._UPDATE_CACHE
         if cached and isinstance(cached[1], dict):
             candidate = str(cached[1].get("url") or "")
-            if candidate.startswith("https://github.com/quji762/ProxyManager/"):
+            if _trusted_release_url(candidate):
                 url = candidate
         try:
             return bool(webbrowser.open(url))
@@ -2306,7 +2532,7 @@ class Api:
                     return {"ok": True, "ms": ms}
                 last_err = f"HTTP {resp.status}"
             except Exception as e:
-                last_err = str(e)[:160] or LStr("errConnFail")
+                last_err = _probe_exc(e)
         return {"ok": False, "error": str(last_err),
                 "error_key": last_err.key if isinstance(last_err, LStr) else None}
 
@@ -2325,7 +2551,7 @@ class Api:
                     return {"ok": True, "ms": int(float(parts[1]) * 1000)}
                 last_err = self._http_probe_err(parts[0] if parts else "")
             except Exception as e:
-                last_err = str(e)[:160] or LStr("errConnFail")
+                last_err = _probe_exc(e)
         return {"ok": False, "error": str(last_err),
                 "error_key": last_err.key if isinstance(last_err, LStr) else None}
 
@@ -2376,7 +2602,11 @@ class Api:
                 out_["error_key"] = err.key
             return out_
         except Exception as e:
-            return {"ok": False, "error": str(e)[:120] or "连接失败"}
+            msg = _probe_exc(e)
+            out_ = {"ok": False, "error": str(msg)}
+            if isinstance(msg, LStr):
+                out_["error_key"] = msg.key
+            return out_
 
     def apply_form_back(self, mode):
         """Re-paint the WinForms Form background to match the theme. The form
@@ -2441,8 +2671,9 @@ class Api:
                 errors="replace", creationflags=0x08000000)
             path = (r.stdout or "").strip().splitlines()
             path = path[-1].strip() if path else ""
-            if not path or not os.path.isfile(path):
-                return {"ok": False}  # user cancelled
+            # Reparse check before isfile/getsize: those follow junctions.
+            if not path or not _bg_path_acceptable(path):
+                return {"ok": False}  # cancelled, or not a local image file
             try:
                 if os.path.getsize(path) > MAX_BG_BYTES:
                     return {"ok": False, "error": str(LStr("errBgTooBig")),
@@ -2458,7 +2689,11 @@ class Api:
                 return {"ok": False, **err}
             return {"ok": True, "path": path, "name": os.path.basename(path)}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            msg = pm.safe_error(e)
+            out = {"ok": False, "error": str(msg)}
+            if isinstance(msg, LStr):
+                out["error_key"] = msg.key
+            return out
         finally:
             if ps_path:
                 try:
@@ -2478,7 +2713,7 @@ class Api:
         mtime+size so an edited image at the same path is re-read."""
         cfg = load_config()
         path = cfg.get("bg_path", "")
-        if not path or _is_network_path(path) or not os.path.isfile(path):
+        if not _bg_path_acceptable(path):
             return None
         try:
             stat = os.stat(path)

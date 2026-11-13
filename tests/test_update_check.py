@@ -104,11 +104,25 @@ def test_open_release_page_rejects_foreign_cached_url():
     api = _api()
     for bad in ("https://evil.example/phish",
                 "https://github.com/quji762/ProxyManager.evil/x",
-                "http://github.com/quji762/ProxyManager/releases"):
+                "http://github.com/quji762/ProxyManager/releases",
+                "https://github.com/quji762/ProxyManager/releases/../../../evil",
+                "https://user:pass@github.com/quji762/ProxyManager/releases",
+                "https://github.com/quji762/ProxyManager/releases\nhttps://evil.example"):
         Api._UPDATE_CACHE = (0.0, {"status": "update", "url": bad})
         with patch("webbrowser.open", return_value=True) as m:
             api.open_release_page()
         m.assert_called_once_with(_RELEASES)
+
+
+def test_check_update_error_redacts_proxy_credentials():
+    api = _api()
+    secret = "s3cr3t-pass"
+    cred = f"http://user:{secret}@127.0.0.1:7890"
+    with patch("urllib.request.urlopen", side_effect=OSError(f"tunnel via {cred}")):
+        r = api.check_update()
+    assert secret not in r["error"]
+    assert cred not in r["error"]
+    assert "http://***@" in r["error"]
 
 
 def test_open_release_page_returns_false_on_browser_failure():

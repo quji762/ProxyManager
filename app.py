@@ -9,9 +9,18 @@ config_store.py.
     py -3.13 app.py        (or double-click start.bat)
 """
 
+import sys
+
+# Direct `py app.py` can still be an older interpreter. Ruff's target is
+# 3.11, so it treats this guard as dead; keep it for that launch path.
+if sys.version_info < (3, 11):  # noqa: UP036
+    sys.stderr.write(
+        "ProxyManager requires Python 3.11 or newer "
+        f"(this interpreter is {sys.version.split()[0]}).\n")
+    raise SystemExit(1)
+
 import ctypes
 import os
-import sys
 import threading
 import time
 

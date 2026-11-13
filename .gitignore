@@ -29,3 +29,11 @@ config.json.lock
 Thumbs.db
 Desktop.ini
 *.lnk
+
+# Local secrets and accidental data-dir copies. Runtime config already lives
+# under %APPDATA%; these keep a checkout from picking up env files, stray
+# backups, or a backups/ folder created next to the source tree.
+.env
+.env.*
+*.bak
+backups/

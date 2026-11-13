@@ -247,7 +247,6 @@ body.has-bg .card { backdrop-filter: blur(24px) saturate(1.25); -webkit-backdrop
 .backup-item .bsz { font-size: 10.5px; font-weight: 500; color: var(--text3); }
 .backup-item .bacts { display: flex; align-items: center; gap: 6px; flex: none; }
 
-.hero-actions { margin-top: 16px; display: flex; align-items: center; gap: 12px; }
 .btn {
   display: inline-flex; align-items: center; gap: 8px; border-radius: 7px;
   font-family: var(--font); font-size: 13px; font-weight: 600; border: 1px solid transparent;
@@ -314,7 +313,6 @@ body.has-bg .card { backdrop-filter: blur(24px) saturate(1.25); -webkit-backdrop
 /* scaleX, not width: the bar updates every second and transform stays off the layout path */
 .spark i { display: block; height: 100%; width: 100%; background: var(--accent); border-radius: 2px;
   transform: scaleX(0); transform-origin: left; transition: transform var(--dur-slow) var(--ease-out); }
-.hero-hint { margin-top: 10px; font-size: 11px; color: var(--text3); line-height: 1.6; }
 
 /* ═══════════════════════ Endpoint rows ═══════════════════════ */
 .ep-wrap { display: flex; align-items: stretch; gap: 12px; }
@@ -524,7 +522,6 @@ input[type="range"]::-webkit-slider-thumb {
 
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.skeleton { color: var(--text3) !important; }
 
 /* Corner grip affordance (bottom-right); hit-testing is native */
 .grip {

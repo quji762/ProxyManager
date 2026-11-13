@@ -21,15 +21,13 @@ import time
 import proxy_manager as pm
 
 # ── APP_VERSION: single source of truth ──────────────────────────────────────
-# pyproject.toml reads this via [tool.setuptools.dynamic] version = attr, so
-# bump the version HERE ONLY. importlib.metadata provides it at runtime when
-# the package is pip-installed; the literal below is the fallback for source
-# runs and PyInstaller builds (no dist-info in either).
-try:
-    from importlib.metadata import version as _pkg_version
-    APP_VERSION = _pkg_version("proxy-manager")
-except Exception:
-    APP_VERSION = "1.4.0"
+# pyproject.toml reads this via [tool.setuptools.dynamic] version = attr, and
+# the release workflow parses the same literal. Do not consult
+# importlib.metadata here: a previously installed proxy-manager in
+# site-packages would override this checkout (and a `pip install .` of this
+# tree) with that stale version. Source runs and PyInstaller builds both
+# execute this file, so the literal is the version either way.
+APP_VERSION = "1.4.0"
 
 # ── DPAPI helpers for password encryption ────────────────────────────────────
 _DPAPI_PREFIX = "DPAPI:"

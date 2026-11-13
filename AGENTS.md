@@ -47,7 +47,7 @@ Windows 与 WSL 是两条独立 lane；Git/npm/pip 在两侧也是不同端点�
 - 密码写入本地 config 时必须经过 Windows DPAPI；DPAPI 失败要拒绝保存，不得静默写明文。
 - `config.json` 和 `.bak` 仍按敏感文件处理，不应提交。
 - 错误输出不得泄露凭据：子进程异常（`TimeoutExpired`/`CalledProcessError`）的 `str()` 内嵌完整 argv（含带凭据的代理 URL），必须渲染为固定本地化消息，不得直传 UI/日志/截图。
-- 自定义背景图仅限本地文件：拒绝 UNC/设备路径，避免加载背景触发 SMB 认证（NTLM-relay 面）。
+- 自定义背景图仅限本地文件：拒绝 UNC/设备路径，以及指向网络共享的 junction/symlink（含相对链接落到 UNC junction 的情况）。检查必须用 `FILE_FLAG_OPEN_REPARSE_POINT` 读重解析数据，不能靠 `os.path.isfile` / `open` 跟随，否则检查本身就会触发 SMB 认证（NTLM-relay 面）。OneDrive 占位文件是本地脱水，允许。
 - 渲染 config/备份提供的动态值（端口、方案名、历史、备份列表等）必须在渲染边界 HTML 转义，杜绝注入。
 - `esc_` 必须覆盖 `& < > " '` 五个字符：文本节点解析后语义不变，同时兼容未来的单引号属性/内联处理器。
 - `crash.log` 不是凭据通道：子进程异常只记类型；其他异常文本须遮蔽内嵌 `user:pass@` 并转义 CR/LF，不能让一条消息伪造出额外的日志行。

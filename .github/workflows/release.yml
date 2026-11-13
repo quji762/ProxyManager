@@ -96,11 +96,61 @@ jobs:
           }
           Write-Host "ProxyManager.exe size: $size bytes"
 
+      # package.bat is the only place that invokes ISCC, so local and CI
+      # installer arguments cannot drift. The onefile exe stays the input;
+      # the release publishes the portable copy and the per-user installer.
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
+          )
+          if ($candidates | Where-Object { Test-Path $_ }) { exit 0 }
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::choco is not on PATH and ISCC.exe was not found"
+            exit 1
+          }
+          # 3010 = success, reboot requested. The compiler is already usable.
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { exit $LASTEXITCODE }
+          exit 0
+
+      - name: Package installer and portable exe
+        run: package.bat
+        shell: cmd
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          foreach ($name in @("ProxyManager-portable.exe", "ProxyManager-setup.exe")) {
+            $path = Join-Path dist $name
+            if (!(Test-Path $path)) {
+              Write-Host "::error::$path not found"
+              exit 1
+            }
+            $size = (Get-Item $path).Length
+            if ($size -le 0) {
+              Write-Host "::error::$path is empty"
+              exit 1
+            }
+            Write-Host "$name size: $size bytes"
+          }
+
       - name: Generate SHA256SUMS
         shell: pwsh
         run: |
-          $hash = (Get-FileHash dist/ProxyManager.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  ProxyManager.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          $lines = @(
+            "ProxyManager-portable.exe",
+            "ProxyManager-setup.exe"
+          ) | ForEach-Object {
+            $hash = (Get-FileHash (Join-Path dist $_) -Algorithm SHA256).Hash.ToLower()
+            "$hash  $_"
+          }
+          $lines | Out-File -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
 
       # Dependency attestation: record the exact package set the EXE was built
@@ -115,8 +165,14 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
+          body: |
+            Two Windows builds of the same program. Neither file is code-signed, so Windows SmartScreen may warn the first time you open it. Compare each file with `SHA256SUMS.txt` before running it.
+
+            - **ProxyManager-setup.exe** — per-user installer. It does not ask for administrator rights, installs under `%LOCALAPPDATA%\Programs\ProxyManager`, and does not turn autostart on.
+            - **ProxyManager-portable.exe** — the same program as a single file. Settings still live in `%APPDATA%\ProxyManager`.
           files: |
-            dist/ProxyManager.exe
+            dist/ProxyManager-setup.exe
+            dist/ProxyManager-portable.exe
             dist/SHA256SUMS.txt
             dist/requirements-freeze.txt
           generate_release_notes: true

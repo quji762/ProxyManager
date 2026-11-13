@@ -51,9 +51,18 @@ WSL endpoints can target all user distributions or only the default distro; narr
 
 - Windows 10/11
 - WebView2 Runtime
-- Source development: Python 3.9+
+- Source development: Python 3.11+
 - WSL only for WSL endpoints
 - Git only for Git endpoints; npm/pip config files are edited directly and do not require those CLIs
+
+## Download
+
+GitHub Releases has two Windows builds of the same version:
+
+- `ProxyManager-setup.exe` — per-user installer. It does not ask for administrator rights and installs under `%LOCALAPPDATA%\Programs\ProxyManager`. It does not turn autostart on; that stays a switch inside the app.
+- `ProxyManager-portable.exe` — the same program as a single file. Settings still go to `%APPDATA%\ProxyManager`.
+
+The files are not code-signed. Windows SmartScreen may warn on first launch. Compare the file with `SHA256SUMS.txt` on the release before running it.
 
 ## Run from source
 
@@ -66,13 +75,13 @@ py -3.13 app.py
 
 Or run `start.bat`.
 
-Build the single-file executable with `build.bat`; build-only dependencies are kept separately from runtime dependencies.
+Build the single-file executable with `build.bat`. `package.bat` (Inno Setup 6) then writes `dist\ProxyManager-portable.exe` and `dist\ProxyManager-setup.exe`. Build-only dependencies are kept separately from runtime dependencies.
 
 ## Configuration and secrets
 
 Settings are stored in `%APPDATA%\ProxyManager\config.json`. Proxy passwords — including those saved in named presets and in config backups under `%APPDATA%\ProxyManager\backups\` — are protected with Windows DPAPI; save is refused if encryption fails rather than falling back to plaintext. DPAPI ties the ciphertext to your Windows user/machine, so a backup restored on another machine cannot decrypt the old password (the previous password is kept). Treat the config, its `.bak` and the backups folder as sensitive anyway.
 
-Credentials are also kept out of error output: subprocess failures are reported as fixed localized messages rather than the raw command line (which can embed a credentialed proxy URL). Custom background images are restricted to local files — UNC and device paths are rejected so loading a background cannot trigger SMB authentication.
+Credentials are also kept out of error output: subprocess failures are reported as fixed localized messages rather than the raw command line (which can embed a credentialed proxy URL). Custom background images are restricted to local files. UNC paths, device paths, and junctions or symlinks that resolve to a network share are rejected, and that check reads the reparse point without following it, so loading a background cannot trigger SMB authentication.
 
 ProxyManager tracks both the form values and the last values actually applied to endpoints. Do not collapse those concepts: typing a new host/port must not silently change what restoration logic believes was previously applied.
 
@@ -93,6 +102,10 @@ python -m pytest tests/ -q
 ```
 
 System-side write/restore rules, WSL behavior, DPAPI constraints and validation expectations are maintained in [AGENTS.md](./AGENTS.md). Important changes are recorded in [CHANGELOG.md](./CHANGELOG.md).
+
+## Security
+
+Do not paste `config.json`, its `.bak`, the backups folder, or a proxy URL that contains a password into an issue. Use **Copy diagnostics** in Settings; that summary has no host, userinfo, or proxy URL. Report a vulnerability through the repository Security tab (Advisories) rather than a public issue.
 
 ## License
 

@@ -123,17 +123,19 @@ def log_exception_once(key: str, prefix: str = "") -> None:
 
 
 def safe_error(e):
-    """User-facing rendering of an exception that never leaks a subprocess
-    argv. TimeoutExpired / CalledProcessError str() embeds the full command
-    line, which carries the proxy URL incl. credentials — toasting that
-    would expose the secret in the UI (and any screenshot/log). Map those to
-    a fixed localized message; other exceptions (winreg/OSError) carry no
-    argv and stringify safely."""
+    """User-facing rendering of an exception that never leaks a proxy secret.
+
+    TimeoutExpired / CalledProcessError str() embeds the full command line,
+    which carries the proxy URL incl. credentials — toasting that would
+    expose the secret in the UI (and any screenshot/log). Map those to a
+    fixed localized message. Other exceptions (winreg/OSError/URLError) have
+    no argv, but their text can still embed ``scheme://user:pass@``; redact
+    that userinfo before the string reaches the UI."""
     if isinstance(e, subprocess.TimeoutExpired):
         return LStr("errTimeout")
     if isinstance(e, subprocess.SubprocessError):
         return LStr("errOpFail")
-    return str(e)
+    return _URL_CRED_RE.sub(r"\1***@", str(e))
 
 
 user32 = ctypes.WinDLL("user32")
@@ -2627,4 +2629,7 @@ def restart_wsl():
                 last_err = "探活超时"
         return LStr("errRestartNoWsl", {"err": last_err or "?"})
     except Exception as e:
-        return str(e)
+        # TimeoutExpired stringifies to the full argv. This command has no
+        # proxy URL today; still render it through safe_error so a future
+        # argument cannot leak into the toast.
+        return safe_error(e)

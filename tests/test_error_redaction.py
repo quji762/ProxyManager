@@ -39,6 +39,13 @@ def test_safe_error_passes_through_non_subprocess():
     assert pm.safe_error(OSError("disk full")) == "disk full"
 
 
+def test_safe_error_redacts_userinfo_in_other_exceptions():
+    msg = pm.safe_error(OSError(f"connect failed for {CRED_URL}"))
+    assert SECRET not in msg
+    assert CRED_URL not in msg
+    assert "http://***@" in msg
+
+
 def test_set_git_proxy_windows_timeout_does_not_leak():
     def fake_run(cmd, **kw):
         if "--replace-all" in cmd:
@@ -131,6 +138,68 @@ def test_log_exception_redacts_embedded_url_credentials(tmp_path, monkeypatch):
     assert SECRET not in text
     assert CRED_URL not in text
     assert "http://***@" in text
+
+
+def test_curl_probe_timeout_does_not_leak():
+    """A curl timeout's argv contains -x <proxy-url>. The chip must not."""
+    from js_api import Api
+    api = Api()
+
+    def boom(cmd, **_kw):
+        raise subprocess.TimeoutExpired(cmd, 8)
+
+    with patch("js_api.subprocess.run", side_effect=boom):
+        r = api._curl_probe("curl", CRED_URL)
+    assert SECRET not in str(r)
+    assert CRED_URL not in str(r)
+    assert r.get("error_key") == "errTimeout"
+
+
+def test_wsl_proxy_probe_timeout_does_not_leak():
+    from js_api import Api
+    api = Api()
+
+    def boom(cmd, **_kw):
+        raise subprocess.TimeoutExpired(cmd, 25)
+
+    with patch("js_api.subprocess.run", side_effect=boom):
+        r = api._wsl_proxy_probe(CRED_URL, {"scheme": "http"})
+    assert SECRET not in str(r)
+    assert CRED_URL not in str(r)
+    assert r.get("error_key") == "errTimeout"
+
+
+def test_urllib_probe_redacts_embedded_proxy_url():
+    import time
+    import urllib.request
+
+    from js_api import Api
+    api = Api()
+
+    class _Opener:
+        def open(self, *_a, **_k):
+            raise OSError(f"proxy refused {CRED_URL}")
+
+    class _URLReq:
+        ProxyHandler = staticmethod(lambda _d: object())
+        build_opener = staticmethod(lambda _proxy: _Opener())
+        Request = urllib.request.Request
+
+    with patch("shutil.which", return_value=None):
+        r = api._proxy_probe(CRED_URL, {"scheme": "http"}, time, _URLReq)
+    assert SECRET not in str(r)
+    assert CRED_URL not in str(r)
+    assert "http://***@" in r.get("error", "")
+
+
+def test_restart_wsl_timeout_does_not_leak():
+    e = subprocess.TimeoutExpired(["wsl", "--shutdown", CRED_URL], 15)
+    with patch.object(pm.subprocess, "run", side_effect=e):
+        r = pm.restart_wsl()
+    assert isinstance(r, LStr)
+    assert r.key == "errTimeout"
+    assert SECRET not in str(r)
+    assert CRED_URL not in str(r)
 
 
 def test_log_exception_escapes_newlines(tmp_path, monkeypatch):
