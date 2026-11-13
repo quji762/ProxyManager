@@ -27,7 +27,7 @@ import proxy_manager as pm
 # site-packages would override this checkout (and a `pip install .` of this
 # tree) with that stale version. Source runs and PyInstaller builds both
 # execute this file, so the literal is the version either way.
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.0.0"
 
 # ── DPAPI helpers for password encryption ────────────────────────────────────
 _DPAPI_PREFIX = "DPAPI:"

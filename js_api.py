@@ -417,30 +417,6 @@ def _stash_decrypt(restore):
     return out
 
 
-def _trusted_release_url(candidate):
-    """True only for https://github.com/quji762/ProxyManager/... 
-
-    The cached html_url comes from the GitHub API response. Reject userinfo,
-    a non-https scheme, a different host, and any `.` / `..` path segment so
-    a tampered payload cannot walk the browser off this repository.
-    """
-    from urllib.parse import urlparse
-    if not candidate or any(c in candidate for c in "\\\r\n\t "):
-        return False
-    try:
-        parsed = urlparse(candidate)
-    except ValueError:
-        return False
-    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "github.com":
-        return False
-    if parsed.username or parsed.password:
-        return False
-    parts = [p for p in (parsed.path or "").split("/") if p]
-    if any(p in (".", "..") for p in parts):
-        return False
-    return parts[:2] == ["quji762", "ProxyManager"]
-
-
 class Api:
     """JS bridge. Every method returns JSON-serializable data and runs on its
     own thread (pywebview dispatches js_api calls off the UI thread), so the
@@ -2279,81 +2255,6 @@ class Api:
         if not recorded:
             return False
         return str(detected).strip() == str(recorded).strip()
-
-    # ── update check (one GitHub API call per UI session, on demand) ──
-    _GITHUB_LATEST = "https://api.github.com/repos/quji762/ProxyManager/releases/latest"
-    _UPDATE_CACHE = None  # class-level: (monotonic_time, payload)
-
-    def check_update(self):
-        """Compare APP_VERSION against the latest GitHub release tag.
-
-        Returns {status: "latest"|"update"|"error", ...}. No config flag:
-        the check only happens when the UI calls this (boot, once per
-        session), it never phones home in the background, and failures are
-        silent (offline machines see nothing)."""
-        import json as _json
-        import urllib.request as _urlreq
-
-        cls = type(self)
-        now = time.monotonic()
-        cached = cls._UPDATE_CACHE
-        if cached and now - cached[0] < 600:
-            return dict(cached[1])
-
-        def _result(status, **kw):
-            payload = {"status": status, **kw}
-            cls._UPDATE_CACHE = (now, payload)
-            return dict(payload)
-
-        try:
-            req = _urlreq.Request(
-                self._GITHUB_LATEST,
-                headers={"Accept": "application/vnd.github+json",
-                         "User-Agent": "ProxyManager-UpdateCheck"})
-            with _urlreq.urlopen(req, timeout=5) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
-            tag = str(data.get("tag_name") or "").strip()
-            if not tag:
-                return _result("error", error="empty tag")
-            latest = tag.lstrip("vV")
-            current = str(APP_VERSION).lstrip("vV")
-
-            def _parts(v):
-                out = []
-                for piece in v.split("."):
-                    try:
-                        out.append(int(piece))
-                    except ValueError:
-                        break
-                return tuple(out) or (0,)
-
-            if _parts(latest) > _parts(current):
-                return _result("update", latest=latest,
-                               url=str(data.get("html_url") or
-                                       "https://github.com/quji762/ProxyManager/releases"))
-            return _result("latest")
-        except Exception as e:
-            return _result("error", error=str(pm.safe_error(e))[:120])
-
-    def open_release_page(self):
-        """Open the GitHub releases page in the system browser.
-
-        Takes NO url argument on purpose: the only destinations are the
-        fixed repository releases URL and the html_url of the cached
-        check_update result, so a compromised/buggy frontend cannot turn
-        this into an open-redirect to an arbitrary site."""
-        import webbrowser
-        url = "https://github.com/quji762/ProxyManager/releases"
-        cached = type(self)._UPDATE_CACHE
-        if cached and isinstance(cached[1], dict):
-            candidate = str(cached[1].get("url") or "")
-            if _trusted_release_url(candidate):
-                url = candidate
-        try:
-            return bool(webbrowser.open(url))
-        except Exception:
-            pm.log_exception("open_release_page")
-            return False
 
     def get_proxy_url(self, host=None, port=None, scheme=None, user=None,
                       password=None):

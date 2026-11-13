@@ -4,7 +4,7 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 
 ## Unreleased
 
-## 1.4.0 - 2026-11-13
+## 1.0.0 - 2026-11-13
 
 ### Added
 - Windows releases publish two artifacts of the same build: a per-user installer (`ProxyManager-setup.exe`, no administrator prompt, no forced autostart) and a portable single file (`ProxyManager-portable.exe`). Both are unsigned; the release includes `SHA256SUMS.txt` (`installer.iss`, `package.bat`, `.github/workflows/release.yml`).
@@ -14,7 +14,6 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 - Tray menu now shows how many endpoints are currently enabled (derived from the applied record and persisted switches, never the form fields) and adds one-click **Enable all** / **Disable all**; both run on a background worker with balloon feedback so the tray never blocks (`tray_icon.py`).
 - A one-click **Test all** button probes every channel of the visible lane concurrently, painting each result as it arrives, with a 45 s watchdog and a short in-page history of recent results (kept in memory only — never written to `config.json`) (`ui/app.js`).
 - The Windows lane now shows a PAC caveat under the system-proxy row when an `AutoConfigURL` is registered: browsers may follow the PAC script, so the static proxy shown is not necessarily in effect. The hint is read-only and rendered as plain text (`ui/app.js`, `js_api.py`).
-- Settings gained a persistent update-status row (last check result, re-check button, and an **Open download page** button when an update exists). The download button opens only the fixed repository releases page or the cached release URL — it accepts no caller-supplied URL. The status is kept in memory only (`ui/app.js`, `js_api.py`).
 - **Named address presets**: save the current form (host / port / scheme / username / password) under a name and switch between whole setups with one click. Applying a preset reuses the port-switch migration, so only the endpoints currently enabled and managed by ProxyManager are re-applied and the `applied`/`restore` ownership semantics are unchanged. Preset passwords are DPAPI-encrypted on disk; the preset list never exposes the plaintext password (`config_store.py`, `js_api.py`, `ui/app.js`).
 - **Config backup and one-click restore**: snapshot the current configuration into a managed `backups/` folder (newest first, capped at 30, atomic writes) and restore it from Settings. Restore deliberately routes through `save_config`, which never accepts the ownership records (`restore`/`applied`/`wsl_written`) from caller data — so a backup brings back form fields and preferences but cannot resurrect a stale applied record or make quit-clear claim the user's current proxy. Endpoints are left as-is and re-enabled by the user. Backup names are validated and confined to the backups folder (no arbitrary path read/delete); the backed-up password stays DPAPI-encrypted (`config_store.py`, `js_api.py`, `ui/app.js`).
 - **Batch connectivity verdict**: after **Test all** settles (watchdog timeouts counted as failures), a toast reports `{ok}/{total} passed` — and `{fail} failed` when any channel failed — so the overall result is readable without scanning every chip. A **Clear** button beside the recent-results title empties the in-memory history for both lanes and appears only when the current lane has results (`ui/app.js`, `ui/index.html`).
@@ -62,9 +61,12 @@ Notable endpoint, restoration, security, and compatibility changes are recorded 
 - Concurrent same-process writes to one config file no longer truncate each other (the atomic-write temp name carries a uuid), and the clipboard helper times out instead of blocking a worker thread when the clipboard is busy (`proxy_manager.py`, `js_api.py`).
 - WSL Git/npm/pip atomic writes now resolve a symlinked dotfile (stow/chezmoi/dotbot) to its real target before the `mktemp` + `mv -f`, so the rename lands on the target and the user's symlink survives. Previously `mv -f` onto the link replaced `~/.npmrc` / `pip.conf` with a regular file and stranded the dotfile layout — the same reason the shell-block path writes THROUGH the file (`proxy_manager.py`).
 
+### Removed
+- The in-app update check. Settings no longer phones GitHub or opens a download page. The window still shows the running version; new builds are published on GitHub Releases.
+
 ### Security
 - A background path is rejected when any component is a junction or symlink whose target is a network share, including a relative symlink that lands on one. The reparse data is read without following the link, so the check itself does not authenticate to SMB. OneDrive placeholder files stay allowed (`js_api.py`).
-- The update check and the background file picker redact embedded `scheme://user:pass@` in exception text. A cached release URL is opened only when it is `https://github.com/quji762/ProxyManager/...` with no userinfo and no `.` or `..` path segment (`js_api.py`).
+- The background file picker redacts embedded `scheme://user:pass@` in exception text (`js_api.py`).
 - Connectivity probes no longer return raw exception text. A curl or WSL `TimeoutExpired` stringifies to the full command line, including the proxy URL and password; those failures now use the same fixed localized message as the other subprocess paths. Other probe exceptions still have any embedded `scheme://user:pass@` redacted before they reach the test chip (`js_api.py`, `proxy_manager.py`).
 - Subprocess errors no longer leak credentials: `TimeoutExpired`/`CalledProcessError` embed the full argv (including credentialed proxy URLs) in their `str()`. These are now rendered as fixed localized messages across the WSL/Git/npm/pip error paths, so passwords cannot reach the UI, screenshots or logs (`js_api.py`, `messages.py`).
 - `crash.log` is hardened against log injection and embedded secrets: a non-subprocess message that embeds `scheme://user:pass@` has its userinfo redacted, and CR/LF are escaped so an exception message cannot forge an extra log record (`proxy_manager.py`).

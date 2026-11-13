@@ -1,5 +1,4 @@
-"""Static (no JS runtime) contract checks for the PAC hint and the
-persistent update-status row.
+"""Static (no JS runtime) contract checks for the PAC hint.
 
 CI runs ruff + pytest only — no JS harness — so ui/app.js / ui/i18n.js /
 ui/index.html are parsed with brace/quote-aware scanners, like
@@ -10,9 +9,8 @@ Contracts:
     and must never join the 8-probe render batch (that count is pinned by
     tests/test_ui_render_batching.py);
   * the PAC URL is registry data and reaches the DOM via textContent only;
-  * the update status lives in memory (never config.json) and the download
-    button calls open_release_page with NO url argument;
-  * all new i18n keys exist in both language tables, without duplicates.
+  * the settings page has no in-app update check;
+  * pacActive exists in both language tables, without duplicates.
 """
 
 import re
@@ -27,9 +25,7 @@ APP_JS = UI_DIR / "app.js"
 I18N_JS = UI_DIR / "i18n.js"
 INDEX_HTML = UI_DIR / "index.html"
 
-NEW_KEYS = ("updateTitle", "updateUnknown", "updateChecking", "updateLatest",
-            "updateAvailStatus", "updateError", "updateRecheck",
-            "updateDownload", "pacActive")
+NEW_KEYS = ("pacActive",)
 
 
 def _read(path):
@@ -192,73 +188,13 @@ def test_render_pac_hint_uses_text_content_only():
         "renderPacHint must hide the hint when no PAC is registered")
 
 
-# ── update row: elements, memory-only state, no-url download ────────────────
-def test_update_row_elements_exist():
+def test_settings_has_no_update_check():
     html = _read(INDEX_HTML)
-    for el_id in ("updateStatus", "btnUpdateCheck", "btnUpdateDl"):
-        assert f'id="{el_id}"' in html, f"index.html lacks #{el_id}"
-    m = re.search(r'<button[^>]*id="btnUpdateDl"[^>]*>', html)
-    assert m and "hidden" in m.group(0), (
-        "the download button must start hidden (only shown on 'update')")
-
-
-def test_update_status_is_memory_only():
-    """updateInfo feeds a status row; persisting it would put a transient
-    network result into config.json."""
     app = _read(APP_JS)
-    start = app.index("let updateChecked")
-    end = app.index("async function doUpdateCheck")
-    end = app.index("\n}", end) + 2
-    region = app[start:end]
-    for banned in ("save_config", "persistSoon", "cfg."):
-        assert banned not in region, (
-            f"the update-status code persists state via {banned}")
-    for header in (r"function checkUpdateOnce\s*\(",
-                   r"function renderUpdateStatus\s*\(",
-                   r"async function doUpdateCheck\s*\("):
-        fn = _js_block(app, header)
-        for banned in ("save_config", "persistSoon", "cfg."):
-            assert banned not in fn, f"{header} persists state via {banned}"
-
-
-def test_update_status_maps_every_backend_status():
-    fn = _js_block(_read(APP_JS), r"function renderUpdateStatus\s*\(")
-    for key in ("updateUnknown", "updateLatest", "updateAvailStatus",
-                "updateError"):
-        assert f't("{key}"' in fn, f"renderUpdateStatus never shows {key}"
-    assert 'r.status === "update"' in fn, (
-        "the download button visibility must hinge on status === 'update'")
-
-
-def test_do_update_check_guards_and_recovers():
-    fn = _js_block(_read(APP_JS), r"async function doUpdateCheck\s*\(")
-    assert "btn.disabled" in fn, "doUpdateCheck must guard re-entrancy"
-    assert 't("updateChecking")' in fn, "no busy feedback while checking"
-    assert "catch" in fn, "a bridge failure must not leave the row stuck"
-    assert fn.count("btn.disabled = false") >= 1, (
-        "the button must be re-enabled after the check")
-
-
-def test_download_button_calls_open_release_page_without_url():
-    app = _read(APP_JS)
-    m = re.search(r'\$\("btnUpdateDl"\)\.onclick\s*=[^;]*;', app)
-    assert m, "btnUpdateDl is not wired"
-    wiring = m.group(0)
-    assert 'api.call("open_release_page")' in wiring, (
-        "btnUpdateDl must call open_release_page")
-    assert 'api.call("open_release_page",' not in wiring, (
-        "btnUpdateDl must not pass a URL — the backend takes none")
-
-
-def test_settings_open_and_lang_change_rerender_status():
-    app = _read(APP_JS)
-    settings = _js_block(app, r"async function openSettings\s*\(")
-    assert "renderUpdateStatus()" in settings, (
-        "opening settings must show the current update status")
-    lang = app[app.index('$("inLang").addEventListener'):]
-    lang = lang[:lang.index("\n});") + 4]
-    assert "renderUpdateStatus()" in lang and "renderPacHint()" in lang, (
-        "a language switch must re-render both dynamic texts")
+    for needle in ("updateStatus", "btnUpdateCheck", "btnUpdateDl",
+                   "check_update", "open_release_page", "renderUpdateStatus"):
+        assert needle not in html
+        assert needle not in app
 
 
 # ── i18n: both tables, no duplicates, placeholders intact ───────────────────
@@ -272,5 +208,3 @@ def test_new_keys_present_and_tables_duplicate_free(lang):
     for key in NEW_KEYS:
         assert key in table, f"{lang} table is missing {key}"
     assert "{url}" in table["pacActive"], f"{lang}.pacActive lost {{url}}"
-    assert "{latest}" in table["updateAvailStatus"], (
-        f"{lang}.updateAvailStatus lost {{latest}}")

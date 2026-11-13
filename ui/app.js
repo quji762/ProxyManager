@@ -37,7 +37,7 @@ const api = (() => {
         mode: mockState.mode, pin: mockState.pin, ports: mockState.ports,
         autostart: mockState.autostart, bg_path: mockState.bg_path, bg_dim: mockState.bg_dim, card_alpha: mockState.card_alpha,
         speed_full: 5, quit_clear: false, wsl_all_distros: true, close_hint_done: false,
-        version: "1.4.0", config_load: "ok",
+        version: "1.0.0", config_load: "ok",
         applied_host: mockState.appliedHost, applied_port: mockState.appliedPort,
         applied_scheme: mockState.appliedScheme, applied_user: mockState.appliedUser,
         applied_password: mockState.appliedPassword, wsl_written: mockState.wslWritten };
@@ -140,8 +140,6 @@ const api = (() => {
         const pw = encodeURIComponent(args[4] || "");
         return { ok: true, url: `${args[2] || "http"}://${u ? `${u}${pw ? ":" + pw : ""}@` : ""}${host}:${port}` };
       }
-      case "check_update": return { status: "latest" };
-      case "open_release_page": return true;
       case "list_presets": return mockState.presets.map(p => ({
         name: p.name, host: p.host, port: p.port, scheme: p.scheme,
         user: p.user, has_password: !!p.password }));
@@ -1250,7 +1248,6 @@ async function openSettings() {
   setTgl($("tglAuto"), !!c.autostart);
   setTgl($("tglQuitClear"), !!c.quit_clear);
   setTgl($("tglWslAll"), c.wsl_all_distros !== false);
-  renderUpdateStatus();
   renderBackupList();
   if (c.bg_path) {
     const bg = await api.call("get_background");
@@ -1422,8 +1419,6 @@ $("btnTheme").onclick = toggleTheme;
 $("btnPin").onclick = togglePin;
 $("btnSettings").onclick = openSettings;
 $("settingsClose").onclick = closeSettings;
-$("btnUpdateCheck").onclick = doUpdateCheck;
-$("btnUpdateDl").onclick = () => { api.call("open_release_page").catch(() => {}); };
 $("btnMin").onclick = () => api.call("window_control", "minimize");
 $("btnMax").onclick = toggleMaximize;
 $("btnClose").onclick = async () => {
@@ -1792,7 +1787,6 @@ $("tglWslAll").onclick = async () => {
 if ($("inLang")) {
   $("inLang").addEventListener("change", () => {
     setLang($("inLang").value);
-    renderUpdateStatus();
     renderPacHint();
     api.call("save_config", { lang });
     toast(t("langSet"), "ok");
@@ -1873,48 +1867,6 @@ async function boot() {
   // but the dash (`–/4`) is only a brief placeholder.
   probeWslCounts();
   startSpeedLoop();
-  checkUpdateOnce();
-}
-
-/* One update check per UI session, fired after boot. The backend call has a
-   5s timeout and the result is cached there for 10 min; offline users see
-   nothing (the "error" status is silent by design). The result is also kept
-   in memory for the settings page's persistent status row — never persisted
-   to config.json. */
-let updateChecked = false;
-let updateInfo = null;
-function checkUpdateOnce() {
-  if (updateChecked) return;
-  updateChecked = true;
-  api.call("check_update").then((r) => {
-    updateInfo = r || null;
-    renderUpdateStatus();
-    if (r && r.status === "update" && r.latest)
-      toast(t("updateAvail", { latest: r.latest }), "");
-  }).catch(() => {});
-}
-function renderUpdateStatus() {
-  const el = $("updateStatus"), dl = $("btnUpdateDl");
-  if (!el) return;
-  const r = updateInfo;
-  if (!r) el.textContent = t("updateUnknown");
-  else if (r.status === "latest") el.textContent = t("updateLatest");
-  else if (r.status === "update") el.textContent = t("updateAvailStatus", { latest: r.latest || "" });
-  else el.textContent = t("updateError");
-  if (dl) dl.hidden = !(r && r.status === "update");
-}
-async function doUpdateCheck() {
-  const btn = $("btnUpdateCheck"), el = $("updateStatus");
-  if (btn && btn.disabled) return;
-  if (btn) btn.disabled = true;
-  if (el) el.textContent = t("updateChecking");
-  try {
-    updateInfo = await api.call("check_update");
-  } catch (_) {
-    updateInfo = { status: "error" };
-  }
-  renderUpdateStatus();
-  if (btn) btn.disabled = false;
 }
 
 function probeWslCounts() {

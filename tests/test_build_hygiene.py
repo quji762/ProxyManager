@@ -63,7 +63,7 @@ def test_gitignore_covers_sensitive_and_build_artifacts():
 def test_app_version_is_semver():
     import config_store
     assert re.fullmatch(r"\d+\.\d+\.\d+", config_store.APP_VERSION), (
-        "APP_VERSION must be x.y.z so the update-check comparison stays sane")
+        "APP_VERSION must be x.y.z so a release tag can match it")
 
 
 def test_app_version_is_the_source_literal():
